@@ -45,6 +45,7 @@ Thumbs.db
 # Runtime local data
 data/datasets/
 data/json_store/
+docs
 
 # Large model binaries and generated training outputs
 data/models/*.pt
