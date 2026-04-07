@@ -13,6 +13,7 @@ ENV/
 # Environment / local config
 .env
 .env.*
+.qc
 !.env.example
 
 # Test / coverage / type-check caches

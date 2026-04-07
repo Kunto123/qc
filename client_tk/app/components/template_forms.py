@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 from client_tk.app.components.roi_picker_canvas import RoiPickerCanvas
-from client_tk.app.components.scrollable_frame import ScrollableFrame
+from client_tk.app.components.scrollable_frame import AutoHideScrollbar, ScrollableFrame
 
 
 def _float_or_none(value: str) -> float | None:
@@ -28,9 +28,33 @@ def _int_or_none(value: str) -> int | None:
 
 class JsonEditor(ttk.LabelFrame):
     def __init__(self, master, title: str, initial_payload: dict | None = None):
-        super().__init__(master, text=title)
-        self.text = Text(self, height=18, width=60)
-        self.text.pack(fill="both", expand=True, padx=8, pady=8)
+        super().__init__(master, text=title, padding=8)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        shell = ttk.Frame(self)
+        shell.grid(row=0, column=0, sticky="nsew")
+        shell.columnconfigure(0, weight=1)
+        shell.rowconfigure(0, weight=1)
+
+        self.text = Text(
+            shell,
+            height=18,
+            width=60,
+            wrap="none",
+            undo=True,
+            font=("Consolas", 10),
+            padx=8,
+            pady=8,
+            borderwidth=0,
+        )
+        y_scroll = AutoHideScrollbar(shell, orient="vertical", command=self.text.yview)
+        x_scroll = AutoHideScrollbar(shell, orient="horizontal", command=self.text.xview)
+        self.text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+        self.text.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
         if initial_payload is not None:
             self.set_payload(initial_payload)
 
@@ -49,22 +73,36 @@ class LabeledValuePanel(ttk.LabelFrame):
     def __init__(self, master, title: str, fields: list[tuple[str, str]], *, columns: int = 1):
         super().__init__(master, text=title, padding=10)
         self._labels: dict[str, ttk.Label] = {}
-        columns = max(1, columns)
-        for column in range(columns * 2):
-            self.columnconfigure(column, weight=1 if column % 2 else 0)
+        self._n_columns = max(1, columns)
+        columns = self._n_columns
+        for col in range(columns * 2):
+            # label columns: no weight; value columns: weight=1 so they stretch
+            self.columnconfigure(col, weight=1 if col % 2 else 0)
         for index, (key, label) in enumerate(fields):
             row = index // columns
-            column = (index % columns) * 2
+            col = (index % columns) * 2
             ttk.Label(self, text=f"{label}:", font=("Segoe UI", 9, "bold")).grid(
                 row=row,
-                column=column,
+                column=col,
                 sticky="w",
                 padx=(0, 8),
                 pady=3,
             )
-            value = ttk.Label(self, text="-", wraplength=260, justify="left")
-            value.grid(row=row, column=column + 1, sticky="w", pady=3)
+            value = ttk.Label(self, text="-", wraplength=300, justify="left")
+            value.grid(row=row, column=col + 1, sticky="ew", pady=3)
             self._labels[key] = value
+
+        # Dynamically recompute wraplength when panel is resized
+        self.bind("<Configure>", self._on_resize, add="+")
+
+    def _on_resize(self, event) -> None:
+        total = event.width - 20  # rough inner padding
+        if total < 80:
+            return
+        # Estimate: label columns are ~85 px each; remaining split across value cols
+        per_value = max(80, (total - 85 * self._n_columns) // self._n_columns - 8)
+        for widget in self._labels.values():
+            widget.configure(wraplength=per_value)
 
     def set_values(self, mapping: dict[str, object]) -> None:
         for key, widget in self._labels.items():

@@ -4,6 +4,42 @@ import tkinter as tk
 from tkinter import ttk
 
 
+class AutoHideScrollbar(ttk.Scrollbar):
+    def __init__(self, master, **kwargs):
+        super().__init__(master, **kwargs)
+        self._grid_kwargs: dict | None = None
+        self._pack_kwargs: dict | None = None
+
+    def grid(self, **kwargs):
+        self._grid_kwargs = dict(kwargs)
+        self._pack_kwargs = None
+        return super().grid(**kwargs)
+
+    def pack(self, **kwargs):
+        self._pack_kwargs = dict(kwargs)
+        self._grid_kwargs = None
+        return super().pack(**kwargs)
+
+    def set(self, first, last):
+        first_f = float(first)
+        last_f = float(last)
+        fully_visible = first_f <= 0.0 and last_f >= 1.0
+        manager = self.winfo_manager()
+
+        if fully_visible:
+            if manager == "grid":
+                self.grid_remove()
+            elif manager == "pack":
+                self.pack_forget()
+        elif not manager:
+            if self._grid_kwargs is not None:
+                super().grid(**self._grid_kwargs)
+            elif self._pack_kwargs is not None:
+                super().pack(**self._pack_kwargs)
+
+        super().set(first, last)
+
+
 class ScrollableFrame(ttk.Frame):
     def __init__(self, master, *, padding: int = 0):
         super().__init__(master, padding=padding)
@@ -14,7 +50,7 @@ class ScrollableFrame(ttk.Frame):
         self.columnconfigure(0, weight=1)
 
         self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, background=background)
-        self.v_scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.v_scrollbar = AutoHideScrollbar(self, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.v_scrollbar.set)
 
         self.body = ttk.Frame(self)
@@ -36,12 +72,14 @@ class ScrollableFrame(ttk.Frame):
         self.canvas.itemconfigure(self._window_id, width=event.width)
 
     def _on_mousewheel(self, event) -> None:
-        if event.delta == 0:
+        if not self.v_scrollbar.winfo_manager() or event.delta == 0:
             return
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def _on_mousewheel_linux_up(self, _event) -> None:
-        self.canvas.yview_scroll(-1, "units")
+        if self.v_scrollbar.winfo_manager():
+            self.canvas.yview_scroll(-1, "units")
 
     def _on_mousewheel_linux_down(self, _event) -> None:
-        self.canvas.yview_scroll(1, "units")
+        if self.v_scrollbar.winfo_manager():
+            self.canvas.yview_scroll(1, "units")
