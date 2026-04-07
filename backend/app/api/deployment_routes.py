@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, g, jsonify, request
 
 from backend.app.core.container import deployments_repo, templates_repo
 from backend.app.core.http import require_auth, require_roles
@@ -60,3 +60,19 @@ def deactivate_deployment(deployment_id: int):
     if not ok:
         return jsonify({"error": "Deployment not found"}), 404
     return jsonify({"id": deployment_id, "is_active": False})
+
+
+@deployment_blueprint.post("/<int:deployment_id>/rollback")
+@require_roles(UserRole.ADMIN)
+def rollback_deployment(deployment_id: int):
+    actor = getattr(g, "current_user", None)
+    try:
+        record = deployments_repo.rollback(
+            deployment_id,
+            rolled_back_by=actor.id if actor else None,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+    return jsonify(record), 201

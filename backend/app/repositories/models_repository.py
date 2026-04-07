@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,6 +8,31 @@ from typing import Any
 
 from backend.app.core.config import DEFAULT_STICKER_MODEL_META_PATH, DEFAULT_STICKER_MODEL_PATH
 from backend.app.repositories.base_json import JsonRepository
+
+# Lifecycle: draft → validated → canary → production → retired
+# Any state → retired; never go backwards (except re-draft after retired)
+_MODEL_TRANSITIONS: dict[str, set[str]] = {
+    "draft":      {"validated", "retired"},
+    "validated":  {"canary", "draft", "retired"},
+    "canary":     {"production", "validated", "retired"},
+    "production": {"retired"},
+    "retired":    {"draft"},
+}
+_ALL_MODEL_STATES = set(_MODEL_TRANSITIONS)
+
+
+def _file_sha256(path: str) -> str | None:
+    try:
+        p = Path(path)
+        if not p.exists():
+            return None
+        h = hashlib.sha256()
+        with p.open("rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _load_default_meta() -> dict[str, Any]:
@@ -37,6 +63,9 @@ def _default_models_payload() -> dict[str, Any]:
                 "architecture_family": meta.get("architecture_family") or "yolov5",
                 "architecture_variant": meta.get("architecture_variant") or "unknown",
                 "class_names": list(meta.get("class_names") or []),
+                "lifecycle_status": "production",
+                "checksum_sha256": _file_sha256(DEFAULT_STICKER_MODEL_PATH),
+                "provenance": {"source_dataset_id": None, "training_job_id": None},
                 "created_at": now,
             }
         ]
@@ -72,6 +101,8 @@ class ModelsRepository(JsonRepository):
         class_names: list[str] | None = None,
         architecture_family: str | None = None,
         architecture_variant: str | None = None,
+        source_dataset_id: str | None = None,
+        training_job_id: str | None = None,
     ) -> dict:
         payload = self.load()
         items = payload["models"]
@@ -86,8 +117,44 @@ class ModelsRepository(JsonRepository):
             "class_names": list(class_names or []),
             "architecture_family": architecture_family,
             "architecture_variant": architecture_variant,
+            "lifecycle_status": "draft",
+            "checksum_sha256": _file_sha256(path),
+            "provenance": {
+                "source_dataset_id": source_dataset_id,
+                "training_job_id": training_job_id,
+            },
             "created_at": datetime.now(UTC).isoformat(),
         }
         items.append(record)
         self.save(payload)
         return record
+
+    def transition_lifecycle(
+        self,
+        model_id: int,
+        new_status: str,
+        *,
+        actor_id: int | None = None,
+        note: str | None = None,
+    ) -> dict:
+        if new_status not in _ALL_MODEL_STATES:
+            raise ValueError(f"Invalid lifecycle status '{new_status}'. Must be one of: {sorted(_ALL_MODEL_STATES)}")
+        payload = self.load()
+        for item in payload["models"]:
+            if int(item["id"]) != int(model_id):
+                continue
+            current = item.get("lifecycle_status", "draft")
+            allowed = _MODEL_TRANSITIONS.get(current, set())
+            if new_status not in allowed:
+                raise ValueError(
+                    f"Cannot transition model {model_id} from '{current}' to '{new_status}'. "
+                    f"Allowed: {sorted(allowed) or 'none'}"
+                )
+            now = datetime.now(UTC).isoformat()
+            item["lifecycle_status"] = new_status
+            item["updated_at"] = now
+            if note:
+                item.setdefault("lifecycle_notes", []).append({"status": new_status, "note": note, "at": now, "by": actor_id})
+            self.save(payload)
+            return dict(item)
+        raise ValueError(f"Model {model_id} not found.")

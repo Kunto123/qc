@@ -177,6 +177,57 @@ def update_user(user_id: int):
     return jsonify(record)
 
 
+@auth_blueprint.post("/users/<int:user_id>/role")
+@require_roles(UserRole.ADMIN)
+def change_user_role(user_id: int):
+    payload = request.get_json(force=True) or {}
+    new_role = str(payload.get("role") or "").strip()
+    if not new_role:
+        return jsonify({"error": "role is required"}), 400
+    try:
+        record = users_repo.set_role(user_id, new_role)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+    _try_audit(
+        "role_changed",
+        user_id=user_id,
+        username=record.get("username"),
+        actor_id=g.current_user.id,
+        actor_username=g.current_user.username,
+        ip_address=_client_ip(),
+        details=f"new_role={new_role}",
+    )
+    return jsonify(record)
+
+
+@auth_blueprint.post("/users/<int:user_id>/reset-password")
+@require_roles(UserRole.ADMIN)
+def reset_user_password(user_id: int):
+    payload = request.get_json(force=True) or {}
+    new_password = str(payload.get("password") or "").strip()
+    if len(new_password) < 6:
+        return jsonify({"error": "password must be at least 6 characters"}), 400
+    try:
+        record = users_repo.set_password(user_id, new_password)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+    # Revoke existing sessions so the user must re-authenticate
+    token_store.revoke_user(user_id)
+    _try_audit(
+        "password_reset",
+        user_id=user_id,
+        username=record.get("username"),
+        actor_id=g.current_user.id,
+        actor_username=g.current_user.username,
+        ip_address=_client_ip(),
+    )
+    return jsonify({"ok": True, "user_id": user_id, "sessions_revoked": True})
+
+
 @auth_blueprint.post("/users/<int:user_id>/revoke-sessions")
 @require_roles(UserRole.ADMIN)
 def revoke_user_sessions(user_id: int):

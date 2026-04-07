@@ -7,6 +7,17 @@ from backend.app.core.config import DEFAULT_STICKER_MODEL_META_PATH, DEFAULT_STI
 from backend.app.repositories.base_json import JsonRepository
 from shared.contracts.templates import InspectionTemplate, template_from_dict
 
+# Valid lifecycle states and the allowed forward transitions.
+# "retired" can be reached from any state.
+_LIFECYCLE_TRANSITIONS: dict[str, set[str]] = {
+    "draft":     {"review", "retired"},
+    "review":    {"approved", "draft", "retired"},
+    "approved":  {"published", "review", "retired"},
+    "published": {"retired"},
+    "retired":   set(),
+}
+_ALL_LIFECYCLE_STATES = set(_LIFECYCLE_TRANSITIONS)
+
 
 def _sample_template() -> dict[str, Any]:
     now = datetime.now(UTC).isoformat()
@@ -17,6 +28,7 @@ def _sample_template() -> dict[str, Any]:
                 "name": "QC Line A",
                 "description": "Default sample template for operator flow.",
                 "is_active": True,
+                "lifecycle_status": "published",
                 "current_version_id": 1,
                 "created_at": now,
                 "updated_at": now,
@@ -25,6 +37,9 @@ def _sample_template() -> dict[str, Any]:
                         "version_id": 1,
                         "version_number": 1,
                         "created_at": now,
+                        "approved_by": None,
+                        "approved_at": None,
+                        "change_note": "Initial version",
                         "template": {
                             "id": 1,
                             "version_id": 1,
@@ -119,6 +134,7 @@ class TemplatesRepository(JsonRepository):
                     "name": template["name"],
                     "description": template.get("description"),
                     "is_active": bool(template.get("is_active", True)),
+                    "lifecycle_status": template.get("lifecycle_status", "draft"),
                     "created_at": template.get("created_at"),
                     "updated_at": template.get("updated_at"),
                     "version_id": template.get("current_version_id"),
@@ -169,6 +185,7 @@ class TemplatesRepository(JsonRepository):
             or [0]
         ) + 1
         now = datetime.now(UTC).isoformat()
+        change_note = str(payload.get("change_note") or "").strip() or "Initial version"
         template_payload = self._normalize_template_payload(
             {
                 **dict(payload),
@@ -183,6 +200,7 @@ class TemplatesRepository(JsonRepository):
             "name": template_payload["name"],
             "description": template_payload.get("description", ""),
             "is_active": bool(template_payload.get("is_active", True)),
+            "lifecycle_status": "draft",
             "current_version_id": version_id,
             "created_at": now,
             "updated_at": now,
@@ -191,6 +209,9 @@ class TemplatesRepository(JsonRepository):
                     "version_id": version_id,
                     "version_number": 1,
                     "created_at": now,
+                    "approved_by": None,
+                    "approved_at": None,
+                    "change_note": change_note,
                     "template": template_payload,
                 }
             ],
@@ -207,6 +228,7 @@ class TemplatesRepository(JsonRepository):
             or [0]
         ) + 1
         now = datetime.now(UTC).isoformat()
+        change_note = str(payload.get("change_note") or "").strip() or None
         for item in templates:
             if int(item["id"]) != int(template_id):
                 continue
@@ -226,16 +248,107 @@ class TemplatesRepository(JsonRepository):
                     "version_id": version_id,
                     "version_number": version_number,
                     "created_at": now,
+                    "approved_by": None,
+                    "approved_at": None,
+                    "change_note": change_note,
                     "template": template_payload,
                 }
             )
             item["name"] = template_payload["name"]
             item["description"] = template_payload.get("description", "")
             item["is_active"] = bool(template_payload.get("is_active", item.get("is_active", True)))
+            item["lifecycle_status"] = "draft"  # new version resets to draft
             item["current_version_id"] = version_id
             item["updated_at"] = now
             self.save(store)
             return template_payload
+        raise ValueError("Template not found.")
+
+    def list_versions(self, template_id: int) -> list[dict[str, Any]]:
+        template = self.get_template(template_id)
+        if not template:
+            raise ValueError("Template not found.")
+        return [
+            {
+                "version_id": v["version_id"],
+                "version_number": v["version_number"],
+                "created_at": v.get("created_at"),
+                "approved_by": v.get("approved_by"),
+                "approved_at": v.get("approved_at"),
+                "change_note": v.get("change_note"),
+                "is_current": v["version_id"] == template.get("current_version_id"),
+            }
+            for v in (template.get("versions") or [])
+        ]
+
+    def transition_lifecycle(
+        self,
+        template_id: int,
+        new_status: str,
+        *,
+        actor_id: int | None = None,
+        actor_username: str | None = None,
+        change_note: str | None = None,
+    ) -> dict[str, Any]:
+        if new_status not in _ALL_LIFECYCLE_STATES:
+            raise ValueError(f"Invalid lifecycle status '{new_status}'. Must be one of: {sorted(_ALL_LIFECYCLE_STATES)}")
+        store = self._payload()
+        for item in store["templates"]:
+            if int(item["id"]) != int(template_id):
+                continue
+            current = item.get("lifecycle_status", "draft")
+            allowed = _LIFECYCLE_TRANSITIONS.get(current, set())
+            if new_status not in allowed:
+                raise ValueError(
+                    f"Cannot transition from '{current}' to '{new_status}'. "
+                    f"Allowed transitions: {sorted(allowed) or 'none'}"
+                )
+            now = datetime.now(UTC).isoformat()
+            item["lifecycle_status"] = new_status
+            item["updated_at"] = now
+            # Stamp approval metadata on the current version when approving/publishing
+            if new_status in {"approved", "published"} and actor_id is not None:
+                for version in item.get("versions") or []:
+                    if version["version_id"] == item.get("current_version_id"):
+                        version["approved_by"] = actor_id
+                        version["approved_at"] = now
+                        if change_note:
+                            version["change_note"] = change_note
+                        break
+            self.save(store)
+            return {
+                "id": template_id,
+                "lifecycle_status": new_status,
+                "updated_at": now,
+                "approved_by": actor_id,
+                "actor_username": actor_username,
+            }
+        raise ValueError("Template not found.")
+
+    def rollback_version(self, template_id: int, version_id: int) -> dict[str, Any]:
+        """Set current_version_id to a previous version and reset lifecycle to 'draft'."""
+        store = self._payload()
+        for item in store["templates"]:
+            if int(item["id"]) != int(template_id):
+                continue
+            version = next(
+                (v for v in (item.get("versions") or []) if int(v["version_id"]) == int(version_id)),
+                None,
+            )
+            if not version:
+                raise ValueError(f"Version {version_id} not found for template {template_id}.")
+            now = datetime.now(UTC).isoformat()
+            item["current_version_id"] = int(version_id)
+            item["lifecycle_status"] = "draft"
+            item["updated_at"] = now
+            self.save(store)
+            return {
+                "id": template_id,
+                "current_version_id": int(version_id),
+                "version_number": version["version_number"],
+                "lifecycle_status": "draft",
+                "updated_at": now,
+            }
         raise ValueError("Template not found.")
 
     def delete_template(self, template_id: int) -> bool:

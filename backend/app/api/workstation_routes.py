@@ -3,10 +3,10 @@ from __future__ import annotations
 import base64
 from datetime import UTC, datetime
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, g, jsonify, request
 
 from backend.app.core.config import MODELS_DIR
-from backend.app.core.container import datasets_repo, models_repo, training_service
+from backend.app.core.container import augment_repo, datasets_repo, models_repo, token_store, training_service, workstation_registry_repo
 from backend.app.core.http import require_auth, require_roles
 from shared.contracts.enums import UserRole
 
@@ -86,31 +86,51 @@ def save_annotation(dataset_id: str, image_name: str):
 @workstation_blueprint.get("/augment/jobs")
 @require_auth
 def list_augment_jobs():
-    return jsonify(
-        [
-            {
-                "id": "augment-demo-1",
-                "dataset_id": "demo",
-                "status": "completed",
-                "created_at": datetime.now(UTC).isoformat(),
-            }
-        ]
-    )
+    return jsonify(augment_repo.list_jobs())
+
+
+@workstation_blueprint.get("/augment/jobs/<job_id>")
+@require_auth
+def get_augment_job(job_id: str):
+    job = augment_repo.get_job(job_id)
+    if job is None:
+        return jsonify({"error": "Augment job not found"}), 404
+    return jsonify(job)
 
 
 @workstation_blueprint.post("/augment/jobs")
 @require_roles(UserRole.ADMIN, UserRole.ENGINEER)
 def create_augment_job():
     payload = request.get_json(force=True) or {}
-    return jsonify(
-        {
-            "id": f"augment-{datetime.now(UTC).strftime('%H%M%S')}",
-            "dataset_id": payload.get("dataset_id"),
-            "status": "completed",
-            "created_at": datetime.now(UTC).isoformat(),
-            "note": "Augmentation is scaffolded as a completed metadata job in this MVP.",
-        }
-    ), 201
+    dataset_id = str(payload.get("dataset_id") or "").strip()
+    if not dataset_id:
+        return jsonify({"error": "dataset_id is required"}), 400
+    if not datasets_repo.get_dataset(dataset_id):
+        return jsonify({"error": "Dataset not found"}), 404
+
+    raw_transforms = payload.get("transforms")
+    transforms: list[str] = list(raw_transforms) if isinstance(raw_transforms, list) else ["flip_h", "brightness", "blur"]
+    multiplier = max(1, min(10, int(payload.get("multiplier") or 2)))
+
+    job = augment_repo.create_job(
+        dataset_id,
+        transforms=transforms,
+        multiplier=multiplier,
+        params=dict(payload),
+    )
+    return jsonify(job), 201
+
+
+@workstation_blueprint.post("/augment/jobs/<job_id>/cancel")
+@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+def cancel_augment_job(job_id: str):
+    try:
+        result = augment_repo.cancel_job(job_id)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+    return jsonify(result)
 
 
 @workstation_blueprint.get("/train/jobs")
@@ -128,6 +148,15 @@ def create_training_job():
     if not dataset_id:
         return jsonify({"error": "dataset_id is required"}), 400
     return jsonify(training_service.create_job(dataset_id, base_model, dict(payload))), 201
+
+
+@workstation_blueprint.get("/train/jobs/<job_id>")
+@require_auth
+def get_training_job(job_id: str):
+    job = training_service.get_job(job_id)
+    if job is None:
+        return jsonify({"error": "Training job not found"}), 404
+    return jsonify(job)
 
 
 @workstation_blueprint.post("/train/jobs/<job_id>/cancel")
@@ -206,3 +235,78 @@ def create_model():
             architecture_variant=str(payload.get("architecture_variant") or "").strip() or None,
         )
     ), 201
+
+
+@workstation_blueprint.post("/models/<int:model_id>/transition")
+@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+def transition_model_lifecycle(model_id: int):
+    payload = request.get_json(force=True) or {}
+    new_status = str(payload.get("status") or "").strip().lower()
+    if not new_status:
+        return jsonify({"error": "status is required"}), 400
+    note = str(payload.get("note") or "").strip() or None
+    actor = getattr(g, "current_user", None)
+    try:
+        result = models_repo.transition_lifecycle(
+            model_id,
+            new_status,
+            actor_id=actor.id if actor else None,
+            note=note,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Workstation registry + heartbeat
+# ---------------------------------------------------------------------------
+
+@workstation_blueprint.get("/workstations")
+@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+def list_workstations():
+    """List all registered workstations and their last-seen timestamps."""
+    return jsonify(workstation_registry_repo.list_workstations())
+
+
+@workstation_blueprint.post("/workstations/heartbeat")
+@require_auth
+def workstation_heartbeat():
+    """Register or update a workstation's identity and trigger stale session cleanup.
+
+    Body (all optional except machine_id):
+        machine_id     — unique identifier for this client machine (required)
+        client_version — client application version string
+        line_id        — production line this workstation is assigned to
+        station_id     — station within the line
+    """
+    payload = request.get_json(force=True) or {}
+    machine_id = str(payload.get("machine_id") or "").strip()
+    if not machine_id:
+        return jsonify({"error": "machine_id is required"}), 400
+
+    forwarded_for = str(request.headers.get("X-Forwarded-For") or "").strip()
+    ip_address = forwarded_for.split(",", 1)[0].strip() if forwarded_for else (request.remote_addr or "")
+
+    record = workstation_registry_repo.heartbeat(
+        machine_id=machine_id,
+        client_version=str(payload.get("client_version") or "").strip() or None,
+        line_id=str(payload.get("line_id") or "").strip() or None,
+        station_id=str(payload.get("station_id") or "").strip() or None,
+        ip_address=ip_address or None,
+    )
+
+    # Best-effort stale session cleanup on each heartbeat (non-blocking)
+    try:
+        purged = token_store.purge_expired()
+    except Exception:  # noqa: BLE001
+        purged = 0
+
+    return jsonify({
+        "ok": True,
+        "workstation": record,
+        "sessions_purged": purged,
+        "server_time": datetime.now(UTC).isoformat(),
+    })

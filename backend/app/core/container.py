@@ -4,6 +4,7 @@ from backend.app.core.config import AppConfig
 from backend.app.repositories.auth_audit_repository import AuthAuditRepository
 from backend.app.repositories.filesystem.storage_repository import FilesystemStorageRepository
 from backend.app.core.security import TokenStore
+from backend.app.repositories.augment_repository import AugmentRepository
 from backend.app.repositories.datasets_repository import DatasetsRepository
 from backend.app.repositories.deployments_repository import DeploymentsRepository
 from backend.app.repositories.hybrid_inspection_results_repository import HybridInspectionResultsRepository
@@ -17,10 +18,12 @@ from backend.app.repositories.sqlserver.users_repository import SqlServerUsersRe
 from backend.app.repositories.templates_repository import TemplatesRepository
 from backend.app.repositories.training_repository import TrainingRepository
 from backend.app.repositories.users_repository import UsersRepository
+from backend.app.repositories.workstation_registry_repository import WorkstationRegistryRepository
 from backend.app.services.inspection_session import InspectionSessionService
 from backend.app.services.sticker_inference import StickerInferenceService
 from backend.app.services.template_runtime import TemplateRuntimeService
 from backend.app.services.training import TrainingService
+from backend.app.workers.push_worker import PushWorker
 
 
 app_config = AppConfig()
@@ -59,3 +62,15 @@ inspection_session_service = InspectionSessionService(
     sticker_inference_service,
 )
 training_service = TrainingService(training_repo)
+workstation_registry_repo = WorkstationRegistryRepository()
+augment_repo = AugmentRepository()
+
+from backend.app.workers.augment_worker import AugmentWorker  # noqa: E402
+_augment_worker = AugmentWorker(augment_repo, datasets_repo)
+_augment_worker.start()
+
+push_worker = PushWorker(
+    inspection_results_repo,
+    interval_seconds=int(app_config.push_worker_interval_seconds),
+    max_retry_count=int(app_config.push_worker_max_retry),
+)

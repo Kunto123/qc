@@ -3,6 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from client_tk.app.components.async_bridge import run_async
 from client_tk.app.components.scrollable_frame import AutoHideScrollbar, ScrollableFrame
 from client_tk.app.components.template_forms import JsonEditor, LabeledValuePanel, TemplateEditorForm
 
@@ -691,22 +692,26 @@ class AdminScreen(ttk.Frame):
         self.admin_cards["results"].set_value(len(self._results_cache), note=f"{result_accept} accept / {result_reject} reject")
 
     def refresh_all(self) -> None:
+        self._set_status("Refreshing all data…")
         self.refresh_templates()
         self.refresh_deployments()
         self.refresh_users()
         self.refresh_results()
         self.refresh_dashboard()
-        self._set_status("Semua data admin berhasil direfresh.")
 
     def refresh_template_dependencies(self) -> None:
-        try:
-            models = self.api.list_models()
-            profiles = self.api.list_profiles()
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Admin", f"Failed to load template dependencies: {exc}")
-            return
-        self.template_form.set_model_options(models)
-        self.template_form.set_profile_options(profiles)
+        def _load():
+            return self.api.list_models(), self.api.list_profiles()
+
+        def _done(result, error):
+            if error:
+                self._set_status(f"Dependency load error: {error}")
+                return
+            models, profiles = result
+            self.template_form.set_model_options(models)
+            self.template_form.set_profile_options(profiles)
+
+        run_async(self, _load, callback=_done)
 
     def _render_templates(self) -> None:
         if not hasattr(self, "template_table"):
@@ -756,24 +761,26 @@ class AdminScreen(ttk.Frame):
             )
 
     def refresh_templates(self) -> None:
-        try:
-            items = self.api.list_templates()
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Templates", str(exc))
-            return
+        self._set_status("Loading templates…")
 
-        self._templates_cache = list(items)
-        self._template_summary_lookup = {}
-        dep_values: list[str] = []
-        for item in self._templates_cache:
-            dep_label = f"{item['id']} | {item['name']} | v{item.get('version_number')}"
-            self._template_summary_lookup[dep_label] = item
-            dep_values.append(dep_label)
-        self.dep_template_selector.configure(values=dep_values)
-        self.refresh_template_dependencies()
-        self._render_templates()
-        self._update_overview_cards()
-        self._set_status(f"Loaded {len(self._templates_cache)} templates.")
+        def _done(items, error):
+            if error:
+                self._set_status(f"Templates error: {error}")
+                return
+            self._templates_cache = list(items)
+            self._template_summary_lookup = {}
+            dep_values: list[str] = []
+            for item in self._templates_cache:
+                dep_label = f"{item['id']} | {item['name']} | v{item.get('version_number')}"
+                self._template_summary_lookup[dep_label] = item
+                dep_values.append(dep_label)
+            self.dep_template_selector.configure(values=dep_values)
+            self.refresh_template_dependencies()
+            self._render_templates()
+            self._update_overview_cards()
+            self._set_status(f"Loaded {len(self._templates_cache)} templates.")
+
+        run_async(self, self.api.list_templates, callback=_done)
 
     def new_template(self) -> None:
         self.current_template_id = None
@@ -787,18 +794,23 @@ class AdminScreen(ttk.Frame):
         template_id = self._selected_treeview_id(self.template_table)
         if template_id is None:
             return
-        try:
-            detail = self.api.get_template(template_id)
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Templates", str(exc))
-            return
-        self.current_template_id = template_id
-        self.template_form.set_payload(detail)
-        self.template_raw_editor.set_payload(detail)
-        self.template_context_var.set(
-            f"Editing template #{detail.get('id')} | v{detail.get('version_number')} | {_safe_text(detail.get('name'))}"
-        )
-        self._set_status(f"Template #{template_id} dimuat ke editor.")
+        self._set_status(f"Loading template #{template_id}…")
+
+        def _done(detail, error):
+            if error:
+                self._set_status(f"Template load error: {error}")
+                messagebox.showerror("Templates", str(error))
+                return
+            self.current_template_id = template_id
+            self.template_form.set_payload(detail)
+            self.template_raw_editor.set_payload(detail)
+            self.template_context_var.set(
+                f"Editing template #{detail.get('id')} | v{detail.get('version_number')} | {_safe_text(detail.get('name'))}"
+            )
+            self._set_status(f"Template #{template_id} dimuat ke editor.")
+
+        run_async(self, self.api.get_template, callback=_done, args=(template_id,))
+        return  # early return so the old code below is bypassed
 
     def preview_template_json(self) -> None:
         try:
@@ -901,15 +913,18 @@ class AdminScreen(ttk.Frame):
             )
 
     def refresh_deployments(self) -> None:
-        try:
-            items = self.api.list_deployments()
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Deployments", str(exc))
-            return
-        self._deployments_cache = list(items)
-        self._render_deployments()
-        self._update_overview_cards()
-        self._set_status(f"Loaded {len(self._deployments_cache)} deployments.")
+        self._set_status("Loading deployments…")
+
+        def _done(items, error):
+            if error:
+                self._set_status(f"Deployments error: {error}")
+                return
+            self._deployments_cache = list(items)
+            self._render_deployments()
+            self._update_overview_cards()
+            self._set_status(f"Loaded {len(self._deployments_cache)} deployments.")
+
+        run_async(self, self.api.list_deployments, callback=_done)
 
     def deploy_template(self) -> None:
         payload = {
@@ -986,15 +1001,18 @@ class AdminScreen(ttk.Frame):
             )
 
     def refresh_users(self) -> None:
-        try:
-            items = self.api.list_users()
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Users", str(exc))
-            return
-        self._users_cache = list(items)
-        self._render_users()
-        self._update_overview_cards()
-        self._set_status(f"Loaded {len(self._users_cache)} users.")
+        self._set_status("Loading users…")
+
+        def _done(items, error):
+            if error:
+                self._set_status(f"Users error: {error}")
+                return
+            self._users_cache = list(items)
+            self._render_users()
+            self._update_overview_cards()
+            self._set_status(f"Loaded {len(self._users_cache)} users.")
+
+        run_async(self, self.api.list_users, callback=_done)
 
     def create_user(self) -> None:
         username = self.user_name.get().strip()
@@ -1078,21 +1096,25 @@ class AdminScreen(ttk.Frame):
         self.results_count_var.set(f"{len(self._results_cache)} results shown")
 
     def refresh_results(self) -> None:
-        try:
-            items = self.api.list_inspections(self._results_filters())
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Results", str(exc))
-            return
-        self._results_cache = list(items)
-        self._render_results()
-        self._update_overview_cards()
-        if not self._results_cache:
-            self.result_summary.reset()
-            self.result_detail.set_payload({})
-            self.results_context_var.set("Tidak ada hasil inspeksi untuk filter saat ini.")
-        else:
-            self.results_context_var.set("Pilih hasil inspeksi untuk melihat summary dan payload lengkap.")
-        self._set_status(f"Loaded {len(self._results_cache)} inspection results.")
+        self._set_status("Loading inspection results…")
+        params = self._results_filters()
+
+        def _done(items, error):
+            if error:
+                self._set_status(f"Results error: {error}")
+                return
+            self._results_cache = list(items)
+            self._render_results()
+            self._update_overview_cards()
+            if not self._results_cache:
+                self.result_summary.reset()
+                self.result_detail.set_payload({})
+                self.results_context_var.set("Tidak ada hasil inspeksi untuk filter saat ini.")
+            else:
+                self.results_context_var.set("Pilih hasil inspeksi untuk melihat summary dan payload lengkap.")
+            self._set_status(f"Loaded {len(self._results_cache)} inspection results.")
+
+        run_async(self, self.api.list_inspections, callback=_done, args=(params,))
 
     def _export_csv(self) -> None:
         path = filedialog.asksaveasfilename(
@@ -1249,31 +1271,35 @@ class AdminScreen(ttk.Frame):
         self.dashboard_count_var.set(f"{len(buckets)} buckets shown")
 
     def refresh_dashboard(self) -> None:
+        self._set_status("Loading dashboard…")
         summary_params, bucket_params = self._dashboard_filters()
-        try:
-            summary = self.api.dashboard_summary(summary_params)
-            buckets = self.api.dashboard_buckets(bucket_params)
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Dashboard", str(exc))
-            return
 
-        self.dashboard_cards["total"].set_value(summary.get("total_inspections", 0))
-        self.dashboard_cards["accept"].set_value(summary.get("total_accept", 0))
-        self.dashboard_cards["reject"].set_value(summary.get("total_reject", 0))
-        self.dashboard_cards["part_ready"].set_value(
-            summary.get("total_part_ready", 0),
-            note=f"not ready: {summary.get('total_part_not_ready', 0)}",
-        )
-        avg_conf = summary.get("avg_sticker_confidence")
-        self.dashboard_cards["avg_conf"].set_value("-" if avg_conf is None else f"{float(avg_conf):.3f}")
-        self.dashboard_cards["backend"].set_value(
-            summary.get("backend_ultralytics", 0),
-            note=f"classic {summary.get('backend_classic', 0)}",
-        )
+        def _load():
+            return self.api.dashboard_summary(summary_params), self.api.dashboard_buckets(bucket_params)
 
-        self._render_dashboard_buckets(buckets)
-        self.dashboard_raw.set_payload({"summary": summary, "buckets": buckets})
-        self.dashboard_context_var.set(
-            f"Summary loaded | total={summary.get('total_inspections', 0)} | granularity={bucket_params.get('granularity')}"
-        )
-        self._set_status("Dashboard berhasil direfresh.")
+        def _done(result, error):
+            if error:
+                self._set_status(f"Dashboard error: {error}")
+                return
+            summary, buckets = result
+            self.dashboard_cards["total"].set_value(summary.get("total_inspections", 0))
+            self.dashboard_cards["accept"].set_value(summary.get("total_accept", 0))
+            self.dashboard_cards["reject"].set_value(summary.get("total_reject", 0))
+            self.dashboard_cards["part_ready"].set_value(
+                summary.get("total_part_ready", 0),
+                note=f"not ready: {summary.get('total_part_not_ready', 0)}",
+            )
+            avg_conf = summary.get("avg_sticker_confidence")
+            self.dashboard_cards["avg_conf"].set_value("-" if avg_conf is None else f"{float(avg_conf):.3f}")
+            self.dashboard_cards["backend"].set_value(
+                summary.get("backend_ultralytics", 0),
+                note=f"classic {summary.get('backend_classic', 0)}",
+            )
+            self._render_dashboard_buckets(buckets)
+            self.dashboard_raw.set_payload({"summary": summary, "buckets": buckets})
+            self.dashboard_context_var.set(
+                f"Summary loaded | total={summary.get('total_inspections', 0)} | granularity={bucket_params.get('granularity')}"
+            )
+            self._set_status("Dashboard berhasil direfresh.")
+
+        run_async(self, _load, callback=_done)

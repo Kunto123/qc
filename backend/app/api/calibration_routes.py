@@ -38,11 +38,42 @@ def list_profiles():
 @require_roles(UserRole.ADMIN, UserRole.ENGINEER)
 def create_profile():
     payload = request.get_json(force=True) or {}
+    expiry_raw = payload.get("expiry_interval_days")
+    expiry_days: int | None = None
+    if expiry_raw is not None:
+        try:
+            expiry_days = max(1, int(expiry_raw))
+        except (ValueError, TypeError):
+            return jsonify({"error": "expiry_interval_days must be a positive integer"}), 400
     record = profiles_repo.create(
         str(payload.get("name") or "").strip() or "Unnamed Profile",
         dict(payload.get("profile") or {}),
+        scope_line_id=str(payload.get("scope_line_id") or "").strip() or None,
+        scope_station_id=str(payload.get("scope_station_id") or "").strip() or None,
+        scope_part_name=str(payload.get("scope_part_name") or "").strip() or None,
+        expiry_interval_days=expiry_days,
     )
     return jsonify(record), 201
+
+
+@calibration_blueprint.get("/profiles/active")
+@require_auth
+def get_active_profile():
+    """Return the most recent non-expired profile for the given scope.
+
+    Query params: line_id, station_id, part_name (all optional)
+    """
+    line_id = str(request.args.get("line_id") or "").strip() or None
+    station_id = str(request.args.get("station_id") or "").strip() or None
+    part_name = str(request.args.get("part_name") or "").strip() or None
+    record = profiles_repo.get_active_for_scope(
+        line_id=line_id,
+        station_id=station_id,
+        part_name=part_name,
+    )
+    if record is None:
+        return jsonify({"error": "No active calibration profile found for the given scope"}), 404
+    return jsonify(record)
 
 
 @calibration_blueprint.delete("/profiles/<int:profile_id>")

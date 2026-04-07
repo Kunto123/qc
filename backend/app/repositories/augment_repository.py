@@ -6,19 +6,18 @@ from typing import Any
 
 from backend.app.repositories.base_json import JsonRepository
 
-# Valid state machine transitions.
 _TRANSITIONS: dict[str, set[str]] = {
     "queued":    {"running", "cancelled"},
     "running":   {"completed", "failed", "cancelled"},
     "completed": set(),
-    "failed":    {"queued"},  # allow re-queue after failure
-    "cancelled": {"queued"},  # allow re-queue after cancel
+    "failed":    {"queued"},
+    "cancelled": {"queued"},
 }
 
 
-class TrainingRepository(JsonRepository):
+class AugmentRepository(JsonRepository):
     def __init__(self) -> None:
-        super().__init__("training_jobs.json", {"jobs": []})
+        super().__init__("augment_jobs.json", {"jobs": []})
 
     def list_jobs(self) -> list[dict]:
         return self.load()["jobs"]
@@ -26,29 +25,43 @@ class TrainingRepository(JsonRepository):
     def get_job(self, job_id: str) -> dict | None:
         return next((j for j in self.list_jobs() if j["id"] == job_id), None)
 
-    def create_job(self, dataset_id: str, base_model: str, params: dict) -> dict:
+    def create_job(
+        self,
+        dataset_id: str,
+        transforms: list[str],
+        multiplier: int = 2,
+        params: dict | None = None,
+    ) -> dict:
         payload = self.load()
-        items = payload["jobs"]
         now = datetime.now(UTC).isoformat()
         record: dict[str, Any] = {
             "id": uuid.uuid4().hex[:12],
             "dataset_id": dataset_id,
-            "base_model": base_model,
+            "transforms": transforms,
+            "multiplier": max(1, int(multiplier)),
+            "params": params or {},
             "status": "queued",
-            "trained_model_path": None,
-            "params": params,
+            "source_image_count": 0,
+            "augmented_image_count": 0,
+            "output_dataset_id": None,
             "created_at": now,
             "started_at": None,
             "finished_at": None,
             "error": None,
-            "log": ["Training job queued."],
+            "log": ["Augmentation job queued."],
         }
-        items.append(record)
+        payload["jobs"].append(record)
         self.save(payload)
         return record
 
-    def transition(self, job_id: str, new_status: str, *, log_line: str | None = None, **extra_fields) -> dict:
-        """Transition a job to new_status, raising ValueError if the transition is invalid."""
+    def transition(
+        self,
+        job_id: str,
+        new_status: str,
+        *,
+        log_line: str | None = None,
+        **extra_fields,
+    ) -> dict:
         payload = self.load()
         for item in payload["jobs"]:
             if item["id"] != job_id:
@@ -57,7 +70,7 @@ class TrainingRepository(JsonRepository):
             allowed = _TRANSITIONS.get(current, set())
             if new_status not in allowed:
                 raise ValueError(
-                    f"Cannot transition job '{job_id}' from '{current}' to '{new_status}'. "
+                    f"Cannot transition augment job '{job_id}' from '{current}' to '{new_status}'. "
                     f"Allowed: {sorted(allowed) or 'none'}"
                 )
             now = datetime.now(UTC).isoformat()
@@ -72,13 +85,12 @@ class TrainingRepository(JsonRepository):
                 item.setdefault("log", []).append(log_line)
             self.save(payload)
             return dict(item)
-        raise ValueError(f"Training job '{job_id}' not found.")
+        raise ValueError(f"Augment job '{job_id}' not found.")
 
     def cancel_job(self, job_id: str) -> dict:
         job = self.get_job(job_id)
         if job is None:
-            raise ValueError("Training job not found.")
+            raise ValueError("Augment job not found.")
         if job["status"] not in {"queued", "running"}:
             raise ValueError(f"Cannot cancel job in status '{job['status']}'.")
         return self.transition(job_id, "cancelled", log_line="Job cancelled by user.")
-

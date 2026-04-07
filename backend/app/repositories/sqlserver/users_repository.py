@@ -327,6 +327,51 @@ class SqlServerUsersRepository:
             raise ValueError("User not found.")
         return self._public_record(record)
 
+    def set_role(self, user_id: int, role: str) -> dict[str, Any]:
+        role_enum = UserRole(role)
+        if self.get_by_id(user_id) is None:
+            raise ValueError("User not found.")
+        now = _utcnow_iso()
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE dbo.qc_user_accounts
+                SET role = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                role_enum.value,
+                now,
+                int(user_id),
+            )
+            conn.commit()
+        record = self.get_by_id(user_id)
+        if record is None:
+            raise ValueError("User not found.")
+        return self._public_record(record)
+
+    def set_password(self, user_id: int, new_password: str) -> dict[str, Any]:
+        if self.get_by_id(user_id) is None:
+            raise ValueError("User not found.")
+        now = _utcnow_iso()
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE dbo.qc_user_accounts
+                SET password_hash = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                hash_password(new_password),
+                now,
+                int(user_id),
+            )
+            conn.commit()
+        record = self.get_by_id(user_id)
+        if record is None:
+            raise ValueError("User not found.")
+        return self._public_record(record)
+
     def _row_to_dict(self, row) -> dict[str, Any]:
         return {
             "id": int(row.id),

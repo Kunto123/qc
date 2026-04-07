@@ -141,6 +141,31 @@ def retry_failed_inspection_pushes():
     )
 
 
+@inspection_blueprint.post("/inspections/push-worker/trigger")
+@require_roles(UserRole.ADMIN)
+def trigger_push_worker():
+    """Manually trigger one push-worker batch. Returns batch statistics."""
+    from backend.app.core.container import push_worker
+    stats = push_worker.run_once()
+    return jsonify({"ok": True, "stats": stats})
+
+
+@inspection_blueprint.get("/inspections/push-worker/status")
+@require_roles(UserRole.ADMIN)
+def push_worker_status():
+    """Return counts of results per push_status."""
+    from backend.app.repositories.inspection_results_repository import InspectionResultsRepository
+    local_repo = inspection_results_repo._local_repo  # noqa: SLF001
+    if not isinstance(local_repo, InspectionResultsRepository):
+        return jsonify({"error": "Status only available for local repo"}), 400
+    all_items = local_repo.list_results(limit=100_000, offset=0)
+    counts: dict[str, int] = {}
+    for item in all_items:
+        status = str(item.get("push_status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return jsonify({"counts": counts, "total": len(all_items)})
+
+
 @inspection_blueprint.get("/inspections/export")
 @require_auth
 def export_inspections():

@@ -221,3 +221,50 @@ class ApiClient:
 
     def upload_model_file(self, payload: dict) -> dict:
         return self._post("/models/upload", payload)
+
+    # ------------------------------------------------------------------
+    # Template lifecycle
+    # ------------------------------------------------------------------
+
+    def list_template_versions(self, template_id: int) -> list[dict]:
+        return self._get(f"/templates/{template_id}/versions")
+
+    def transition_template_lifecycle(self, template_id: int, status: str, change_note: str = "") -> dict:
+        return self._post(f"/templates/{template_id}/transition", {"status": status, "change_note": change_note})
+
+    def rollback_template_version(self, template_id: int, version_id: int) -> dict:
+        return self._post(f"/templates/{template_id}/rollback", {"version_id": version_id})
+
+    def rollback_deployment(self, deployment_id: int) -> dict:
+        return self._post(f"/deployments/{deployment_id}/rollback", {})
+
+    # ------------------------------------------------------------------
+    # User management extras
+    # ------------------------------------------------------------------
+
+    def change_user_role(self, user_id: int, role: str) -> dict:
+        return self._post(f"/auth/users/{user_id}/role", {"role": role})
+
+    def reset_user_password(self, user_id: int, password: str) -> dict:
+        return self._post(f"/auth/users/{user_id}/reset-password", {"password": password})
+
+    def get_audit_log(self, limit: int = 100, user_id: int | None = None) -> list[dict]:
+        params: dict = {"limit": limit}
+        if user_id is not None:
+            params["user_id"] = user_id
+        return self._get("/auth/audit-log", params)
+
+    # ------------------------------------------------------------------
+    # Workstation heartbeat
+    # ------------------------------------------------------------------
+
+    def heartbeat(self, machine_id: str, *, client_version: str | None = None,
+                  line_id: str | None = None, station_id: str | None = None) -> dict:
+        payload: dict = {"machine_id": machine_id}
+        if client_version is not None:
+            payload["client_version"] = client_version
+        if line_id is not None:
+            payload["line_id"] = line_id
+        if station_id is not None:
+            payload["station_id"] = station_id
+        return self._post("/workstations/heartbeat", payload)

@@ -35,6 +35,8 @@ class AppConfig:
     sticker_inference_mode: str = os.getenv("QC_SUITE_STICKER_INFERENCE_MODE", "auto").strip().lower() or "auto"
     default_sticker_model_path: str = DEFAULT_STICKER_MODEL_PATH
     default_sticker_model_meta_path: str = DEFAULT_STICKER_MODEL_META_PATH
+    push_worker_interval_seconds: int = max(5, int(os.getenv("QC_SUITE_PUSH_WORKER_INTERVAL_SECONDS", "30")))
+    push_worker_max_retry: int = max(1, int(os.getenv("QC_SUITE_PUSH_WORKER_MAX_RETRY", "5")))
 
     @property
     def sql_enabled(self) -> bool:
