@@ -54,6 +54,15 @@ class ApiClient:
     def me(self) -> dict:
         return self._get("/auth/me")
 
+    def logout(self) -> dict:
+        return self._post("/auth/logout", {})
+
+    def logout_all(self) -> dict:
+        return self._post("/auth/logout-all", {})
+
+    def list_sessions(self) -> list[dict]:
+        return self._get("/auth/sessions")
+
     def list_templates(self) -> list[dict]:
         return self._get("/templates")
 
@@ -129,6 +138,15 @@ class ApiClient:
     def get_inspection(self, result_id: int) -> dict:
         return self._get(f"/inspections/{result_id}")
 
+    def retry_inspection_push(self, result_id: int) -> dict:
+        return self._post(f"/inspections/{result_id}/retry-push", {})
+
+    def retry_failed_inspection_pushes(self, result_ids: list[int] | None = None, limit: int = 100) -> dict:
+        payload = {"limit": limit}
+        if result_ids:
+            payload["result_ids"] = result_ids
+        return self._post("/inspections/retry-push", payload)
+
     def dashboard_summary(self, params: dict | None = None) -> dict:
         return self._get("/dashboard/summary", params)
 
@@ -143,6 +161,9 @@ class ApiClient:
 
     def set_user_active(self, user_id: int, is_active: bool) -> dict:
         return self._put(f"/auth/users/{user_id}", {"is_active": is_active})
+
+    def revoke_user_sessions(self, user_id: int) -> dict:
+        return self._post(f"/auth/users/{user_id}/revoke-sessions", {})
 
     def list_profiles(self) -> list[dict]:
         return self._get("/calibration/profiles")

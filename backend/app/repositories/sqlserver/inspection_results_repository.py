@@ -269,7 +269,7 @@ class SqlServerInspectionResultsRepository:
                     part_ready_roi_meta_json,
                     sticker_roi_meta_json,
                     targets_json,
-                    inspected_at
+                    CONVERT(NVARCHAR(33), inspected_at, 127) AS inspected_at
                 FROM dbo.qc_inspection_results
                 {where_clause}
                 ORDER BY id DESC
@@ -312,7 +312,7 @@ class SqlServerInspectionResultsRepository:
                     part_ready_roi_meta_json,
                     sticker_roi_meta_json,
                     targets_json,
-                    inspected_at
+                    CONVERT(NVARCHAR(33), inspected_at, 127) AS inspected_at
                 FROM dbo.qc_inspection_results
                 WHERE id = ?
                 """,
@@ -391,7 +391,7 @@ class SqlServerInspectionResultsRepository:
         return sorted(finalized, key=lambda item: item["bucket_time"], reverse=True)[:limit]
 
     def _row_to_dict(self, row) -> dict[str, Any]:
-        inspected_at = row.inspected_at.isoformat() if hasattr(row.inspected_at, "isoformat") else str(row.inspected_at)
+        inspected_at = str(row.inspected_at) if row.inspected_at is not None else None
         return {
             "id": int(row.id),
             "template_version_id": int(row.template_version_id),

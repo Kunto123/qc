@@ -571,8 +571,9 @@ class InspectionSessionService:
                 "part_name": sticker.part_name,
                 "line_id": line_id,
                 "station_id": state.station_id,
-                "data1": None,
-                "data2": part_ready_payload.get("part_ready_confidence"),
+                # Contract: data1 = part_ready confidence, data2 = sticker confidence
+                "data1": part_ready_payload.get("part_ready_confidence"),
+                "data2": None,
                 "targets": [],
                 "operator_user_id": user_id,
                 "mp_check": username,
@@ -599,8 +600,9 @@ class InspectionSessionService:
                 "part_name": sticker.part_name,
                 "line_id": line_id,
                 "station_id": state.station_id,
-                "data1": None,
-                "data2": part_ready_payload.get("part_ready_confidence"),
+                # Contract: data1 = part_ready confidence, data2 = sticker confidence
+                "data1": part_ready_payload.get("part_ready_confidence"),
+                "data2": None,
                 "targets": [],
                 "operator_user_id": user_id,
                 "mp_check": username,
@@ -627,8 +629,9 @@ class InspectionSessionService:
                 "part_name": sticker.part_name,
                 "line_id": line_id,
                 "station_id": state.station_id,
-                "data1": None,
-                "data2": part_ready_payload.get("part_ready_confidence"),
+                # Contract: data1 = part_ready confidence, data2 = sticker confidence
+                "data1": part_ready_payload.get("part_ready_confidence"),
+                "data2": None,
                 "targets": [],
                 "operator_user_id": user_id,
                 "mp_check": username,
@@ -664,8 +667,9 @@ class InspectionSessionService:
                 "part_name": sticker.part_name,
                 "line_id": line_id,
                 "station_id": state.station_id,
-                "data1": None,
-                "data2": part_ready_payload.get("part_ready_confidence"),
+                # Contract: data1 = part_ready confidence, data2 = sticker confidence
+                "data1": part_ready_payload.get("part_ready_confidence"),
+                "data2": None,
                 "targets": [],
                 "operator_user_id": user_id,
                 "mp_check": username,
@@ -722,8 +726,9 @@ class InspectionSessionService:
             "part_name": sticker.part_name,
             "line_id": line_id,
             "station_id": state.station_id,
-            "data1": selected_candidate.get("confidence"),
-            "data2": part_ready_payload.get("part_ready_confidence"),
+            # Contract: data1 = part_ready confidence, data2 = sticker confidence
+            "data1": part_ready_payload.get("part_ready_confidence"),
+            "data2": selected_candidate.get("confidence"),
             "targets": [target],
             "operator_user_id": user_id,
             "mp_check": username,
@@ -762,6 +767,7 @@ class InspectionSessionService:
             state.current_event_stable_frames = 0
             state.current_event_committed = False
             state.cooldown_until = None
+            state.part_ready_ratio_history.clear()
             return InspectionEventState.IDLE.value, None, False
 
         event_key = (
@@ -1015,6 +1021,7 @@ class InspectionSessionService:
                 "station_id": validation.get("station_id"),
                 "part_name": validation.get("part_name"),
                 "mp_check": validation.get("mp_check"),
+                # data1/data2 mirror SQL contract: data1=part_ready confidence, data2=sticker confidence
                 "data1": validation.get("data1"),
                 "data2": validation.get("data2"),
                 "decision": validation.get("decision"),

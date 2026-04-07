@@ -66,6 +66,17 @@ class InspectionResultsRepository(JsonRepository):
         self.save(store)
         return record
 
+    def update_result(self, result_id: int, patch: dict[str, Any]) -> dict[str, Any]:
+        store = self.load()
+        items = store["results"]
+        for item in items:
+            if int(item["id"]) != int(result_id):
+                continue
+            item.update(dict(patch))
+            self.save(store)
+            return item
+        raise ValueError("Inspection result not found.")
+
     def list_results(
         self,
         *,

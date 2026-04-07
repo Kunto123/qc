@@ -59,7 +59,7 @@ class StickerRule:
     max_offset_y: float | None = None
     expected_center_x: float | None = None
     expected_center_y: float | None = None
-    commit_stable_frames: int = 5
+    commit_stable_frames: int = 1
 
 
 @dataclass(slots=True)

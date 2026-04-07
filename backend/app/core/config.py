@@ -26,6 +26,7 @@ class AppConfig:
     port: int = int(os.getenv("QC_SUITE_PORT", "8100"))
     debug: bool = os.getenv("QC_SUITE_DEBUG", "0").strip() == "1"
     secret_key: str = os.getenv("QC_SUITE_SECRET_KEY", "qc-suite-dev-secret")
+    access_token_ttl_seconds: int = max(60, int(os.getenv("QC_SUITE_ACCESS_TOKEN_TTL_SECONDS", "86400")))
     sql_server: str = os.getenv("MSSQL_SERVER", "").strip()
     sql_database: str = os.getenv("MSSQL_DATABASE", "").strip()
     sql_username: str = os.getenv("MSSQL_USERNAME", "").strip()

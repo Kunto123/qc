@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, ttk
+
+from dotenv import load_dotenv
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(PROJECT_ROOT / ".env")
 
 from client_tk.app.api_client import ApiClient
 from client_tk.app.config import DEFAULT_SERVER_URL
@@ -156,6 +162,11 @@ class QcSuiteDesktopApp(tk.Tk):
 
     def _logout(self) -> None:
         base_url = self.state.base_url or DEFAULT_SERVER_URL
+        if self.state.token:
+            try:
+                self.api.logout()
+            except Exception:  # noqa: BLE001
+                pass
         self._teardown_screen()
         self.api.set_token(None)
         self.state = SessionState(base_url=base_url)

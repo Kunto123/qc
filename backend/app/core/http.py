@@ -5,19 +5,31 @@ from typing import Callable
 
 from flask import g, jsonify, request
 
-from backend.app.core.container import token_store
+from backend.app.core.container import token_store, users_repo
 from shared.contracts.enums import UserRole
 
 
-def current_user():
+def _extract_token() -> str:
     auth = str(request.headers.get("Authorization") or "").strip()
     if auth.lower().startswith("bearer "):
-        token = auth[7:].strip()
-    else:
-        token = str(request.headers.get("X-Auth-Token") or "").strip()
+        return auth[7:].strip()
+    return str(request.headers.get("X-Auth-Token") or "").strip()
+
+
+def current_user():
+    token = _extract_token()
     if not token:
         return None
-    return token_store.get(token)
+    session = token_store.get_record(token)
+    if session is None:
+        return None
+    user = users_repo.get_user_info(session.user.id)
+    if user is None or not user.is_active:
+        token_store.revoke(token)
+        return None
+    g.current_token = token
+    g.current_session = session
+    return user
 
 
 def require_auth(fn: Callable):
@@ -45,4 +57,3 @@ def require_roles(*allowed_roles: UserRole):
         return wrapper
 
     return decorator
-

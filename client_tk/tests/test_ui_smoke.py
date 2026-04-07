@@ -77,6 +77,12 @@ class _StubApi:
     def list_inspections(self, params=None):
         return []
 
+    def retry_inspection_push(self, result_id: int):
+        return {"ok": True, "result": {"id": result_id, "push_status": "sent"}}
+
+    def retry_failed_inspection_pushes(self, result_ids=None, limit: int = 100):
+        return {"attempted": 0, "succeeded": 0, "failed": 0, "items": []}
+
     def dashboard_summary(self, params=None):
         return {}
 

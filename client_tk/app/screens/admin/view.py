@@ -64,6 +64,7 @@ class AdminScreen(ttk.Frame):
         self.user_count_var = tk.StringVar(value="0 users")
         self.results_count_var = tk.StringVar(value="0 results")
         self.dashboard_count_var = tk.StringVar(value="0 buckets")
+        self.result_filter_push_status_var = tk.StringVar(value="")
         self.template_context_var = tk.StringVar(value="Belum ada template yang dimuat.")
         self.deployment_context_var = tk.StringVar(value="Pilih deployment untuk melihat konteks cepat.")
         self.user_context_var = tk.StringVar(value="Pilih user untuk melihat status akun.")
@@ -438,13 +439,22 @@ class AdminScreen(ttk.Frame):
         self.result_filter_part = ttk.Entry(filters)
         self.result_filter_template = ttk.Entry(filters)
         self.result_filter_decision = ttk.Combobox(filters, values=["", "ACCEPT", "REJECT"], state="readonly")
+        self.result_filter_push_status = ttk.Combobox(
+            filters,
+            textvariable=self.result_filter_push_status_var,
+            values=["", "sent", "failed", "pending", "local_only"],
+            state="readonly",
+        )
         self.result_filter_decision.set("")
+        self.result_filter_push_status_var.set("")
         self._grid_entry(filters, 1, 0, "Line", self.result_filter_line)
         self._grid_entry(filters, 1, 2, "Station", self.result_filter_station)
         self._grid_entry(filters, 1, 4, "Part", self.result_filter_part)
         self._grid_entry(filters, 2, 0, "Template Ver", self.result_filter_template)
         ttk.Label(filters, text="Decision").grid(row=2, column=2, sticky="w", padx=(0, 8), pady=4)
         self.result_filter_decision.grid(row=2, column=3, sticky="ew", pady=4)
+        ttk.Label(filters, text="Push Status").grid(row=2, column=4, sticky="w", padx=(0, 8), pady=4)
+        self.result_filter_push_status.grid(row=2, column=5, sticky="ew", pady=4)
         ttk.Button(filters, text="Reset", command=self._reset_results_filters).grid(row=2, column=7, sticky="e", pady=4)
         ttk.Button(filters, text="Refresh", command=self.refresh_results).grid(row=2, column=8, sticky="e", pady=4, padx=(6, 0))
         ttk.Button(filters, text="Export CSV", command=self._export_csv).grid(row=2, column=9, sticky="e", pady=4, padx=(6, 0))
@@ -473,6 +483,8 @@ class AdminScreen(ttk.Frame):
                 ("part", "Part", 150, "w"),
                 ("line", "Line", 90, "w"),
                 ("station", "Station", 90, "w"),
+                ("push", "Push", 90, "center"),
+                ("retry", "Retries", 70, "center"),
                 ("reason", "Reason", 140, "w"),
             ],
             row=None,
@@ -481,7 +493,11 @@ class AdminScreen(ttk.Frame):
         self.results_table.bind("<<TreeviewSelect>>", lambda _event: self.open_result())
         self.results_table.bind("<Double-1>", lambda _event: self.open_result())
 
-        ttk.Button(listing, text="Open Selected", command=self.open_result).pack(anchor="e", pady=(10, 0))
+        result_actions = ttk.Frame(listing)
+        result_actions.pack(fill="x", pady=(10, 0))
+        ttk.Button(result_actions, text="Retry Failed Visible", command=self.retry_visible_failed_pushes).pack(side="left")
+        ttk.Button(result_actions, text="Open Selected", command=self.open_result).pack(side="right")
+        ttk.Button(result_actions, text="Retry Selected Push", command=self.retry_selected_push).pack(side="right", padx=(0, 6))
 
         right.columnconfigure(0, weight=1)
         right.rowconfigure(0, weight=1)
@@ -515,6 +531,9 @@ class AdminScreen(ttk.Frame):
                 ("part_ready_match_ratio", "Match Ratio"),
                 ("sticker_confidence", "Sticker Conf"),
                 ("push_status", "Push Status"),
+                ("retry_count", "Retry Count"),
+                ("sql_mirror_id", "SQL Mirror ID"),
+                ("last_push_error", "Last Push Error"),
             ],
             columns=2,
         )
@@ -1021,6 +1040,8 @@ class AdminScreen(ttk.Frame):
             params["template_version_id"] = self.result_filter_template.get().strip()
         if self.result_filter_decision.get().strip():
             params["decision_code"] = self.result_filter_decision.get().strip()
+        if self.result_filter_push_status_var.get().strip():
+            params["push_status"] = self.result_filter_push_status_var.get().strip()
         return params
 
     def _reset_results_filters(self) -> None:
@@ -1032,6 +1053,7 @@ class AdminScreen(ttk.Frame):
         ):
             widget.delete(0, "end")
         self.result_filter_decision.set("")
+        self.result_filter_push_status_var.set("")
         self.refresh_results()
 
     def _render_results(self) -> None:
@@ -1048,6 +1070,8 @@ class AdminScreen(ttk.Frame):
                     _safe_text(item.get("part_name")),
                     _safe_text(item.get("line_id")),
                     _safe_text(item.get("station_id")),
+                    _safe_text(item.get("push_status")),
+                    _safe_text(item.get("retry_count"), fallback="0"),
                     _safe_text(item.get("reject_reason_code") or "OK"),
                 ),
             )
@@ -1116,10 +1140,70 @@ class AdminScreen(ttk.Frame):
                 "part_ready_match_ratio": detail.get("part_ready_match_ratio"),
                 "sticker_confidence": detail.get("sticker_confidence"),
                 "push_status": detail.get("push_status"),
+                "retry_count": detail.get("retry_count"),
+                "sql_mirror_id": detail.get("sql_mirror_id"),
+                "last_push_error": detail.get("last_push_error"),
             }
         )
         self.result_detail.set_payload(detail)
+        self.results_context_var.set(
+            f"Selected result #{detail.get('id')} | push={_safe_text(detail.get('push_status'))} | "
+            f"retry={_safe_text(detail.get('retry_count'), fallback='0')}"
+        )
         self._set_status(f"Inspection result #{result_id} dibuka.")
+
+    def _retryable_visible_result_ids(self) -> list[int]:
+        retryable_ids: list[int] = []
+        for item in self._results_cache:
+            push_status = str(item.get("push_status") or "").strip().lower()
+            if push_status in {"failed", "pending"}:
+                retryable_ids.append(int(item["id"]))
+        return retryable_ids
+
+    def retry_selected_push(self) -> None:
+        result_id = self._selected_treeview_id(self.results_table)
+        if result_id is None:
+            return
+        try:
+            response = self.api.retry_inspection_push(result_id)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Results", str(exc))
+            return
+        result = dict(response.get("result") or {})
+        self.refresh_results()
+        self._select_tree_item(self.results_table, result_id)
+        self.open_result()
+        push_status = _safe_text(result.get("push_status"))
+        if push_status.lower() == "sent":
+            messagebox.showinfo("Results", f"Push result #{result_id} berhasil dikirim ulang ke SQL Server.")
+        else:
+            messagebox.showwarning(
+                "Results",
+                f"Push result #{result_id} masih gagal.\n\n{_safe_text(result.get('last_push_error'))}",
+            )
+
+    def retry_visible_failed_pushes(self) -> None:
+        result_ids = self._retryable_visible_result_ids()
+        if not result_ids:
+            messagebox.showinfo("Results", "Tidak ada result dengan push status failed/pending pada list saat ini.")
+            return
+        try:
+            response = self.api.retry_failed_inspection_pushes(result_ids=result_ids, limit=len(result_ids))
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Results", str(exc))
+            return
+        self.refresh_results()
+        attempted = int(response.get("attempted") or 0)
+        succeeded = int(response.get("succeeded") or 0)
+        failed = int(response.get("failed") or 0)
+        self._set_status(f"Retry push selesai: attempted={attempted}, succeeded={succeeded}, failed={failed}.")
+        if failed:
+            messagebox.showwarning(
+                "Results",
+                f"Retry push selesai.\n\nAttempted: {attempted}\nSucceeded: {succeeded}\nFailed: {failed}",
+            )
+        else:
+            messagebox.showinfo("Results", f"Semua {succeeded} push berhasil dikirim ulang ke SQL Server.")
 
     def _dashboard_filters(self) -> tuple[dict[str, object], dict[str, object]]:
         base: dict[str, object] = {}

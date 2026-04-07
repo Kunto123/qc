@@ -101,6 +101,160 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(models[0]["name"], "AKH Sticker Detector")
         self.assertEqual(models[0]["runtime"], "ultralytics")
 
+    def test_00c_auth_logout_revokes_current_token(self) -> None:
+        login_response = self.client.post(
+            "/auth/login",
+            json={"username": "operator", "password": "operator123", "client_name": "smoke-auth"},
+        )
+        self.assertEqual(login_response.status_code, 200, login_response.get_json())
+        login_payload = login_response.get_json()
+        self.assertIn("expires_at", login_payload)
+        self.assertIn("session", login_payload)
+        token = str(login_payload["token"])
+
+        sessions_response = self.client.get("/auth/sessions", headers=_headers(token))
+        self.assertEqual(sessions_response.status_code, 200, sessions_response.get_json())
+        sessions = sessions_response.get_json()
+        self.assertTrue(any(item.get("is_current") for item in sessions))
+        self.assertTrue(any(item.get("client_name") == "smoke-auth" for item in sessions))
+
+        logout_response = self.client.post("/auth/logout", headers=_headers(token))
+        self.assertEqual(logout_response.status_code, 200, logout_response.get_json())
+        self.assertTrue(logout_response.get_json()["revoked"])
+
+        me_response = self.client.get("/auth/me", headers=_headers(token))
+        self.assertEqual(me_response.status_code, 401, me_response.get_json())
+
+    def test_00e_admin_user_list_does_not_expose_password_hash(self) -> None:
+        users_response = self.client.get("/auth/users", headers=_headers(self.admin_token))
+        self.assertEqual(users_response.status_code, 200, users_response.get_json())
+        users = users_response.get_json()
+        self.assertTrue(users)
+        self.assertTrue(all("password_hash" not in item for item in users))
+
+    def test_00f_admin_can_retry_failed_push_via_api(self) -> None:
+        from backend.app.api import inspection_routes as inspection_routes_module
+
+        class _RetryRepo:
+            def retry_result(self, result_id: int) -> dict:
+                return {
+                    "id": result_id,
+                    "push_status": "sent",
+                    "retry_count": 1,
+                    "last_push_error": None,
+                    "sql_mirror_id": 321,
+                }
+
+        original_repo = inspection_routes_module.inspection_results_repo
+        inspection_routes_module.inspection_results_repo = _RetryRepo()
+        try:
+            response = self.client.post("/inspections/77/retry-push", headers=_headers(self.admin_token))
+        finally:
+            inspection_routes_module.inspection_results_repo = original_repo
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["result"]["id"], 77)
+        self.assertEqual(payload["result"]["push_status"], "sent")
+
+    def test_00g_operator_cannot_retry_failed_push_via_api(self) -> None:
+        response = self.client.post("/inspections/77/retry-push", headers=_headers(self.operator_token))
+        self.assertEqual(response.status_code, 403, response.get_json())
+
+    def test_00h_admin_can_batch_retry_failed_pushes_via_api(self) -> None:
+        from backend.app.api import inspection_routes as inspection_routes_module
+
+        class _BatchRetryRepo:
+            def retry_failed(self, *, result_ids=None, limit: int = 100) -> list[dict]:
+                return [
+                    {"id": 11, "push_status": "sent"},
+                    {"id": 12, "push_status": "failed"},
+                ]
+
+        original_repo = inspection_routes_module.inspection_results_repo
+        inspection_routes_module.inspection_results_repo = _BatchRetryRepo()
+        try:
+            response = self.client.post(
+                "/inspections/retry-push",
+                json={"result_ids": [11, 12], "limit": 10},
+                headers=_headers(self.admin_token),
+            )
+        finally:
+            inspection_routes_module.inspection_results_repo = original_repo
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertEqual(payload["attempted"], 2)
+        self.assertEqual(payload["succeeded"], 1)
+        self.assertEqual(payload["failed"], 1)
+
+    def test_00c2_login_failure_is_recorded_in_audit_log(self) -> None:
+        bad_login = self.client.post("/auth/login", json={"username": "nobody", "password": "wrong"})
+        self.assertEqual(bad_login.status_code, 401)
+
+        audit_response = self.client.get("/auth/audit-log", headers=_headers(self.admin_token))
+        self.assertEqual(audit_response.status_code, 200, audit_response.get_json())
+        events = audit_response.get_json()
+        failures = [e for e in events if e.get("event_type") == "login_failure"]
+        self.assertTrue(failures, "Expected at least one login_failure audit event")
+        self.assertTrue(any(e.get("username") == "nobody" for e in failures))
+
+    def test_00c3_successful_login_is_recorded_in_audit_log(self) -> None:
+        # A fresh login so we have a guaranteed event in the log
+        fresh_login = self.client.post(
+            "/auth/login",
+            json={"username": "engineer", "password": "engineer123", "client_name": "audit-smoke"},
+        )
+        self.assertEqual(fresh_login.status_code, 200)
+
+        audit_response = self.client.get("/auth/audit-log", headers=_headers(self.admin_token))
+        self.assertEqual(audit_response.status_code, 200, audit_response.get_json())
+        events = audit_response.get_json()
+        successes = [e for e in events if e.get("event_type") == "login_success"]
+        self.assertTrue(successes, "Expected at least one login_success audit event")
+
+    def test_00c4_audit_log_is_admin_only(self) -> None:
+        response = self.client.get("/auth/audit-log", headers=_headers(self.operator_token))
+        self.assertEqual(response.status_code, 403, response.get_json())
+
+    def test_00c5_audit_log_limit_param_is_respected(self) -> None:
+        audit_response = self.client.get(
+            "/auth/audit-log?limit=2",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(audit_response.status_code, 200, audit_response.get_json())
+        events = audit_response.get_json()
+        self.assertLessEqual(len(events), 2)
+
+    def test_00d_disabling_user_revokes_existing_sessions(self) -> None:
+        username = f"revoke_{uuid4().hex[:8]}"
+        create_user_response = self.client.post(
+            "/auth/users",
+            json={"username": username, "password": "phase8pass", "role": "operator"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(create_user_response.status_code, 201, create_user_response.get_json())
+        user = create_user_response.get_json()
+
+        login_response = self.client.post("/auth/login", json={"username": username, "password": "phase8pass"})
+        self.assertEqual(login_response.status_code, 200, login_response.get_json())
+        user_token = str(login_response.get_json()["token"])
+
+        me_response = self.client.get("/auth/me", headers=_headers(user_token))
+        self.assertEqual(me_response.status_code, 200, me_response.get_json())
+
+        disable_response = self.client.put(
+            f"/auth/users/{user['id']}",
+            json={"is_active": False},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(disable_response.status_code, 200, disable_response.get_json())
+        self.assertFalse(disable_response.get_json()["is_active"])
+
+        me_after_disable_response = self.client.get("/auth/me", headers=_headers(user_token))
+        self.assertEqual(me_after_disable_response.status_code, 401, me_after_disable_response.get_json())
+
     def test_01_operator_flow_accepts_centered_detection(self) -> None:
         templates_response = self.client.get("/templates", headers=_headers(self.operator_token))
         self.assertEqual(templates_response.status_code, 200)
@@ -656,6 +810,7 @@ class ApiSmokeTest(unittest.TestCase):
         )
         self.assertEqual(create_user_response.status_code, 201, create_user_response.get_json())
         user = create_user_response.get_json()
+        self.assertNotIn("password_hash", user)
 
         disable_response = self.client.put(
             f"/auth/users/{user['id']}",
@@ -665,6 +820,7 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(disable_response.status_code, 200, disable_response.get_json())
         disabled = disable_response.get_json()
         self.assertFalse(disabled["is_active"])
+        self.assertNotIn("password_hash", disabled)
 
         login_disabled_response = self.client.post("/auth/login", json={"username": new_username, "password": "phase8pass"})
         self.assertEqual(login_disabled_response.status_code, 401, login_disabled_response.get_json())

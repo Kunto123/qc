@@ -6,7 +6,8 @@ import io
 from flask import Blueprint, Response, g, jsonify, request
 
 from backend.app.core.container import inspection_results_repo, inspection_session_service
-from backend.app.core.http import require_auth
+from backend.app.core.http import require_auth, require_roles
+from shared.contracts.enums import UserRole
 
 
 inspection_blueprint = Blueprint("inspection", __name__)
@@ -98,6 +99,46 @@ def get_inspection(result_id: int):
     if item is None:
         return jsonify({"error": "Inspection result not found"}), 404
     return jsonify(item)
+
+
+@inspection_blueprint.post("/inspections/<int:result_id>/retry-push")
+@require_roles(UserRole.ADMIN)
+def retry_inspection_push(result_id: int):
+    try:
+        item = inspection_results_repo.retry_result(result_id)
+    except ValueError as exc:
+        message = str(exc)
+        status = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status
+    return jsonify({"ok": item.get("push_status") == "sent", "result": item})
+
+
+@inspection_blueprint.post("/inspections/retry-push")
+@require_roles(UserRole.ADMIN)
+def retry_failed_inspection_pushes():
+    payload = request.get_json(silent=True) or {}
+    raw_ids = payload.get("result_ids") or []
+    result_ids = []
+    if isinstance(raw_ids, list):
+        for value in raw_ids:
+            try:
+                result_ids.append(int(value))
+            except (TypeError, ValueError):
+                continue
+    limit = min(max(int(payload.get("limit") or 100), 1), 500)
+    try:
+        items = inspection_results_repo.retry_failed(result_ids=result_ids or None, limit=limit)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    succeeded = sum(1 for item in items if item.get("push_status") == "sent")
+    return jsonify(
+        {
+            "attempted": len(items),
+            "succeeded": succeeded,
+            "failed": len(items) - succeeded,
+            "items": items,
+        }
+    )
 
 
 @inspection_blueprint.get("/inspections/export")
