@@ -158,7 +158,12 @@ class OperatorScreen(ttk.Frame):
         self.sidebar_container = ttk.Frame(self.content, width=360)
         self.sidebar_container.grid_propagate(False)
         self.sidebar_container.columnconfigure(0, weight=1)
-        self.sidebar_container.rowconfigure(0, weight=1)
+        self.sidebar_container.rowconfigure(0, weight=0)  # counter: fixed
+        self.sidebar_container.rowconfigure(1, weight=1)  # scroll: fills rest
+
+        # Fixed counter strip — always visible, outside scroll area
+        self.counter_panel = CounterPanel(self.sidebar_container)
+        self.counter_panel.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
 
         self.sidebar_canvas = tk.Canvas(
             self.sidebar_container,
@@ -167,8 +172,8 @@ class OperatorScreen(ttk.Frame):
         )
         self.sidebar_scrollbar = ttk.Scrollbar(self.sidebar_container, orient="vertical", command=self.sidebar_canvas.yview)
         self.sidebar_canvas.configure(yscrollcommand=self.sidebar_scrollbar.set)
-        self.sidebar_canvas.grid(row=0, column=0, sticky="nsew")
-        self.sidebar_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.sidebar_canvas.grid(row=1, column=0, sticky="nsew")
+        self.sidebar_scrollbar.grid(row=1, column=1, sticky="ns")
 
         self.sidebar_inner = ttk.Frame(self.sidebar_canvas)
         self.sidebar_window = self.sidebar_canvas.create_window((0, 0), window=self.sidebar_inner, anchor="nw")
@@ -181,12 +186,9 @@ class OperatorScreen(ttk.Frame):
         self.result_panel = ResultPanel(self.sidebar_inner)
         self.result_panel.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
-        self.counter_panel = CounterPanel(self.sidebar_inner)
-        self.counter_panel.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-
         events = ttk.LabelFrame(self.sidebar_inner, text="Recent Events", padding=8)
-        events.grid(row=2, column=0, sticky="nsew")
-        self.sidebar_inner.rowconfigure(2, weight=1)
+        events.grid(row=1, column=0, sticky="nsew")
+        self.sidebar_inner.rowconfigure(1, weight=1)
         self.recent_list = tk.Listbox(events, height=12)
         self.recent_list.pack(fill="both", expand=True)
 
@@ -517,9 +519,12 @@ class OperatorScreen(ttk.Frame):
             self.template_version_value.set(str(version_id))
         self._set_roi_values("part_ready", detail.get("part_ready_roi") or detail.get("roi") or {})
         self._set_roi_values("sticker", detail.get("sticker_roi") or detail.get("roi") or {})
+        camera_config = detail.get("camera") or {}
+        if camera_config.get("camera_index") is not None:
+            self.camera_value.set(str(camera_config["camera_index"]))
         sticker_config = detail.get("sticker") or {}
-        if not self.line_value.get().strip() and sticker_config.get("line"):
-            self.line_value.set(str(sticker_config.get("line")))
+        if sticker_config.get("line"):
+            self.line_value.set(str(sticker_config["line"]))
         self.state.cache["selected_template_detail"] = detail
         self._refresh_context_summary()
 

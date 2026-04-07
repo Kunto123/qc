@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from client_tk.app.components.template_forms import JsonEditor, LabeledValuePanel, StatCard, TemplateEditorForm
 
@@ -207,6 +207,7 @@ class AdminScreen(ttk.Frame):
         ttk.Label(filters, text="Decision").grid(row=1, column=2, sticky="w", padx=(0, 8), pady=4)
         self.result_filter_decision.grid(row=1, column=3, sticky="ew", pady=4)
         ttk.Button(filters, text="Refresh", command=self.refresh_results).grid(row=1, column=5, sticky="e", pady=4)
+        ttk.Button(filters, text="Export CSV", command=self._export_csv).grid(row=1, column=6, sticky="e", padx=(6, 0), pady=4)
 
         container = ttk.Panedwindow(self.results_tab, orient="horizontal")
         container.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
@@ -522,6 +523,28 @@ class AdminScreen(ttk.Frame):
                 "end",
                 f"{item['id']} | {item.get('decision')} | {item.get('part_name')} | {item.get('line_id')}/{item.get('station_id') or '-'} | {item.get('reject_reason_code') or 'OK'}",
             )
+
+    def _export_csv(self) -> None:
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+            initialfile="inspections.csv",
+            title="Export Inspection Results",
+        )
+        if not path:
+            return
+        try:
+            csv_text = self.api.export_inspections_csv(self._results_filters())
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Export CSV", str(exc))
+            return
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(csv_text)
+        except OSError as exc:
+            messagebox.showerror("Export CSV", f"Could not write file:\n{exc}")
+            return
+        messagebox.showinfo("Export CSV", f"Saved {len(csv_text.splitlines()) - 1} rows to:\n{path}")
 
     def open_result(self) -> None:
         result_id = self._selected_listbox_id(self.results_list)

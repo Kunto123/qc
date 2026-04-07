@@ -287,7 +287,10 @@ class EngineerScreen(ttk.Frame):
         self._grid_entry(form, 2, 2, "Classes CSV", self.model_class_names)
         self._grid_entry(form, 3, 0, "Architecture Family", self.model_arch_family)
         self._grid_entry(form, 3, 2, "Architecture Variant", self.model_arch_variant)
-        ttk.Button(form, text="Register Model", command=self.create_model).grid(row=4, column=0, columnspan=4, sticky="e", pady=(10, 0))
+        btn_bar = ttk.Frame(form)
+        btn_bar.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        ttk.Button(btn_bar, text="Upload .pt File", command=self._upload_model_file).pack(side="left")
+        ttk.Button(btn_bar, text="Register Model (path only)", command=self.create_model).pack(side="right")
 
         self.model_detail = JsonEditor(right, "Model Detail", {})
         self.model_detail.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
@@ -302,9 +305,13 @@ class EngineerScreen(ttk.Frame):
         container.pack(fill="both", expand=True)
 
         left = ttk.Frame(container, padding=8)
-        right = ttk.Frame(container, padding=8)
+        right_outer = ttk.Frame(container)
+        right_scroller = ScrollableFrame(right_outer)
+        right_scroller.pack(fill="both", expand=True)
+        right = ttk.Frame(right_scroller.body, padding=8)
+        right.pack(fill="both", expand=True)
         container.add(left, weight=2)
-        container.add(right, weight=2)
+        container.add(right_outer, weight=2)
 
         ttk.Label(left, text="Part Ready Color Calibration", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
@@ -679,6 +686,44 @@ class EngineerScreen(ttk.Frame):
             messagebox.showerror("Models", str(exc))
             return
         self.model_detail.set_payload(created)
+        self.refresh_models()
+
+    def _upload_model_file(self):
+        pt_path = filedialog.askopenfilename(
+            title="Pilih Model File (.pt)",
+            filetypes=[("PyTorch Model", "*.pt *.pth"), ("All files", "*.*")],
+        )
+        if not pt_path:
+            return
+        name = self.model_name.get().strip()
+        if not name:
+            messagebox.showwarning("Upload Model", "Isi field 'Name' terlebih dahulu.")
+            return
+        class_names = [item.strip() for item in self.model_class_names.get().split(",") if item.strip()]
+        try:
+            with open(pt_path, "rb") as f:
+                content_b64 = base64.b64encode(f.read()).decode("ascii")
+        except OSError as exc:
+            messagebox.showerror("Upload Model", f"Gagal membaca file:\n{exc}")
+            return
+        file_name = Path(pt_path).name
+        payload = {
+            "name": name,
+            "file_name": file_name,
+            "content_b64": content_b64,
+            "runtime": self.model_runtime.get().strip() or "ultralytics",
+            "task": self.model_task.get().strip() or "detection",
+            "class_names": class_names,
+            "architecture_family": self.model_arch_family.get().strip() or None,
+            "architecture_variant": self.model_arch_variant.get().strip() or None,
+        }
+        try:
+            result = self.api.upload_model_file(payload)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Upload Model", str(exc))
+            return
+        messagebox.showinfo("Upload Model", f"Model '{name}' berhasil diupload.\nDisimpan di: {result.get('saved_to')}")
+        self.model_detail.set_payload(result)
         self.refresh_models()
 
     def on_model_selected(self):

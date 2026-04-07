@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from flask import Blueprint, jsonify, request
 
+from backend.app.core.config import MODELS_DIR
 from backend.app.core.container import datasets_repo, models_repo, training_service
 from backend.app.core.http import require_auth, require_roles
 from shared.contracts.enums import UserRole
@@ -143,6 +144,42 @@ def cancel_training_job(job_id: str):
 @require_auth
 def list_models():
     return jsonify(models_repo.list_models())
+
+
+@workstation_blueprint.post("/models/upload")
+@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+def upload_model():
+    payload = request.get_json(force=True) or {}
+    name = str(payload.get("name") or "").strip()
+    file_name = str(payload.get("file_name") or "model.pt").strip()
+    content_b64 = str(payload.get("content_b64") or "").strip()
+    class_names_raw = payload.get("class_names") or []
+
+    if not name or not content_b64:
+        return jsonify({"error": "name and content_b64 are required"}), 400
+    if not isinstance(class_names_raw, list):
+        return jsonify({"error": "class_names must be a list"}), 400
+
+    try:
+        content = base64.b64decode(content_b64)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"Invalid base64 content: {exc}"}), 400
+
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    dest = MODELS_DIR / file_name
+    dest.write_bytes(content)
+
+    model = models_repo.add_model(
+        name,
+        str(dest),
+        "upload",
+        runtime=str(payload.get("runtime") or "ultralytics").strip() or "ultralytics",
+        task=str(payload.get("task") or "detection").strip() or "detection",
+        class_names=list(class_names_raw),
+        architecture_family=str(payload.get("architecture_family") or "").strip() or None,
+        architecture_variant=str(payload.get("architecture_variant") or "").strip() or None,
+    )
+    return jsonify({**model, "saved_to": str(dest)}), 201
 
 
 @workstation_blueprint.post("/models")

@@ -113,6 +113,19 @@ class ApiClient:
     def list_inspections(self, params: dict | None = None) -> list[dict]:
         return self._get("/inspections", params)
 
+    def export_inspections_csv(self, params: dict | None = None) -> str:
+        """Return raw CSV text from the server export endpoint."""
+        response = self.session.request(
+            method="GET",
+            url=f"{self.base_url}/inspections/export",
+            params=params or {},
+            headers=self._headers(),
+            timeout=30,
+        )
+        if not response.ok:
+            raise RuntimeError(f"{response.status_code}: {response.text}")
+        return response.text
+
     def get_inspection(self, result_id: int) -> dict:
         return self._get(f"/inspections/{result_id}")
 
@@ -184,3 +197,6 @@ class ApiClient:
 
     def create_model(self, payload: dict) -> dict:
         return self._post("/models", payload)
+
+    def upload_model_file(self, payload: dict) -> dict:
+        return self._post("/models/upload", payload)

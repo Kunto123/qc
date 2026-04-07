@@ -778,18 +778,25 @@ class InspectionSessionService:
             state.current_event_started_at = now
             state.current_event_stable_frames = 1
             state.current_event_committed = False
-        elif state.current_event_committed:
-            return InspectionEventState.COOLDOWN.value, state.current_event_id, False
         elif state.current_event_key == event_key:
+            # Same outcome: honour cooldown to prevent double-counting.
+            if state.current_event_committed:
+                return InspectionEventState.COOLDOWN.value, state.current_event_id, False
             state.current_event_stable_frames += 1
         else:
+            # Outcome changed (e.g. REJECT → ACCEPT after config fix) → new event.
+            state.event_sequence += 1
+            state.current_event_id = f"evt-{state.event_sequence:05d}"
             state.current_event_key = event_key
+            state.current_event_started_at = now
             state.current_event_stable_frames = 1
+            state.current_event_committed = False
 
         if not part_ready_payload.get("part_ready", False):
             return InspectionEventState.PART_DETECTED.value, state.current_event_id, False
 
-        if state.current_event_stable_frames >= COMMIT_STABLE_FRAMES:
+        commit_threshold = int(getattr(state.template.sticker, "commit_stable_frames", None) or COMMIT_STABLE_FRAMES)
+        if state.current_event_stable_frames >= commit_threshold:
             state.current_event_committed = True
             state.cooldown_until = now + timedelta(milliseconds=COMMIT_COOLDOWN_MS)
             return InspectionEventState.DECISION_COMMITTED.value, state.current_event_id, True
@@ -840,10 +847,11 @@ class InspectionSessionService:
         del state.recent_events[MAX_RECENT_EVENTS:]
 
     def _increment_session_counters(self, state: SessionState, validation: dict[str, Any]) -> None:
-        state.session_total += 1
         if validation.get("decision") == DecisionCode.ACCEPT.value:
+            state.session_total += 1
             state.session_accept += 1
             return
+        # REJECT: tracked in reject counters only, does not increment session_total
         state.session_reject += 1
         reject_reason = str(validation.get("reject_reason_code") or RejectReasonCode.ERROR.value)
         state.session_reject_breakdown.setdefault(reject_reason, 0)

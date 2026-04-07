@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from client_tk.app.components.roi_picker_canvas import RoiPickerCanvas
+from client_tk.app.components.scrollable_frame import ScrollableFrame
 
 
 def _float_or_none(value: str) -> float | None:
@@ -145,6 +146,7 @@ class TemplateEditorForm(ttk.Frame):
         self.sticker_max_offset_y_var = tk.StringVar(value="80")
         self.sticker_expected_center_x_var = tk.StringVar(value="")
         self.sticker_expected_center_y_var = tk.StringVar(value="")
+        self.sticker_commit_stable_frames_var = tk.StringVar(value="5")
         self._api_client_ref = None  # set from outside for "Load from Session"
 
         self.write_to_db_var = tk.BooleanVar(value=True)
@@ -163,14 +165,19 @@ class TemplateEditorForm(ttk.Frame):
 
         camera_tab = ttk.Frame(notebook, padding=10)
         part_ready_tab = ttk.Frame(notebook, padding=10)
-        sticker_tab = ttk.Frame(notebook, padding=10)
+        _sticker_tab_outer = ttk.Frame(notebook)
+        _sticker_scroller = ScrollableFrame(_sticker_tab_outer)
+        _sticker_scroller.pack(fill="both", expand=True)
+        sticker_tab = ttk.Frame(_sticker_scroller.body, padding=10)
+        sticker_tab.pack(fill="both", expand=True)
+        sticker_tab.columnconfigure(0, weight=1)
         vision_tab = ttk.Frame(notebook, padding=10)
         persistence_tab = ttk.Frame(notebook, padding=10)
         metadata_tab = ttk.Frame(notebook, padding=10)
 
         notebook.add(camera_tab, text="Camera")
         notebook.add(part_ready_tab, text="Part Ready")
-        notebook.add(sticker_tab, text="Sticker")
+        notebook.add(_sticker_tab_outer, text="Sticker")
         notebook.add(vision_tab, text="Vision")
         notebook.add(persistence_tab, text="Persistence")
         notebook.add(metadata_tab, text="Metadata")
@@ -214,6 +221,9 @@ class TemplateEditorForm(ttk.Frame):
         self._entry(sticker_config, 4, 2, "Max Offset Y", self.sticker_max_offset_y_var)
         self._entry(sticker_config, 5, 0, "Expected Center X (0-1)", self.sticker_expected_center_x_var)
         self._entry(sticker_config, 5, 2, "Expected Center Y (0-1)", self.sticker_expected_center_y_var)
+        self._entry(sticker_config, 6, 0, "Stable Frames (debounce)", self.sticker_commit_stable_frames_var)
+        ttk.Label(sticker_config, text="Jumlah frame stabil berurutan sebelum keputusan dikunci (default 5).", foreground="#64748b", font=("Segoe UI", 8)).grid(
+            row=6, column=2, columnspan=2, sticky="w", padx=(0, 8))
         ttk.Label(sticker_config, text="Kosong = auto center (0.5). Gunakan Visual Picker di bawah.", foreground="#64748b", font=("Segoe UI", 8)).grid(
             row=6, column=0, columnspan=4, sticky="w", pady=(0, 4)
         )
@@ -221,8 +231,6 @@ class TemplateEditorForm(ttk.Frame):
         # Visual ROI Picker
         self.roi_picker = RoiPickerCanvas(sticker_tab, "Visual ROI & Expected Center Picker", size=(640, 300))
         self.roi_picker.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
-        sticker_tab.rowconfigure(2, weight=1)
-        sticker_tab.columnconfigure(0, weight=1)
 
         picker_actions = ttk.Frame(sticker_tab)
         picker_actions.grid(row=3, column=0, sticky="w", pady=(4, 0))
@@ -476,6 +484,7 @@ class TemplateEditorForm(ttk.Frame):
         self.sticker_max_offset_y_var.set("" if sticker.get("max_offset_y") is None else str(sticker.get("max_offset_y")))
         self.sticker_expected_center_x_var.set("" if sticker.get("expected_center_x") is None else str(sticker.get("expected_center_x")))
         self.sticker_expected_center_y_var.set("" if sticker.get("expected_center_y") is None else str(sticker.get("expected_center_y")))
+        self.sticker_commit_stable_frames_var.set(str(sticker.get("commit_stable_frames") or "5"))
         self.after_idle(self._sync_picker)
 
         persistence = payload.get("persistence") or {}
@@ -552,6 +561,7 @@ class TemplateEditorForm(ttk.Frame):
                 "max_offset_y": _float_or_none(self.sticker_max_offset_y_var.get()),
                 "expected_center_x": _float_or_none(self.sticker_expected_center_x_var.get()),
                 "expected_center_y": _float_or_none(self.sticker_expected_center_y_var.get()),
+                "commit_stable_frames": _int_or_none(self.sticker_commit_stable_frames_var.get()) or 5,
             },
             "persistence": {
                 "write_to_db": bool(self.write_to_db_var.get()),

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from flask import Blueprint, g, jsonify, request
+import csv
+import io
+
+from flask import Blueprint, Response, g, jsonify, request
 
 from backend.app.core.container import inspection_results_repo, inspection_session_service
 from backend.app.core.http import require_auth
@@ -95,3 +98,33 @@ def get_inspection(result_id: int):
     if item is None:
         return jsonify({"error": "Inspection result not found"}), 404
     return jsonify(item)
+
+
+@inspection_blueprint.get("/inspections/export")
+@require_auth
+def export_inspections():
+    items = inspection_results_repo.list_results(
+        line_id=request.args.get("line_id") or None,
+        station_id=request.args.get("station_id") or None,
+        part_name=request.args.get("part_name") or None,
+        template_version_id=int(request.args["template_version_id"]) if request.args.get("template_version_id") else None,
+        decision_code=request.args.get("decision_code") or None,
+        limit=10000,
+        offset=0,
+    )
+    fields = [
+        "id", "inspected_at", "line_id", "station_id", "part_name",
+        "decision_code", "reject_reason_code",
+        "part_ready_match_ratio", "sticker_confidence",
+        "detected_class", "expected_class",
+        "template_version_id", "push_status",
+    ]
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(items)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=inspections.csv"},
+    )
