@@ -1,0 +1,60 @@
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments / local Python tooling
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Environment / local config
+.env
+.env.*
+!.env.example
+
+# Test / coverage / type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# IDE / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Logs / temp files
+*.log
+*.tmp
+*.temp
+
+# Runtime local data
+data/datasets/
+data/json_store/
+
+# Large model binaries and generated training outputs
+data/models/*.pt
+data/models/*.onnx
+data/models/*.engine
+data/models/*.bin
+data/models/trained/
+
+# Keep metadata / small reference files in repo when needed
+!data/models/*.meta.json
+!data/models/*.json
+!data/models/*.csv
+!data/models/*.txt
