@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+from flask import Blueprint, g, jsonify, request
+
+from backend.app.core.container import inspection_results_repo, inspection_session_service
+from backend.app.core.http import require_auth
+
+
+inspection_blueprint = Blueprint("inspection", __name__)
+
+
+@inspection_blueprint.post("/inspection/sessions/start")
+@require_auth
+def start_session():
+    payload = request.get_json(force=True) or {}
+    try:
+        session = inspection_session_service.start_session(
+            client_id=str(payload.get("client_id") or "").strip() or str(g.current_user.id),
+            camera_index=int(payload.get("camera_index") or 0),
+            template_version_id=int(payload.get("template_version_id") or 0),
+            line_id=str(payload.get("line_id") or "").strip() or None,
+            station_id=str(payload.get("station_id") or "").strip() or None,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(session), 201
+
+
+@inspection_blueprint.post("/inspection/sessions/<session_id>/frame")
+@require_auth
+def push_frame(session_id: str):
+    payload = request.get_json(force=True) or {}
+    try:
+        result = inspection_session_service.process_frame(
+            session_id,
+            image_b64=str(payload.get("image_b64") or ""),
+            username=g.current_user.username,
+            user_id=g.current_user.id,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(result)
+
+
+@inspection_blueprint.post("/inspection/sessions/<session_id>/roi")
+@require_auth
+def update_roi(session_id: str):
+    payload = request.get_json(force=True) or {}
+    try:
+        result = inspection_session_service.update_roi(session_id, payload)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    return jsonify(result)
+
+
+@inspection_blueprint.post("/inspection/sessions/<session_id>/stop")
+@require_auth
+def stop_session(session_id: str):
+    try:
+        result = inspection_session_service.stop_session(session_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    return jsonify(result)
+
+
+@inspection_blueprint.get("/inspection/latest-preview")
+@require_auth
+def latest_preview():
+    result = inspection_session_service.get_latest_preview()
+    if result is None:
+        return jsonify({"error": "No active session with frames available."}), 404
+    return jsonify(result)
+
+
+@inspection_blueprint.get("/inspections")
+@require_auth
+def list_inspections():
+    items = inspection_results_repo.list_results(
+        line_id=request.args.get("line_id") or None,
+        station_id=request.args.get("station_id") or None,
+        part_name=request.args.get("part_name") or None,
+        template_version_id=int(request.args["template_version_id"]) if request.args.get("template_version_id") else None,
+        decision_code=request.args.get("decision_code") or None,
+        push_status=request.args.get("push_status") or None,
+        limit=min(int(request.args.get("limit") or 100), 1000),
+        offset=int(request.args.get("offset") or 0),
+    )
+    return jsonify(items)
+
+
+@inspection_blueprint.get("/inspections/<int:result_id>")
+@require_auth
+def get_inspection(result_id: int):
+    item = inspection_results_repo.get_result(result_id)
+    if item is None:
+        return jsonify({"error": "Inspection result not found"}), 404
+    return jsonify(item)
