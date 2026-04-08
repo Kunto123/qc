@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from backend.app.services.calibration import CalibrationService
+from backend.app.core.model_catalog import list_base_models as catalog_list_base_models
 from client_tk.app.components.live_view import LiveView
 from client_tk.app.components.roi_picker_canvas import RoiPickerCanvas
 from client_tk.app.components.scrollable_frame import ScrollableFrame
@@ -21,10 +22,15 @@ class EngineerScreen(ttk.Frame):
         self.api = api_client
         self.state = session_state
         self.upload_path: str | None = None
+        self.upload_paths: list[str] = []
         self.selected_calibration_path: str | None = None
         self.computed_profile: dict | None = None
         self.calibration_image = None
-        self._dataset_cache: list[dict] = []
+        self._dataset_cache: list[dict] = []        
+        self._base_model_cache: list[dict] = []
+        self._base_model_lookup: dict[str, dict] = {}
+        self._dataset_version_cache: list[dict] = []
+        self._dataset_version_lookup: dict[str, dict] = {}
         self._training_jobs: list[dict] = []
         self._model_cache: list[dict] = []
         self._profile_cache: list[dict] = []
@@ -48,6 +54,7 @@ class EngineerScreen(ttk.Frame):
         self._build_calibration_tab()
 
         self.refresh_datasets()
+        self.refresh_base_models()
         self.refresh_augment_jobs()
         self.refresh_training_jobs()
         self.refresh_models()
@@ -91,10 +98,24 @@ class EngineerScreen(ttk.Frame):
         ttk.Button(action_bar, text="Delete Selected", command=self.delete_dataset).pack(side="left", padx=6)
         ttk.Button(action_bar, text="Refresh", command=self.refresh_datasets).pack(side="left")
 
+        self.dataset_summary = LabeledValuePanel(
+            dataset_panel,
+            "Dataset Summary",
+            [
+                ("image_count", "Images"),
+                ("label_count", "Label Files"),
+                ("annotated_image_count", "Annotated Images"),
+                ("augmented_count", "Augmented"),
+                ("annotation_coverage", "Coverage"),
+            ],
+            columns=2,
+        )
+        self.dataset_summary.pack(fill="x", pady=(8, 0))
+
         ttk.Label(upload_panel, text="Upload and Browse Files", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
             upload_panel,
-            text="Upload file ke folder `images`, `labels`, atau `exports`, lalu lihat isi dataset aktif di browser file.",
+            text="Upload satu atau banyak file ke folder `images`, `labels`, atau `exports`, lalu lihat isi dataset aktif di browser file.",
             foreground="#475569",
             wraplength=420,
             justify="left",
@@ -104,11 +125,11 @@ class EngineerScreen(ttk.Frame):
         self.upload_dataset_id = ttk.Entry(upload_form)
         self.upload_target = ttk.Combobox(upload_form, values=["images", "labels", "exports"], state="readonly")
         self.upload_target.set("images")
-        self.upload_file_label = ttk.Label(upload_form, text="No file selected")
+        self.upload_file_label = ttk.Label(upload_form, text="No file selected", wraplength=380, justify="left")
         self._grid_entry(upload_form, 0, 0, "Dataset ID", self.upload_dataset_id)
         ttk.Label(upload_form, text="Target").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
         self.upload_target.grid(row=1, column=1, sticky="ew", pady=4)
-        ttk.Button(upload_form, text="Choose File", command=self._choose_upload_file).grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Button(upload_form, text="Choose Files", command=self._choose_upload_file).grid(row=2, column=0, sticky="w", pady=(6, 0))
         ttk.Button(upload_form, text="Upload", command=self._upload_file).grid(row=2, column=1, sticky="e", pady=(6, 0))
         self.upload_file_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
         upload_form.columnconfigure(1, weight=1)
@@ -123,6 +144,55 @@ class EngineerScreen(ttk.Frame):
         ttk.Button(toolbar, text="Refresh Files", command=self.refresh_dataset_files).pack(side="left", padx=6)
         self.dataset_files = tk.Listbox(browser_frame)
         self.dataset_files.pack(fill="both", expand=True, pady=(8, 0))
+
+        version_frame = ttk.LabelFrame(upload_panel, text="Dataset Versions", padding=8)
+        version_frame.pack(fill="both", expand=True, pady=(10, 0))
+        version_form = ttk.Frame(version_frame)
+        version_form.pack(fill="x")
+        version_form.columnconfigure(1, weight=1)
+        version_form.columnconfigure(3, weight=1)
+        self.version_name = ttk.Entry(version_form)
+        self.version_description = ttk.Entry(version_form)
+        self.version_train_ratio = ttk.Entry(version_form)
+        self.version_valid_ratio = ttk.Entry(version_form)
+        self.version_test_ratio = ttk.Entry(version_form)
+        for entry, default in (
+            (self.version_name, "Snapshot v1"),
+            (self.version_description, "YOLO export snapshot"),
+            (self.version_train_ratio, "0.7"),
+            (self.version_valid_ratio, "0.2"),
+            (self.version_test_ratio, "0.1"),
+        ):
+            entry.insert(0, default)
+        self._grid_entry(version_form, 0, 0, "Name", self.version_name)
+        self._grid_entry(version_form, 0, 2, "Description", self.version_description)
+        self._grid_entry(version_form, 1, 0, "Train", self.version_train_ratio)
+        self._grid_entry(version_form, 1, 2, "Valid", self.version_valid_ratio)
+        self._grid_entry(version_form, 2, 0, "Test", self.version_test_ratio)
+        version_btn_bar = ttk.Frame(version_form)
+        version_btn_bar.grid(row=2, column=2, columnspan=2, sticky="e", pady=(4, 0))
+        ttk.Button(version_btn_bar, text="Create Version", command=self.create_dataset_version).pack(side="left")
+        ttk.Button(version_btn_bar, text="Rebuild Export", command=self.rebuild_dataset_version_export).pack(side="left", padx=6)
+        ttk.Button(version_btn_bar, text="Refresh", command=self.refresh_dataset_versions).pack(side="left")
+        self.dataset_versions = tk.Listbox(version_frame, height=5)
+        self.dataset_versions.pack(fill="both", expand=True, pady=(8, 0))
+        self.dataset_versions.bind("<<ListboxSelect>>", lambda _event: self.on_dataset_version_selected())
+        self.dataset_version_summary = LabeledValuePanel(
+            version_frame,
+            "Version Summary",
+            [
+                ("version_number", "Version"),
+                ("status", "Status"),
+                ("export_format", "Export"),
+                ("image_count", "Images"),
+                ("annotated_image_count", "Annotated"),
+                ("coverage_percent", "Coverage"),
+            ],
+            columns=2,
+        )
+        self.dataset_version_summary.pack(fill="x", pady=(8, 0))
+        self.dataset_version_detail = JsonEditor(version_frame, "Version Detail", {})
+        self.dataset_version_detail.pack(fill="both", expand=True, pady=(8, 0))
 
         bottom.columnconfigure(0, weight=1)
         bottom.columnconfigure(1, weight=2)
@@ -151,13 +221,45 @@ class EngineerScreen(ttk.Frame):
         ttk.Button(annot_form, text="Save Annotation", command=self.save_annotation).grid(row=2, column=1, sticky="e", pady=(6, 0))
         annot_form.columnconfigure(1, weight=1)
 
+        quick_label = ttk.LabelFrame(annot_left, text="Quick Label Builder", padding=8)
+        quick_label.pack(fill="x", pady=(10, 0))
+        quick_label.columnconfigure(1, weight=1)
+        quick_label.columnconfigure(3, weight=1)
+        self.annot_shape = ttk.Combobox(quick_label, values=["bbox", "polygon"], state="readonly")
+        self.annot_shape.set("bbox")
+        self.annot_label_class = ttk.Entry(quick_label)
+        self.annot_bbox_x = ttk.Entry(quick_label)
+        self.annot_bbox_y = ttk.Entry(quick_label)
+        self.annot_bbox_w = ttk.Entry(quick_label)
+        self.annot_bbox_h = ttk.Entry(quick_label)
+        self.annot_polygon_points = ttk.Entry(quick_label)
+        for entry, default in (
+            (self.annot_bbox_x, "0.1"),
+            (self.annot_bbox_y, "0.1"),
+            (self.annot_bbox_w, "0.2"),
+            (self.annot_bbox_h, "0.2"),
+        ):
+            entry.insert(0, default)
+        self._grid_entry(quick_label, 0, 0, "Shape", self.annot_shape)
+        self._grid_entry(quick_label, 0, 2, "Class", self.annot_label_class)
+        self._grid_entry(quick_label, 1, 0, "BBox x", self.annot_bbox_x)
+        self._grid_entry(quick_label, 1, 2, "BBox y", self.annot_bbox_y)
+        self._grid_entry(quick_label, 2, 0, "BBox w", self.annot_bbox_w)
+        self._grid_entry(quick_label, 2, 2, "BBox h", self.annot_bbox_h)
+        ttk.Label(quick_label, text="Polygon points (x,y; x,y; ...)", foreground="#475569").grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self.annot_polygon_points.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        quick_action_bar = ttk.Frame(quick_label)
+        quick_action_bar.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        ttk.Button(quick_action_bar, text="Add Label", command=self.append_annotation_label).pack(side="left")
+        ttk.Label(quick_action_bar, text="BBox uses normalized coordinates 0..1.", foreground="#64748b").pack(side="left", padx=8)
+
         image_frame = ttk.LabelFrame(annot_left, text="Images", padding=8)
         image_frame.pack(fill="both", expand=True, pady=(10, 0))
         self.annot_images = tk.Listbox(image_frame)
         self.annot_images.pack(fill="both", expand=True)
         self.annot_images.bind("<<ListboxSelect>>", lambda _event: self.on_annotation_image_selected())
 
-        self.annot_editor = JsonEditor(annot_right, "Labels JSON", {"labels": []})
+        self.annot_editor = JsonEditor(annot_right, "Labels JSON", {"schema_version": 1, "image_name": "", "labels": []})
         self.annot_editor.pack(fill="both", expand=True)
 
     def _build_training_tab(self) -> None:
@@ -177,20 +279,30 @@ class EngineerScreen(ttk.Frame):
             wraplength=320,
             justify="left",
         ).pack(anchor="w", pady=(2, 8))
-        self.augment_jobs = tk.Listbox(augment_panel, height=12)
-        self.augment_jobs.pack(fill="both", expand=True)
-        augment_form = ttk.Frame(augment_panel)
+        augment_form = ttk.LabelFrame(augment_panel, text="Recipe", padding=8)
         augment_form.pack(fill="x", pady=(8, 0))
-        self.augment_dataset = ttk.Entry(augment_form)
-        self._grid_entry(augment_form, 0, 0, "Dataset ID", self.augment_dataset)
-        ttk.Button(augment_form, text="Create Augment Job", command=self.create_augment_job).grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Button(augment_form, text="Refresh", command=self.refresh_augment_jobs).grid(row=1, column=1, sticky="e", pady=(6, 0))
         augment_form.columnconfigure(1, weight=1)
+        augment_form.columnconfigure(3, weight=1)
+        self.augment_dataset = ttk.Entry(augment_form)
+        self.augment_transforms = ttk.Entry(augment_form)
+        self.augment_multiplier = ttk.Spinbox(augment_form, from_=1, to=10, increment=1, width=8)
+        self.augment_transforms.insert(0, "flip_h, brightness, blur")
+        self.augment_multiplier.set(2)
+        self._grid_entry(augment_form, 0, 0, "Dataset ID", self.augment_dataset)
+        self._grid_entry(augment_form, 0, 2, "Transforms", self.augment_transforms)
+        self._grid_entry(augment_form, 1, 0, "Multiplier", self.augment_multiplier)
+        augment_btn_bar = ttk.Frame(augment_form)
+        augment_btn_bar.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        ttk.Button(augment_btn_bar, text="Create Augment Job", command=self.create_augment_job).pack(side="left")
+        ttk.Button(augment_btn_bar, text="Refresh", command=self.refresh_augment_jobs).pack(side="left", padx=6)
+
+        self.augment_jobs = tk.Listbox(augment_panel, height=12)
+        self.augment_jobs.pack(fill="both", expand=True, pady=(8, 0))
 
         ttk.Label(train_panel, text="Training Jobs", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
             train_panel,
-            text="Training job untuk sticker detector. Pilih dataset, base model, lalu backend akan menyimpan metadata dan path hasil training.",
+            text="Training job untuk sticker detector. Pilih dataset, base model, dan device; backend akan memilih GPU dulu lalu fallback ke CPU bila GPU tidak tersedia.",
             foreground="#475569",
             wraplength=540,
             justify="left",
@@ -200,11 +312,36 @@ class EngineerScreen(ttk.Frame):
         top.pack(fill="x")
         top.columnconfigure(1, weight=1)
         top.columnconfigure(3, weight=1)
+        top.columnconfigure(5, weight=1)
         self.train_dataset = ttk.Entry(top)
-        self.train_model = ttk.Entry(top)
-        self.train_model.insert(0, "baseline")
+        self.train_base_model = ttk.Combobox(top, state="readonly")
+        self.train_device = ttk.Combobox(top, values=["auto", "gpu", "cpu"], state="readonly")
+        self.train_device.set("auto")
         self._grid_entry(top, 0, 0, "Dataset ID", self.train_dataset)
-        self._grid_entry(top, 0, 2, "Base Model", self.train_model)
+        self._grid_entry(top, 0, 2, "Base Model", self.train_base_model)
+        ttk.Label(top, text="Device").grid(row=0, column=4, sticky="w", padx=(0, 8), pady=4)
+        self.train_device.grid(row=0, column=5, sticky="ew", pady=4)
+        self.train_base_model_info = tk.StringVar(value="Pilih base model dari katalog YOLOv5 / YOLOv11.")
+        ttk.Label(train_panel, textvariable=self.train_base_model_info, foreground="#475569", wraplength=540, justify="left").pack(anchor="w", pady=(4, 0))
+        self.train_base_model.bind("<<ComboboxSelected>>", lambda _event: self._refresh_base_model_info())
+
+        version_panel = ttk.LabelFrame(train_panel, text="Dataset Version", padding=8)
+        version_panel.pack(fill="x", pady=(8, 0))
+        version_panel.columnconfigure(1, weight=1)
+        self.train_dataset_version = ttk.Combobox(version_panel, state="readonly")
+        self.train_dataset_version_info = tk.StringVar(
+            value="Pilih dataset version agar training berjalan di atas snapshot yang bisa direproduksi."
+        )
+        self._grid_entry(version_panel, 0, 0, "Version", self.train_dataset_version)
+        ttk.Label(
+            version_panel,
+            textvariable=self.train_dataset_version_info,
+            foreground="#475569",
+            wraplength=540,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.train_dataset_version.bind("<<ComboboxSelected>>", lambda _event: self._refresh_train_dataset_version_info())
+
         button_bar = ttk.Frame(train_panel)
         button_bar.pack(fill="x", pady=(8, 0))
         ttk.Button(button_bar, text="Start Training", command=self.create_training_job).pack(side="left")
@@ -230,6 +367,13 @@ class EngineerScreen(ttk.Frame):
                 ("dataset_id", "Dataset"),
                 ("status", "Status"),
                 ("base_model", "Base Model"),
+                ("base_model_display_name", "Model Name"),
+                ("base_model_family", "Family"),
+                ("base_model_variant", "Variant"),
+                ("requested_device_mode", "Requested Device"),
+                ("effective_device", "Effective Device"),
+                ("device_backend", "Device Backend"),
+                ("device_fallback_reason", "Fallback Reason"),
                 ("trained_model_path", "Output Model"),
                 ("created_at", "Created"),
                 ("finished_at", "Finished"),
@@ -448,15 +592,104 @@ class EngineerScreen(ttk.Frame):
             return None
         return str(self._dataset_cache[index]["id"])
 
+    def _selected_dataset_record(self) -> dict | None:
+        index = self._selected_listbox_index(self.dataset_list)
+        if index is None or index >= len(self._dataset_cache):
+            return None
+        return self._dataset_cache[index]
+
+    def _current_dataset_id(self) -> str | None:
+        for candidate in (
+            self._selected_dataset_id(),
+            self.upload_dataset_id.get().strip(),
+            self.annot_dataset.get().strip(),
+            self.augment_dataset.get().strip(),
+            self.train_dataset.get().strip(),
+        ):
+            if candidate:
+                return candidate
+        return None
+
+    def _selected_dataset_version_id(self) -> str | None:
+        index = self._selected_listbox_index(self.dataset_versions)
+        if index is None or index >= len(self._dataset_version_cache):
+            return None
+        return str(self._dataset_version_cache[index].get("id") or "").strip() or None
+
+    def _selected_dataset_version_record(self) -> dict | None:
+        index = self._selected_listbox_index(self.dataset_versions)
+        if index is None or index >= len(self._dataset_version_cache):
+            return None
+        return self._dataset_version_cache[index]
+
+    def _version_lookup_key(self, version: dict) -> str:
+        return str(version.get("display_label") or version.get("id") or "").strip()
+
+    def _update_dataset_version_summary(self, version: dict | None) -> None:
+        if not version:
+            self.dataset_version_summary.reset()
+            self.dataset_version_detail.set_payload({})
+            self.train_dataset_version.set("")
+            self.train_dataset_version_info.set(
+                "Pilih dataset version agar training berjalan di atas snapshot yang bisa direproduksi."
+            )
+            return
+        self.dataset_version_summary.set_values(
+            {
+                "version_number": version.get("version_number"),
+                "status": version.get("status"),
+                "export_format": version.get("export_format"),
+                "image_count": version.get("image_count", 0),
+                "annotated_image_count": version.get("annotated_image_count", 0),
+                "coverage_percent": f"{float(version.get('coverage_percent') or 0):.1f}%",
+            }
+        )
+        self.dataset_version_detail.set_payload(version)
+        self.train_dataset_version.set(self._version_lookup_key(version))
+        self._refresh_train_dataset_version_info()
+
+    def _refresh_train_dataset_version_info(self) -> None:
+        spec = self._selected_dataset_version_spec()
+        if spec is None:
+            self.train_dataset_version_info.set(
+                "Pilih dataset version agar training berjalan di atas snapshot yang bisa direproduksi."
+            )
+            return
+        split_ratios = spec.get("split_ratios") or {}
+        split_text = ", ".join(f"{key}={value}" for key, value in split_ratios.items()) if isinstance(split_ratios, dict) else ""
+        self.train_dataset_version_info.set(
+            f"{spec.get('display_label')} | export {spec.get('export_format')} | {spec.get('export_root')}"
+            f"{f' | {split_text}' if split_text else ''}"
+        )
+
+    def _update_dataset_summary(self, dataset: dict | None) -> None:
+        if not dataset:
+            self.dataset_summary.reset()
+            return
+        coverage = dataset.get("annotation_coverage")
+        coverage_text = f"{float(coverage) * 100:.0f}%" if coverage is not None else "-"
+        self.dataset_summary.set_values(
+            {
+                "image_count": dataset.get("image_count", 0),
+                "label_count": dataset.get("label_count", 0),
+                "annotated_image_count": dataset.get("annotated_image_count", 0),
+                "augmented_count": dataset.get("augmented_count", 0),
+                "annotation_coverage": coverage_text,
+            }
+        )
+
     def on_dataset_selected(self) -> None:
-        dataset_id = self._selected_dataset_id()
+        dataset = self._selected_dataset_record()
+        dataset_id = str(dataset.get("id")) if dataset else None
         if not dataset_id:
             return
         for widget in (self.upload_dataset_id, self.annot_dataset, self.augment_dataset, self.train_dataset):
             widget.delete(0, "end")
             widget.insert(0, dataset_id)
+        self._update_dataset_summary(dataset)
         self.refresh_dataset_files()
         self.refresh_annotation_images()
+        self.refresh_dataset_versions()
 
     def refresh_datasets(self):
         try:
@@ -467,7 +700,15 @@ class EngineerScreen(ttk.Frame):
         self._dataset_cache = items
         self.dataset_list.delete(0, "end")
         for item in items:
-            self.dataset_list.insert("end", f"{item['id']} | {item['name']} | {item.get('description', '')}")
+            summary = f"{item.get('image_count', 0)} imgs / {item.get('annotated_image_count', 0)} ann / {item.get('augmented_count', 0)} aug"
+            self.dataset_list.insert("end", f"{item['id']} | {item['name']} | {summary}")
+        selected_dataset = self._selected_dataset_record()
+        self.dataset_summary.reset()
+        self._update_dataset_summary(selected_dataset)
+        if selected_dataset:
+            self.refresh_dataset_versions()
+        else:
+            self._update_dataset_version_summary(None)
 
     def create_dataset(self):
         try:
@@ -490,37 +731,65 @@ class EngineerScreen(ttk.Frame):
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Dataset", str(exc))
             return
+        self.dataset_list.selection_clear(0, "end")
+        for widget in (self.upload_dataset_id, self.annot_dataset, self.augment_dataset, self.train_dataset):
+            widget.delete(0, "end")
+        self.train_dataset_version.set("")
         self.refresh_datasets()
         self.dataset_files.delete(0, "end")
         self.annot_images.delete(0, "end")
+        self.dataset_summary.reset()
+        self._dataset_version_cache = []
+        self._dataset_version_lookup = {}
+        self.dataset_versions.delete(0, "end")
+        self._update_dataset_version_summary(None)
 
     def _choose_upload_file(self):
-        path = filedialog.askopenfilename()
-        if path:
-            self.upload_path = path
-            self.upload_file_label.configure(text=Path(path).name)
+        target = self.upload_target.get().strip() or "images"
+        filetypes = [("Image files", "*.png *.jpg *.jpeg *.bmp *.webp")] if target == "images" else [("All files", "*.*")]
+        paths = filedialog.askopenfilenames(title="Choose files", filetypes=filetypes)
+        if paths:
+            self.upload_paths = list(paths)
+            self.upload_path = self.upload_paths[0] if len(self.upload_paths) == 1 else None
+            self.upload_file_label.configure(text=self._upload_selection_text())
+
+    def _upload_selection_text(self) -> str:
+        if self.upload_paths:
+            names = [Path(path).name for path in self.upload_paths]
+        elif self.upload_path:
+            names = [Path(self.upload_path).name]
+        else:
+            return "No file selected"
+        if len(names) == 1:
+            return names[0]
+        preview = ", ".join(names[:3])
+        if len(names) > 3:
+            preview = f"{preview}, +{len(names) - 3} more"
+        return f"{len(names)} files selected: {preview}"
 
     def _upload_file(self):
-        if not self.upload_path:
+        selected_paths = list(self.upload_paths)
+        if not selected_paths and self.upload_path:
+            selected_paths = [self.upload_path]
+        if not selected_paths:
             messagebox.showwarning("Upload", "Choose file dulu.")
             return
         dataset_id = self.upload_dataset_id.get().strip()
         if not dataset_id:
             messagebox.showwarning("Upload", "Dataset ID wajib diisi.")
             return
-        raw = Path(self.upload_path).read_bytes()
         try:
-            self.api.upload_dataset_file(
+            self.api.upload_dataset_files(
                 dataset_id,
-                {
-                    "file_name": Path(self.upload_path).name,
-                    "target": self.upload_target.get().strip(),
-                    "content_b64": base64.b64encode(raw).decode("ascii"),
-                },
+                selected_paths,
+                target=self.upload_target.get().strip() or "images",
             )
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Upload", str(exc))
             return
+        self.upload_paths = []
+        self.upload_path = None
+        self.upload_file_label.configure(text="No file selected")
         self.refresh_dataset_files()
         messagebox.showinfo("Upload", "Upload selesai.")
 
@@ -535,7 +804,104 @@ class EngineerScreen(ttk.Frame):
             messagebox.showerror("Dataset Files", str(exc))
             return
         for item in items:
-            self.dataset_files.insert("end", f"{item['name']} | {item.get('size', 0)} bytes")
+            marker = "✓" if item.get("annotation_exists") else "•"
+            self.dataset_files.insert("end", f"{marker} {item['name']} | {item.get('size', 0)} bytes")
+
+    def refresh_dataset_versions(self):
+        dataset_id = self._current_dataset_id()
+        self.dataset_versions.delete(0, "end")
+        self._dataset_version_cache = []
+        self._dataset_version_lookup = {}
+        if not dataset_id:
+            self.train_dataset_version["values"] = []
+            self._update_dataset_version_summary(None)
+            return
+
+        try:
+            items = self.api.list_dataset_versions(dataset_id)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Dataset Versions", str(exc))
+            return
+
+        self._dataset_version_cache = items
+        values: list[str] = []
+        for item in items:
+            display_label = str(item.get("display_label") or item.get("id") or "").strip()
+            if not display_label:
+                continue
+            values.append(display_label)
+            self._dataset_version_lookup[display_label] = item
+            self._dataset_version_lookup[str(item.get("id") or "")] = item
+            self.dataset_versions.insert(
+                "end",
+                f"{display_label} | {item.get('export_format') or 'yolo'} | {item.get('export_root') or '-'}",
+            )
+
+        self.train_dataset_version["values"] = values
+        if values:
+            current = self.train_dataset_version.get().strip()
+            if current not in values:
+                self.train_dataset_version.set(values[0])
+            self.dataset_versions.selection_clear(0, "end")
+            self.dataset_versions.selection_set(0)
+            self.dataset_versions.see(0)
+            self.on_dataset_version_selected()
+        else:
+            self.train_dataset_version.set("")
+            self._update_dataset_version_summary(None)
+        self._refresh_train_dataset_version_info()
+
+    def create_dataset_version(self):
+        dataset_id = self._current_dataset_id()
+        if not dataset_id:
+            messagebox.showwarning("Dataset Versions", "Dataset ID wajib diisi atau dataset harus dipilih dulu.")
+            return
+
+        def _ratio(entry: ttk.Entry, default: float) -> float:
+            raw = entry.get().strip()
+            if not raw:
+                return default
+            return float(raw)
+
+        try:
+            payload = {
+                "name": self.version_name.get().strip(),
+                "description": self.version_description.get().strip(),
+                "export_format": "yolo",
+                "split_ratios": {
+                    "train": _ratio(self.version_train_ratio, 0.7),
+                    "valid": _ratio(self.version_valid_ratio, 0.2),
+                    "test": _ratio(self.version_test_ratio, 0.1),
+                },
+            }
+        except ValueError:
+            messagebox.showerror("Dataset Versions", "Split ratios harus numerik.")
+            return
+
+        try:
+            created = self.api.create_dataset_version(dataset_id, payload)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Dataset Versions", str(exc))
+            return
+
+        self.dataset_version_detail.set_payload(created)
+        self.refresh_dataset_versions()
+        messagebox.showinfo("Dataset Versions", f"Version '{created.get('display_label')}' berhasil dibuat.")
+
+    def rebuild_dataset_version_export(self):
+        dataset_id = self._current_dataset_id()
+        version = self._selected_dataset_version_spec() or self._selected_dataset_version_record()
+        if not dataset_id or not version:
+            messagebox.showwarning("Dataset Versions", "Pilih dataset dan version dulu.")
+            return
+        try:
+            refreshed = self.api.export_dataset_version(dataset_id, str(version.get("id") or ""))
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Dataset Versions", str(exc))
+            return
+        self.dataset_version_detail.set_payload(refreshed)
+        self.refresh_dataset_versions()
+        messagebox.showinfo("Dataset Versions", f"Export version '{refreshed.get('display_label')}' selesai diperbarui.")
 
     def refresh_annotation_images(self):
         dataset_id = self.annot_dataset.get().strip() or self._selected_dataset_id()
@@ -548,15 +914,103 @@ class EngineerScreen(ttk.Frame):
             messagebox.showerror("Annotate", str(exc))
             return
         for item in items:
-            self.annot_images.insert("end", item["name"])
+            marker = "✓" if item.get("annotation_exists") else "•"
+            self.annot_images.insert("end", f"{marker} {item['name']}")
 
     def on_annotation_image_selected(self):
         index = self._selected_listbox_index(self.annot_images)
         if index is None:
             return
-        image_name = self.annot_images.get(index)
+        image_name = self.annot_images.get(index).split(" ", 1)[-1]
         self.annot_image.delete(0, "end")
         self.annot_image.insert(0, image_name)
+
+    def on_dataset_version_selected(self) -> None:
+        version = self._selected_dataset_version_record()
+        if not version:
+            self._update_dataset_version_summary(None)
+            return
+        self._update_dataset_version_summary(version)
+
+    def _annotation_editor_payload(self) -> dict:
+        try:
+            payload = self.annot_editor.get_payload()
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            record = dict(payload)
+        elif isinstance(payload, list):
+            record = {"schema_version": 1, "image_name": self.annot_image.get().strip(), "labels": payload}
+        else:
+            record = {"schema_version": 1, "image_name": self.annot_image.get().strip(), "labels": []}
+        record.setdefault("schema_version", 1)
+        record.setdefault("image_name", self.annot_image.get().strip())
+        labels = record.get("labels")
+        if not isinstance(labels, list):
+            labels = []
+        record["labels"] = labels
+        return record
+
+    def _parse_polygon_points(self, raw_points: str) -> list[dict[str, float]]:
+        points: list[dict[str, float]] = []
+        for chunk in (piece.strip() for piece in raw_points.split(";")):
+            if not chunk:
+                continue
+            if "," not in chunk:
+                raise ValueError("Polygon points harus berformat x,y; x,y; ...")
+            x_raw, y_raw = (piece.strip() for piece in chunk.split(",", 1))
+            points.append({"x": float(x_raw), "y": float(y_raw)})
+        if len(points) < 3:
+            raise ValueError("Polygon membutuhkan minimal 3 titik.")
+        return points
+
+    def append_annotation_label(self):
+        class_name = self.annot_label_class.get().strip()
+        if not class_name:
+            messagebox.showwarning("Annotate", "Class Name wajib diisi.")
+            return
+        shape = (self.annot_shape.get().strip() or "bbox").lower()
+        payload = self._annotation_editor_payload()
+        labels = list(payload.get("labels") or [])
+        try:
+            if shape == "polygon":
+                label = {
+                    "type": "polygon",
+                    "shape_type": "polygon",
+                    "class": class_name,
+                    "class_name": class_name,
+                    "points": self._parse_polygon_points(self.annot_polygon_points.get().strip()),
+                    "normalized": True,
+                    "source": "manual",
+                }
+            else:
+                bbox = {
+                    "x": float(self.annot_bbox_x.get().strip()),
+                    "y": float(self.annot_bbox_y.get().strip()),
+                    "w": float(self.annot_bbox_w.get().strip()),
+                    "h": float(self.annot_bbox_h.get().strip()),
+                }
+                label = {
+                    "type": "bbox",
+                    "shape_type": "bbox",
+                    "class": class_name,
+                    "class_name": class_name,
+                    "bbox": bbox,
+                    "normalized": True,
+                    "source": "manual",
+                }
+        except ValueError as exc:
+            messagebox.showerror("Annotate", str(exc))
+            return
+        labels.append(label)
+        payload["labels"] = labels
+        payload["label_count"] = len(labels)
+        self.annot_editor.set_payload(payload)
+
+    def _annotation_labels(self) -> list[dict]:
+        payload = self._annotation_editor_payload()
+        labels = payload.get("labels")
+        return list(labels) if isinstance(labels, list) else []
 
     def load_annotation(self):
         dataset_id = self.annot_dataset.get().strip()
@@ -578,7 +1032,7 @@ class EngineerScreen(ttk.Frame):
             messagebox.showwarning("Annotate", "Dataset ID dan Image Name wajib diisi.")
             return
         try:
-            payload = self.annot_editor.get_payload()
+            payload = self._annotation_editor_payload()
             self.api.save_annotation(dataset_id, image_name, payload.get("labels") or [])
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Annotate", str(exc))
@@ -593,11 +1047,27 @@ class EngineerScreen(ttk.Frame):
             return
         self.augment_jobs.delete(0, "end")
         for item in items:
-            self.augment_jobs.insert("end", f"{item.get('id')} | {item.get('dataset_id')} | {item.get('status')}")
+            transforms = ", ".join(item.get("transforms") or [])
+            multiplier = item.get("multiplier") or 1
+            self.augment_jobs.insert("end", f"{item.get('id')} | {item.get('dataset_id')} | {item.get('status')} | x{multiplier} | {transforms}")
 
     def create_augment_job(self):
+        raw_transforms = self.augment_transforms.get().strip()
+        transforms = [item.strip() for item in raw_transforms.split(",") if item.strip()] if raw_transforms else []
+        if not transforms:
+            transforms = ["flip_h", "brightness", "blur"]
         try:
-            self.api.create_augment_job({"dataset_id": self.augment_dataset.get().strip()})
+            multiplier = max(1, min(10, int(float(self.augment_multiplier.get() or 2))))
+        except ValueError:
+            multiplier = 2
+        try:
+            self.api.create_augment_job(
+                {
+                    "dataset_id": self.augment_dataset.get().strip(),
+                    "transforms": transforms,
+                    "multiplier": multiplier,
+                }
+            )
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Augment", str(exc))
             return
@@ -612,13 +1082,39 @@ class EngineerScreen(ttk.Frame):
         self._training_jobs = items
         self.train_jobs.delete(0, "end")
         for item in items:
-            self.train_jobs.insert("end", f"{item['id']} | {item['dataset_id']} | {item['status']}")
+            device_mode = item.get("requested_device_mode") or item.get("device_mode") or item.get("params", {}).get("device_mode") or "auto"
+            effective_device = item.get("effective_device") or "pending"
+            base_model = item.get("base_model_display_name") or item.get("base_model") or "-"
+            version_label = item.get("dataset_version_display_label") or item.get("dataset_version_name") or item.get("dataset_version_id") or "-"
+            self.train_jobs.insert(
+                "end",
+                f"{item['id']} | {item['dataset_id']} | {version_label} | {item['status']} | {base_model} | {device_mode} -> {effective_device}",
+            )
+
+        self.refresh_base_models()
+        self._refresh_train_dataset_version_info()
 
     def create_training_job(self):
+        spec = self._selected_base_model_spec()
+        if spec is None:
+            messagebox.showwarning("Training", "Pilih base model dulu.")
+            return
+        dataset_id = self.train_dataset.get().strip()
+        if not dataset_id:
+            messagebox.showwarning("Training", "Dataset ID wajib diisi.")
+            return
+        version = self._selected_dataset_version_spec()
         payload = {
-            "dataset_id": self.train_dataset.get().strip(),
-            "base_model": self.train_model.get().strip(),
+            "dataset_id": dataset_id,
+            "base_model": spec.get("id"),
+            "base_model_family": spec.get("family"),
+            "base_model_variant": spec.get("variant"),
+            "base_model_display_name": spec.get("display_name"),
+            "base_model_weights_name": spec.get("weights_name"),
+            "device_mode": self.train_device.get().strip() or "auto",
         }
+        if version is not None:
+            payload["dataset_version_id"] = version.get("id")
         try:
             self.api.create_training_job(payload)
         except Exception as exc:  # noqa: BLE001
@@ -648,14 +1144,88 @@ class EngineerScreen(ttk.Frame):
             {
                 "id": item.get("id"),
                 "dataset_id": item.get("dataset_id"),
+                "dataset_version_id": item.get("dataset_version_id"),
+                "dataset_version_number": item.get("dataset_version_number"),
+                "dataset_version_display_label": item.get("dataset_version_display_label") or item.get("dataset_version_name") or item.get("dataset_version_id"),
                 "status": item.get("status"),
                 "base_model": item.get("base_model"),
+                "base_model_display_name": item.get("base_model_display_name"),
+                "base_model_family": item.get("base_model_family"),
+                "base_model_variant": item.get("base_model_variant"),
+                "requested_device_mode": item.get("requested_device_mode") or item.get("device_mode") or item.get("params", {}).get("device_mode"),
+                "effective_device": item.get("effective_device"),
+                "device_backend": item.get("device_backend"),
+                "device_fallback_reason": item.get("device_fallback_reason"),
                 "trained_model_path": item.get("trained_model_path"),
                 "created_at": item.get("created_at"),
                 "finished_at": item.get("finished_at"),
             }
         )
         self.training_detail.set_payload(item)
+
+    def _selected_base_model_spec(self) -> dict | None:
+        selected = self.train_base_model.get().strip()
+        if not selected:
+            return None
+        if selected in self._base_model_lookup:
+            return self._base_model_lookup[selected]
+        normalized = selected.lower().strip()
+        return next((item for item in self._base_model_cache if str(item.get("id") or "").lower() == normalized), None)
+
+    def _selected_dataset_version_spec(self) -> dict | None:
+        selected = self.train_dataset_version.get().strip()
+        if not selected:
+            return None
+        if selected in self._dataset_version_lookup:
+            return self._dataset_version_lookup[selected]
+        normalized = selected.lower().strip()
+        return next(
+            (
+                item
+                for item in self._dataset_version_cache
+                if str(item.get("id") or "").lower() == normalized
+                or str(item.get("display_label") or "").lower() == normalized
+            ),
+            None,
+        )
+
+    def _refresh_base_model_info(self) -> None:
+        spec = self._selected_base_model_spec()
+        if spec is None:
+            self.train_base_model_info.set("Pilih base model dari katalog YOLOv5 / YOLOv11.")
+            return
+        self.train_base_model_info.set(
+            f"{spec.get('display_name')} | {spec.get('family_label')} {spec.get('variant_label')} | runtime {spec.get('runtime')} | weights {spec.get('weights_name')}"
+        )
+
+    def refresh_base_models(self) -> None:
+        try:
+            items = self.api.list_base_models()
+        except Exception:
+            try:
+                items = catalog_list_base_models()
+            except Exception:
+                items = []
+        self._base_model_cache = list(items)
+        self._base_model_lookup = {}
+        values: list[str] = []
+        preferred_value: str | None = None
+        for item in items:
+            label = str(item.get("display_label") or item.get("display_name") or item.get("id") or "").strip()
+            if not label:
+                continue
+            values.append(label)
+            self._base_model_lookup[label] = item
+            if str(item.get("id") or "").lower() == "yolov5s":
+                preferred_value = label
+        self.train_base_model["values"] = values
+        if values:
+            current = self.train_base_model.get().strip()
+            if current not in values:
+                self.train_base_model.set(preferred_value or values[0])
+        else:
+            self.train_base_model.set("")
+        self._refresh_base_model_info()
 
     def refresh_models(self):
         try:

@@ -9,14 +9,21 @@ from typing import Any
 import cv2
 
 from backend.app.core.config import AppConfig
+from backend.app.core.device_runtime import DeviceResolution, DeviceRuntimeResolver
 from backend.app.repositories.models_repository import ModelsRepository
 from shared.contracts.templates import VisionConfig
 
 
 class StickerInferenceService:
-    def __init__(self, app_config: AppConfig, models_repo: ModelsRepository) -> None:
+    def __init__(
+        self,
+        app_config: AppConfig,
+        models_repo: ModelsRepository,
+        device_runtime: DeviceRuntimeResolver | None = None,
+    ) -> None:
         self._config = app_config
         self._models_repo = models_repo
+        self._device_runtime = device_runtime or DeviceRuntimeResolver(app_config)
         self._runtime_lock = threading.RLock()
         self._loaded_models: dict[str, Any] = {}
         self._meta_cache: dict[str, dict[str, Any]] = {}
@@ -63,6 +70,9 @@ class StickerInferenceService:
 
         return YOLO
 
+    def _resolve_device(self) -> DeviceResolution:
+        return self._device_runtime.resolve()
+
     def _get_ultralytics_model(self, model_path: str):
         resolved = str(Path(model_path).resolve())
         with self._runtime_lock:
@@ -107,7 +117,7 @@ class StickerInferenceService:
             )
         return detections
 
-    def _predict_ultralytics(self, image, vision: VisionConfig) -> dict[str, Any]:
+    def _predict_ultralytics(self, image, vision: VisionConfig, device_resolution: DeviceResolution) -> dict[str, Any]:
         model_path = self._resolve_model_path(vision)
         if not model_path:
             raise FileNotFoundError("Sticker model path is not configured.")
@@ -119,6 +129,7 @@ class StickerInferenceService:
         kwargs: dict[str, Any] = {
             "verbose": False,
             "conf": float(vision.conf_threshold),
+            "device": device_resolution.effective_device,
         }
         if int(vision.imgsz or 0) > 0:
             kwargs["imgsz"] = int(vision.imgsz)
@@ -137,6 +148,11 @@ class StickerInferenceService:
             "raw_detection_count": raw_box_count,
             "allowed_labels_filter": sorted(allowed_labels) if allowed_labels is not None else None,
             "fallback_reason": None,
+            "device_mode": device_resolution.requested_mode,
+            "effective_device": device_resolution.effective_device,
+            "device_backend": device_resolution.backend,
+            "device_fallback_reason": device_resolution.fallback_reason,
+            "gpu_available": device_resolution.gpu_available,
         }
 
     def _predict_classic(self, image, vision: VisionConfig, expected_class: str | None) -> dict[str, Any]:
@@ -192,12 +208,18 @@ class StickerInferenceService:
         if mode == "classic":
             return self._predict_classic(image, vision, expected_class)
 
+        device_resolution = self._resolve_device()
         try:
-            return self._predict_ultralytics(image, vision)
+            return self._predict_ultralytics(image, vision, device_resolution)
         except Exception as exc:
             if mode == "ultralytics":
                 raise
             logging.warning("Sticker inference fallback to classic mode: %s", exc)
             payload = self._predict_classic(image, vision, expected_class)
             payload["fallback_reason"] = str(exc)
+            payload["device_mode"] = device_resolution.requested_mode
+            payload["effective_device"] = device_resolution.effective_device
+            payload["device_backend"] = device_resolution.backend
+            payload["device_fallback_reason"] = device_resolution.fallback_reason or str(exc)
+            payload["gpu_available"] = device_resolution.gpu_available
             return payload

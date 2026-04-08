@@ -64,6 +64,14 @@ class _StubApi:
 
     def list_models(self):
         return []
+    def list_dataset_versions(self, dataset_id: str):
+        return []
+
+    def create_dataset_version(self, dataset_id: str, payload: dict):
+        return {}
+
+    def export_dataset_version(self, dataset_id: str, version_id: str):
+        return {}
 
     def list_profiles(self):
         return []
@@ -97,6 +105,12 @@ class _StubApi:
 
     def list_training_jobs(self):
         return []
+
+    def list_base_models(self):
+        return [
+            {"id": "yolov5s", "display_label": "YOLOv5 Small (yolov5s)", "display_name": "YOLOv5 Small", "family": "yolov5", "family_label": "YOLOv5", "variant": "s", "variant_label": "Small", "runtime": "ultralytics", "weights_name": "yolov5s.pt"},
+            {"id": "yolov11m", "display_label": "YOLOv11 Medium (yolov11m)", "display_name": "YOLOv11 Medium", "family": "yolov11", "family_label": "YOLOv11", "variant": "m", "variant_label": "Medium", "runtime": "ultralytics", "weights_name": "yolov11m.pt"},
+        ]
 
 
 @unittest.skipIf(tk is None, "Tkinter is not available in this environment")
@@ -156,6 +170,11 @@ class UiSmokeTest(unittest.TestCase):
         screen.update_idletasks()
         self.assertTrue(screen.winfo_exists())
         self.assertIsNotNone(screen.training_summary)
+        self.assertEqual(screen.train_device.get(), "auto")
+        self.assertEqual(str(screen.train_device["state"]), "readonly")
+        self.assertTrue(screen.train_base_model.get())
+        self.assertEqual(str(screen.train_base_model["state"]), "readonly")
+        self.assertEqual(str(screen.train_dataset_version["state"]), "readonly")
         screen.destroy()
 
     def test_engineer_calibration_roi_preview_refreshes(self) -> None:

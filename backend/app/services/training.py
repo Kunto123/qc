@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+from backend.app.core.device_runtime import DeviceRuntimeResolver
 from backend.app.repositories.training_repository import TrainingRepository
 from backend.app.workers.training_worker import TrainingWorker
 
 
 class TrainingService:
-    def __init__(self, training_repo: TrainingRepository) -> None:
+    def __init__(self, training_repo: TrainingRepository, device_runtime: DeviceRuntimeResolver | None = None) -> None:
         self._training_repo = training_repo
-        self._worker = TrainingWorker(training_repo)
+        self._worker = TrainingWorker(training_repo, device_runtime=device_runtime)
         self._worker.start()
 
     def list_jobs(self) -> list[dict]:

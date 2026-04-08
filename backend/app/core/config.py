@@ -27,6 +27,8 @@ class AppConfig:
     debug: bool = os.getenv("QC_SUITE_DEBUG", "0").strip() == "1"
     secret_key: str = os.getenv("QC_SUITE_SECRET_KEY", "qc-suite-dev-secret")
     access_token_ttl_seconds: int = max(60, int(os.getenv("QC_SUITE_ACCESS_TOKEN_TTL_SECONDS", "86400")))
+    device_mode: str = os.getenv("QC_SUITE_DEVICE", "auto").strip().lower() or "auto"
+    cuda_device_id: int = max(0, int(os.getenv("QC_SUITE_CUDA_DEVICE_ID", "0")))
     sql_server: str = os.getenv("MSSQL_SERVER", "").strip()
     sql_database: str = os.getenv("MSSQL_DATABASE", "").strip()
     sql_username: str = os.getenv("MSSQL_USERNAME", "").strip()

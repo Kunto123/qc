@@ -188,6 +188,15 @@ class InspectionSessionService:
                 class_names=inference_payload.get("class_names") or [],
                 fallback_reason=inference_payload.get("fallback_reason"),
             )
+            sticker_detection.update(
+                {
+                    "device_mode": inference_payload.get("device_mode"),
+                    "effective_device": inference_payload.get("effective_device"),
+                    "device_backend": inference_payload.get("device_backend"),
+                    "device_fallback_reason": inference_payload.get("device_fallback_reason"),
+                    "gpu_available": inference_payload.get("gpu_available"),
+                }
+            )
         else:
             sticker_detection = self._build_sticker_detection_payload(
                 [],

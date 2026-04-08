@@ -1,4 +1,5 @@
 from backend.app.repositories.datasets_repository import DatasetsRepository
+from backend.app.repositories.dataset_versions_repository import DatasetVersionRepository
 from backend.app.repositories.deployments_repository import DeploymentsRepository
 from backend.app.repositories.hybrid_inspection_results_repository import HybridInspectionResultsRepository
 from backend.app.repositories.inspection_results_repository import InspectionResultsRepository
@@ -13,6 +14,7 @@ from backend.app.repositories.sqlserver.users_repository import SqlServerUsersRe
 
 __all__ = [
     "DatasetsRepository",
+    "DatasetVersionRepository",
     "DeploymentsRepository",
     "HybridInspectionResultsRepository",
     "InspectionResultsRepository",

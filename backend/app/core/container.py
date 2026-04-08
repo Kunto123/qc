@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from backend.app.core.config import AppConfig
+from backend.app.core.device_runtime import DeviceRuntimeResolver
 from backend.app.repositories.auth_audit_repository import AuthAuditRepository
 from backend.app.repositories.filesystem.storage_repository import FilesystemStorageRepository
 from backend.app.core.security import TokenStore
 from backend.app.repositories.augment_repository import AugmentRepository
+from backend.app.repositories.dataset_versions_repository import DatasetVersionRepository
 from backend.app.repositories.datasets_repository import DatasetsRepository
 from backend.app.repositories.deployments_repository import DeploymentsRepository
 from backend.app.repositories.hybrid_inspection_results_repository import HybridInspectionResultsRepository
@@ -27,6 +29,7 @@ from backend.app.workers.push_worker import PushWorker
 
 
 app_config = AppConfig()
+device_runtime = DeviceRuntimeResolver(app_config)
 filesystem_storage_repo = FilesystemStorageRepository()
 users_repo = SqlServerUsersRepository(app_config) if app_config.sql_enabled else UsersRepository()
 audit_repo = (
@@ -38,6 +41,7 @@ templates_repo = TemplatesRepository()
 deployments_repo = DeploymentsRepository()
 profiles_repo = ProfilesRepository()
 datasets_repo = DatasetsRepository()
+dataset_versions_repo = DatasetVersionRepository(datasets_repo)
 models_repo = ModelsRepository()
 training_repo = TrainingRepository()
 local_inspection_results_repo = InspectionResultsRepository()
@@ -54,14 +58,14 @@ token_store = (
 )
 
 template_runtime_service = TemplateRuntimeService(templates_repo, deployments_repo)
-sticker_inference_service = StickerInferenceService(app_config, models_repo)
+sticker_inference_service = StickerInferenceService(app_config, models_repo, device_runtime)
 inspection_session_service = InspectionSessionService(
     template_runtime_service,
     profiles_repo,
     inspection_results_repo,
     sticker_inference_service,
 )
-training_service = TrainingService(training_repo)
+training_service = TrainingService(training_repo, device_runtime)
 workstation_registry_repo = WorkstationRegistryRepository()
 augment_repo = AugmentRepository()
 

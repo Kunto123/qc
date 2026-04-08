@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+from io import BytesIO
 import os
 import shutil
 import sys
@@ -12,6 +13,7 @@ from uuid import uuid4
 
 import cv2
 import numpy as np
+from werkzeug.datastructures import MultiDict
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -100,6 +102,14 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertTrue(models)
         self.assertEqual(models[0]["name"], "AKH Sticker Detector")
         self.assertEqual(models[0]["runtime"], "ultralytics")
+
+    def test_00b2_base_model_catalog_contains_yolo_variants(self) -> None:
+        response = self.client.get("/train/base-models", headers=_headers(self.engineer_token))
+        self.assertEqual(response.status_code, 200, response.get_json())
+        catalog = response.get_json()
+        self.assertTrue(any(item["id"] == "yolov5s" for item in catalog))
+        self.assertTrue(any(item["id"] == "yolov11x" for item in catalog))
+        self.assertTrue(all(item["task"] == "detection" for item in catalog))
 
     def test_00c_auth_logout_revokes_current_token(self) -> None:
         login_response = self.client.post(
@@ -608,12 +618,104 @@ class ApiSmokeTest(unittest.TestCase):
         )
         self.assertEqual(upload_response.status_code, 201, upload_response.get_json())
 
+        batch_upload_response = self.client.post(
+            f"/datasets/{dataset['id']}/upload",
+            data=MultiDict(
+                [
+                    ("target", "images"),
+                    ("files", (BytesIO(base64.b64decode(_sample_image_b64())), "batch-1.jpg")),
+                    ("files", (BytesIO(base64.b64decode(_blank_image_b64())), "batch-2.jpg")),
+                ]
+            ),
+            content_type="multipart/form-data",
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(batch_upload_response.status_code, 201, batch_upload_response.get_json())
+        batch_upload_payload = batch_upload_response.get_json()
+        self.assertEqual(batch_upload_payload["count"], 2)
+        self.assertEqual(len(batch_upload_payload["items"]), 2)
+
+        invalid_target_response = self.client.post(
+            f"/datasets/{dataset['id']}/upload",
+            json={
+                "file_name": "bad.jpg",
+                "target": "not-a-target",
+                "content_b64": _sample_image_b64(),
+            },
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(invalid_target_response.status_code, 400, invalid_target_response.get_json())
+
         annotation_response = self.client.post(
             f"/datasets/{dataset['id']}/annotations/sample.jpg",
-            json={"labels": [{"class": "sample-sticker", "bbox": [10, 10, 20, 20]}]},
+            json={
+                "labels": [
+                    {
+                        "type": "bbox",
+                        "class": "sample-sticker",
+                        "bbox": {"x": 10, "y": 10, "w": 20, "h": 20},
+                    }
+                ]
+            },
             headers=_headers(self.engineer_token),
         )
         self.assertEqual(annotation_response.status_code, 200, annotation_response.get_json())
+        annotation_payload = annotation_response.get_json()
+        self.assertEqual(annotation_payload["schema_version"], 1)
+        self.assertEqual(annotation_payload["label_count"], 1)
+
+        image_browser_response = self.client.get(
+            f"/datasets/{dataset['id']}/files?target=images",
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(image_browser_response.status_code, 200, image_browser_response.get_json())
+        image_browser_items = image_browser_response.get_json()
+        self.assertTrue(any(item.get("annotation_exists") for item in image_browser_items if item["name"] == "sample.jpg"))
+
+        dataset_list_response = self.client.get("/datasets", headers=_headers(self.engineer_token))
+        self.assertEqual(dataset_list_response.status_code, 200, dataset_list_response.get_json())
+        dataset_list = dataset_list_response.get_json()
+        refreshed_dataset = next(item for item in dataset_list if item["id"] == dataset["id"])
+        self.assertEqual(refreshed_dataset["image_count"], 3)
+        self.assertEqual(refreshed_dataset["annotated_image_count"], 1)
+
+        version_response = self.client.post(
+            f"/datasets/{dataset['id']}/versions",
+            json={
+                "name": "Smoke snapshot",
+                "description": "versioned export",
+                "split_ratios": {"train": 0.6, "valid": 0.2, "test": 0.2},
+            },
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(version_response.status_code, 201, version_response.get_json())
+        version_payload = version_response.get_json()
+        self.assertEqual(version_payload["dataset_id"], dataset["id"])
+        self.assertTrue(version_payload["display_label"].startswith("v"))
+        self.assertTrue(Path(version_payload["export_root"]).exists())
+
+        version_list_response = self.client.get(
+            f"/datasets/{dataset['id']}/versions",
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(version_list_response.status_code, 200, version_list_response.get_json())
+        version_list = version_list_response.get_json()
+        self.assertEqual(len(version_list), 1)
+        self.assertEqual(version_list[0]["id"], version_payload["id"])
+
+        version_detail_response = self.client.get(
+            f"/datasets/{dataset['id']}/versions/{version_payload['id']}",
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(version_detail_response.status_code, 200, version_detail_response.get_json())
+        self.assertEqual(version_detail_response.get_json()["id"], version_payload["id"])
+
+        version_export_response = self.client.post(
+            f"/datasets/{dataset['id']}/versions/{version_payload['id']}/export",
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(version_export_response.status_code, 200, version_export_response.get_json())
+        self.assertEqual(version_export_response.get_json()["id"], version_payload["id"])
 
         augment_response = self.client.post(
             "/augment/jobs",
@@ -624,10 +726,20 @@ class ApiSmokeTest(unittest.TestCase):
 
         train_response = self.client.post(
             "/train/jobs",
-            json={"dataset_id": dataset["id"], "base_model": "baseline"},
+            json={"dataset_id": dataset["id"], "dataset_version_id": version_payload["id"], "base_model": "yolov5s"},
             headers=_headers(self.engineer_token),
         )
         self.assertEqual(train_response.status_code, 201, train_response.get_json())
+        train_payload = train_response.get_json()
+        self.assertEqual(train_payload["requested_device_mode"], "auto")
+        self.assertEqual(train_payload["params"]["device_mode"], "auto")
+        self.assertEqual(train_payload["base_model"], "yolov5s")
+        self.assertEqual(train_payload["base_model_catalog_id"], "yolov5s")
+        self.assertEqual(train_payload["base_model_family"], "yolov5")
+        self.assertEqual(train_payload["base_model_variant"], "s")
+        self.assertEqual(train_payload["base_model_display_name"], "YOLOv5 Small")
+        self.assertEqual(train_payload["dataset_version_id"], version_payload["id"])
+        self.assertEqual(train_payload["dataset_version_display_label"], version_payload["display_label"])
 
         model_response = self.client.post(
             "/models",
@@ -850,7 +962,8 @@ class ApiSmokeTest(unittest.TestCase):
             "/train/jobs",
             json={
                 "dataset_id": dataset["id"],
-                "base_model": "akh-base",
+                "base_model": "yolov11m",
+                "device_mode": "cpu",
                 "classes": ["K0W-HB0", "K1Z-FA0"],
                 "note": "phase8 regression",
             },
@@ -859,7 +972,12 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(training_response.status_code, 201, training_response.get_json())
         training_payload = training_response.get_json()
         self.assertEqual(training_payload["params"]["classes"], ["K0W-HB0", "K1Z-FA0"])
-        self.assertIn(dataset["id"], training_payload["trained_model_path"])
+        self.assertEqual(training_payload["requested_device_mode"], "cpu")
+        self.assertEqual(training_payload["params"]["device_mode"], "cpu")
+        self.assertEqual(training_payload["base_model"], "yolov11m")
+        self.assertEqual(training_payload["base_model_family"], "yolov11")
+        self.assertEqual(training_payload["base_model_variant"], "m")
+        self.assertEqual(training_payload["base_model_display_name"], "YOLOv11 Medium")
 
         model_name = f"phase8-model-{uuid4().hex[:8]}"
         model_response = self.client.post(

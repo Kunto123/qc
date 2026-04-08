@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import mimetypes
+from pathlib import Path
+
 import requests
 
 
@@ -12,8 +15,8 @@ class ApiClient:
     def set_token(self, token: str | None) -> None:
         self.token = token
 
-    def _headers(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
+    def _headers(self, *, json_content_type: bool = True) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"} if json_content_type else {}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
@@ -189,8 +192,58 @@ class ApiClient:
     def list_dataset_files(self, dataset_id: str, target: str = "images") -> list[dict]:
         return self._get(f"/datasets/{dataset_id}/files", {"target": target})
 
+    def list_dataset_versions(self, dataset_id: str) -> list[dict]:
+        return self._get(f"/datasets/{dataset_id}/versions")
+
+    def create_dataset_version(self, dataset_id: str, payload: dict) -> dict:
+        return self._post(f"/datasets/{dataset_id}/versions", payload)
+
+    def get_dataset_version(self, dataset_id: str, version_id: str) -> dict:
+        return self._get(f"/datasets/{dataset_id}/versions/{version_id}")
+
+    def export_dataset_version(self, dataset_id: str, version_id: str) -> dict:
+        return self._post(f"/datasets/{dataset_id}/versions/{version_id}/export", {})
+
     def upload_dataset_file(self, dataset_id: str, payload: dict) -> dict:
         return self._post(f"/datasets/{dataset_id}/upload", payload)
+
+    def upload_dataset_files(self, dataset_id: str, file_paths: list[str], target: str = "images") -> dict:
+        multipart_files = []
+        handles = []
+        response = None
+        try:
+            for file_path in file_paths:
+                path = Path(file_path)
+                handle = path.open("rb")
+                handles.append(handle)
+                content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+                multipart_files.append(("files", (path.name, handle, content_type)))
+
+            response = self.session.request(
+                method="POST",
+                url=f"{self.base_url}/datasets/{dataset_id}/upload",
+                data={"target": target},
+                files=multipart_files,
+                headers=self._headers(json_content_type=False),
+                timeout=60,
+            )
+        finally:
+            for handle in handles:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+
+        if response is None:
+            raise RuntimeError("Upload request did not start")
+        if not response.ok:
+            detail = response.text
+            try:
+                detail = response.json().get("error") or detail
+            except ValueError:
+                pass
+            raise RuntimeError(f"{response.status_code}: {detail}")
+        return response.json()
 
     def get_annotation(self, dataset_id: str, image_name: str) -> dict:
         return self._get(f"/datasets/{dataset_id}/annotations/{image_name}")
@@ -206,6 +259,10 @@ class ApiClient:
 
     def list_training_jobs(self) -> list[dict]:
         return self._get("/train/jobs")
+
+    def list_base_models(self, family: str | None = None) -> list[dict]:
+        params = {"family": family} if family else None
+        return self._get("/train/base-models", params)
 
     def create_training_job(self, payload: dict) -> dict:
         return self._post("/train/jobs", payload)
