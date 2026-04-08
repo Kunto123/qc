@@ -17,6 +17,8 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -46,6 +48,11 @@ QC_SUITE_PUSH_WORKER_MAX_RETRY=5
 """
 
 
+def _load_project_env(env_path: Path) -> None:
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
+
+
 def main(check: bool = False) -> int:
     errors: list[str] = []
     warnings: list[str] = []
@@ -62,6 +69,7 @@ def main(check: bool = False) -> int:
         print(f"[bootstrap] .env OK ({env_path})")
 
     # ── Data directories ───────────────────────────────────────────────
+    _load_project_env(env_path)
     data_root_str = os.getenv("QC_SUITE_DATA_ROOT", str(PROJECT_ROOT / "data"))
     data_root = Path(data_root_str).resolve()
     required_dirs = [
