@@ -6,9 +6,14 @@ from backend.app.workers.training_worker import TrainingWorker
 
 
 class TrainingService:
-    def __init__(self, training_repo: TrainingRepository, device_runtime: DeviceRuntimeResolver | None = None) -> None:
+    def __init__(
+        self,
+        training_repo: TrainingRepository,
+        models_repo=None,
+        device_runtime: DeviceRuntimeResolver | None = None,
+    ) -> None:
         self._training_repo = training_repo
-        self._worker = TrainingWorker(training_repo, device_runtime=device_runtime)
+        self._worker = TrainingWorker(training_repo, models_repo=models_repo, device_runtime=device_runtime)
         self._worker.start()
 
     def list_jobs(self) -> list[dict]:

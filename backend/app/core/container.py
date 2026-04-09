@@ -65,7 +65,7 @@ inspection_session_service = InspectionSessionService(
     inspection_results_repo,
     sticker_inference_service,
 )
-training_service = TrainingService(training_repo, device_runtime)
+training_service = TrainingService(training_repo, models_repo, device_runtime)
 workstation_registry_repo = WorkstationRegistryRepository()
 augment_repo = AugmentRepository()
 

@@ -132,6 +132,9 @@ class _StubApi:
     def list_training_jobs(self):
         return []
 
+    def create_training_job(self, payload: dict):
+        return {"id": "train-stub", **payload}
+
     def list_base_models(self):
         return [
             {"id": "yolov5s", "display_label": "YOLOv5 Small (yolov5s)", "display_name": "YOLOv5 Small", "family": "yolov5", "family_label": "YOLOv5", "variant": "s", "variant_label": "Small", "runtime": "ultralytics", "weights_name": "yolov5s.pt"},
@@ -305,6 +308,69 @@ class UiSmokeTest(unittest.TestCase):
             self.assertEqual(screen.training_summary._labels["map_score"].cget("text"), "81.23%")
             self.assertEqual(screen.training_summary._labels["r2_score"].cget("text"), "0.785")
             self.assertEqual(screen.training_summary._labels["error"].cget("text"), "RMSE 0.0456")
+
+            screen.destroy()
+
+    def test_engineer_training_job_uses_active_dataset_version_when_combo_is_blank(self) -> None:
+        frame = np.zeros((24, 24, 3), dtype=np.uint8)
+        ok, buffer = cv2.imencode(".png", frame)
+        self.assertTrue(ok)
+        image_bytes = buffer.tobytes()
+
+        captured_payloads: list[dict] = []
+
+        def create_training_job(payload: dict):
+            captured_payloads.append(dict(payload))
+            return {"id": "train-x", **payload}
+
+        with mock.patch.object(
+            self.api,
+            "list_datasets",
+            return_value=[{"id": "ds-vers", "name": "Dataset Versioned"}],
+        ), mock.patch.object(
+            self.api,
+            "list_dataset_files",
+            return_value=[{"name": "sample.png", "path": "Z:/missing/sample.png", "size": 123}],
+        ), mock.patch.object(
+            self.api,
+            "download_dataset_image",
+            return_value=image_bytes,
+        ), mock.patch.object(
+            self.api,
+            "get_annotation",
+            return_value={"labels": []},
+        ), mock.patch.object(
+            self.api,
+            "list_dataset_versions",
+            return_value=[
+                {
+                    "id": "ver-1",
+                    "display_label": "v1 | Snapshot v1 | ready | 1/1 ann",
+                    "version_number": 1,
+                    "name": "Snapshot v1",
+                    "status": "ready",
+                    "export_format": "yolo",
+                    "export_root": "data/export/ver-1",
+                    "image_count": 1,
+                    "annotated_image_count": 1,
+                    "coverage_percent": 100.0,
+                    "class_names": ["K0W-HB0"],
+                }
+            ],
+        ), mock.patch.object(
+            self.api,
+            "create_training_job",
+            side_effect=create_training_job,
+        ):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+
+            screen.train_dataset_version.set("")
+            screen._active_dataset_version_id = "ver-1"
+            screen.create_training_job()
+
+            self.assertTrue(captured_payloads)
+            self.assertEqual(captured_payloads[-1].get("dataset_version_id"), "ver-1")
 
             screen.destroy()
 

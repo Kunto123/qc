@@ -755,6 +755,18 @@ class EngineerScreen(ttk.Frame):
             return None
         return self._dataset_version_cache[index]
 
+    def _active_dataset_version_record(self) -> dict | None:
+        active_id = str(self._active_dataset_version_id or "").strip()
+        if not active_id:
+            return None
+        record = self._dataset_version_lookup.get(active_id)
+        if record is not None:
+            return record
+        for item in self._dataset_version_cache:
+            if str(item.get("id") or "").strip() == active_id:
+                return item
+        return None
+
     def _version_lookup_key(self, version: dict) -> str:
         return str(version.get("display_label") or version.get("id") or "").strip()
 
@@ -1635,6 +1647,7 @@ class EngineerScreen(ttk.Frame):
             "base_model_weights_name": spec.get("weights_name"),
             "device_mode": self.train_device.get().strip() or "auto",
         }
+        version = version or self._selected_dataset_version_record() or self._active_dataset_version_record()
         if version is not None:
             payload["dataset_version_id"] = version.get("id")
         try:

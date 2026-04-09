@@ -5,6 +5,7 @@ import base64
 from io import BytesIO
 import os
 import shutil
+import time
 import sys
 import tempfile
 import unittest
@@ -740,6 +741,26 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(train_payload["base_model_display_name"], "YOLOv5 Small")
         self.assertEqual(train_payload["dataset_version_id"], version_payload["id"])
         self.assertEqual(train_payload["dataset_version_display_label"], version_payload["display_label"])
+
+        deadline = time.time() + 10.0
+        completed_job = None
+        while time.time() < deadline:
+            jobs_response = self.client.get("/train/jobs", headers=_headers(self.engineer_token))
+            self.assertEqual(jobs_response.status_code, 200, jobs_response.get_json())
+            jobs = jobs_response.get_json()
+            completed_job = next((item for item in jobs if item.get("id") == train_payload["id"]), None)
+            if completed_job and completed_job.get("status") == "completed" and completed_job.get("registered_model_id") is not None:
+                break
+            time.sleep(0.2)
+
+        self.assertIsNotNone(completed_job)
+        self.assertEqual(completed_job.get("status"), "completed")
+        self.assertIsNotNone(completed_job.get("registered_model_id"))
+
+        models_response = self.client.get("/models", headers=_headers(self.engineer_token))
+        self.assertEqual(models_response.status_code, 200, models_response.get_json())
+        models = models_response.get_json()
+        self.assertTrue(any(item.get("provenance", {}).get("training_job_id") == train_payload["id"] for item in models))
 
         model_response = self.client.post(
             "/models",
