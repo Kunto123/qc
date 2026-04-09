@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -450,21 +451,14 @@ class EngineerScreen(ttk.Frame):
             self.training_detail_panel,
             "Training Summary",
             [
-                ("id", "Job ID"),
-                ("dataset_id", "Dataset"),
-                ("status", "Status"),
                 ("base_model", "Base Model"),
-                ("base_model_display_name", "Model Name"),
-                ("base_model_family", "Family"),
-                ("base_model_variant", "Variant"),
-                ("requested_device_mode", "Requested Device"),
-                ("effective_device", "Effective Device"),
-                ("device_backend", "Device Backend"),
-                ("device_fallback_reason", "Fallback Reason"),
-                ("trained_model_path", "Output Model"),
-                ("created_at", "Created"),
-                ("finished_at", "Finished"),
+                ("status", "Status"),
+                ("accuracy", "Accuracy"),
+                ("map_score", "mAP"),
+                ("r2_score", "R2"),
+                ("error", "Error"),
             ],
+            columns=2,
         )
         self.training_summary.pack(fill="x")
         self.training_detail = JsonEditor(self.training_detail_panel, "Training Job Detail", {})
@@ -1530,6 +1524,77 @@ class EngineerScreen(ttk.Frame):
             return
         self.refresh_augment_jobs()
 
+    def _training_metric_sources(self, item: dict) -> list[dict]:
+        sources: list[dict] = []
+        for key in ("metrics", "evaluation", "results"):
+            value = item.get(key)
+            if isinstance(value, dict):
+                sources.append(value)
+        params = item.get("params")
+        if isinstance(params, dict):
+            for key in ("metrics", "evaluation", "results"):
+                value = params.get(key)
+                if isinstance(value, dict):
+                    sources.append(value)
+        return sources
+
+    def _training_metric_value(self, item: dict, *keys: str) -> object:
+        for key in keys:
+            value = item.get(key)
+            if value is not None and value != "":
+                return value
+        for source in self._training_metric_sources(item):
+            for key in keys:
+                value = source.get(key)
+                if value is not None and value != "":
+                    return value
+        return None
+
+    @staticmethod
+    def _format_training_percent(value: object) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return "-"
+        if raw.endswith("%"):
+            return raw
+        try:
+            numeric = Decimal(raw)
+        except InvalidOperation:
+            return raw
+        if numeric <= 1:
+            numeric *= Decimal("100")
+        return f"{numeric.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):f}%"
+
+    @staticmethod
+    def _format_training_decimal(value: object, *, digits: int = 3) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return "-"
+        if raw.endswith("%"):
+            return raw
+        try:
+            numeric = Decimal(raw)
+        except InvalidOperation:
+            return raw
+        quantize_pattern = Decimal("1").scaleb(-digits)
+        return f"{numeric.quantize(quantize_pattern, rounding=ROUND_HALF_UP):f}"
+
+    def _training_error_summary(self, item: dict) -> str:
+        for label, keys in (
+            ("RMSE", ("rmse", "validation_rmse", "val_rmse")),
+            ("MAE", ("mae", "validation_mae", "val_mae")),
+            ("MSE", ("mse", "validation_mse", "val_mse")),
+            ("Loss", ("loss", "val_loss", "validation_loss")),
+            ("Error", ("error",)),
+        ):
+            value = self._training_metric_value(item, *keys)
+            if value is None:
+                continue
+            formatted = self._format_training_decimal(value, digits=4)
+            if formatted != "-":
+                return f"{label} {formatted}"
+        return "-"
+
     def refresh_training_jobs(self):
         try:
             items = self.api.list_training_jobs()
@@ -1599,23 +1664,19 @@ class EngineerScreen(ttk.Frame):
         item = self._training_jobs[index]
         self.training_summary.set_values(
             {
-                "id": item.get("id"),
-                "dataset_id": item.get("dataset_id"),
-                "dataset_version_id": item.get("dataset_version_id"),
-                "dataset_version_number": item.get("dataset_version_number"),
-                "dataset_version_display_label": item.get("dataset_version_display_label") or item.get("dataset_version_name") or item.get("dataset_version_id"),
-                "status": item.get("status"),
-                "base_model": item.get("base_model"),
-                "base_model_display_name": item.get("base_model_display_name"),
-                "base_model_family": item.get("base_model_family"),
-                "base_model_variant": item.get("base_model_variant"),
-                "requested_device_mode": item.get("requested_device_mode") or item.get("device_mode") or item.get("params", {}).get("device_mode"),
-                "effective_device": item.get("effective_device"),
-                "device_backend": item.get("device_backend"),
-                "device_fallback_reason": item.get("device_fallback_reason"),
-                "trained_model_path": item.get("trained_model_path"),
-                "created_at": item.get("created_at"),
-                "finished_at": item.get("finished_at"),
+                "base_model": item.get("base_model_display_name") or item.get("base_model") or "-",
+                "status": item.get("status") or "-",
+                "accuracy": self._format_training_percent(
+                    self._training_metric_value(item, "accuracy", "acc", "val_accuracy", "val_acc")
+                ),
+                "map_score": self._format_training_percent(
+                    self._training_metric_value(item, "mAP", "map", "map50", "mAP50", "map_50", "mAP_50", "map_50_95", "mAP_50_95")
+                ),
+                "r2_score": self._format_training_decimal(
+                    self._training_metric_value(item, "r2", "r2_score", "r_squared"),
+                    digits=3,
+                ),
+                "error": self._training_error_summary(item),
             }
         )
         self.training_detail.set_payload(item)

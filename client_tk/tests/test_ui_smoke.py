@@ -271,6 +271,43 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(str(screen.annot_apply_class_button["state"]), "disabled")
         screen.destroy()
 
+    def test_engineer_training_summary_shows_key_metrics(self) -> None:
+        jobs = [
+            {
+                "id": "train-001",
+                "dataset_id": "ds-train",
+                "status": "completed",
+                "base_model": "yolov11m",
+                "base_model_display_name": "YOLOv11 Medium",
+                "metrics": {
+                    "accuracy": 0.9234,
+                    "map": 0.8123,
+                },
+                "evaluation": {
+                    "r2": 0.7845,
+                    "rmse": 0.0456,
+                },
+                "trained_model_path": "models/trained/train-001.pt",
+            }
+        ]
+
+        with mock.patch.object(self.api, "list_training_jobs", return_value=jobs):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+
+            screen.train_jobs.selection_clear(0, "end")
+            screen.train_jobs.selection_set(0)
+            screen.on_training_selected()
+
+            self.assertEqual(screen.training_summary._labels["base_model"].cget("text"), "YOLOv11 Medium")
+            self.assertEqual(screen.training_summary._labels["status"].cget("text"), "completed")
+            self.assertEqual(screen.training_summary._labels["accuracy"].cget("text"), "92.34%")
+            self.assertEqual(screen.training_summary._labels["map_score"].cget("text"), "81.23%")
+            self.assertEqual(screen.training_summary._labels["r2_score"].cget("text"), "0.785")
+            self.assertEqual(screen.training_summary._labels["error"].cget("text"), "RMSE 0.0456")
+
+            screen.destroy()
+
     def test_engineer_annotation_dataset_follows_selected_dataset(self) -> None:
         screen = EngineerScreen(self.root, self.api, self.state)
         screen.update_idletasks()
