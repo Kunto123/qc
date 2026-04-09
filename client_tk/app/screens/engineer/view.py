@@ -34,6 +34,7 @@ class EngineerScreen(ttk.Frame):
         self._dataset_version_cache: list[dict] = []
         self._dataset_version_lookup: dict[str, dict] = {}
         self._training_jobs: list[dict] = []
+        self._active_training_job_id: str | None = None
         self._model_cache: list[dict] = []
         self._profile_cache: list[dict] = []
         self._annotation_files: list[dict] = []
@@ -770,6 +771,19 @@ class EngineerScreen(ttk.Frame):
     def _version_lookup_key(self, version: dict) -> str:
         return str(version.get("display_label") or version.get("id") or "").strip()
 
+    def _select_training_job_in_listbox(self, job_id: str | None) -> bool:
+        target_id = str(job_id or "").strip()
+        if not target_id or not hasattr(self, "train_jobs"):
+            return False
+        for index, item in enumerate(self._training_jobs):
+            if str(item.get("id") or "").strip() != target_id:
+                continue
+            self.train_jobs.selection_clear(0, "end")
+            self.train_jobs.selection_set(index)
+            self.train_jobs.see(index)
+            return True
+        return False
+
     def _update_dataset_version_summary(self, version: dict | None) -> None:
         if not version:
             self.dataset_version_summary.reset()
@@ -1076,7 +1090,7 @@ class EngineerScreen(ttk.Frame):
             self.dataset_versions.selection_set(selected_index)
             self.dataset_versions.see(selected_index)
             selected_version = visible_versions[selected_index]
-            self.train_dataset_version.set(self._version_lookup_key(selected_version))
+            self.train_dataset_version.current(selected_index)
             self._active_dataset_version_id = str(selected_version.get("id") or "").strip() or None
             self._update_dataset_version_summary(selected_version)
         else:
@@ -1627,6 +1641,14 @@ class EngineerScreen(ttk.Frame):
 
         self.refresh_base_models()
         self._refresh_train_dataset_version_info()
+        if items:
+            if not self._select_training_job_in_listbox(self._active_training_job_id):
+                self._select_training_job_in_listbox(items[0].get("id"))
+            self.on_training_selected()
+        else:
+            self._active_training_job_id = None
+            self.training_summary.reset()
+            self.training_detail.set_payload({})
 
     def create_training_job(self):
         spec = self._selected_base_model_spec()
@@ -1651,10 +1673,12 @@ class EngineerScreen(ttk.Frame):
         if version is not None:
             payload["dataset_version_id"] = version.get("id")
         try:
-            self.api.create_training_job(payload)
+            created = self.api.create_training_job(payload)
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Training", str(exc))
             return
+        if isinstance(created, dict):
+            self._active_training_job_id = str(created.get("id") or "").strip() or self._active_training_job_id
         self.refresh_training_jobs()
 
     def cancel_training_job(self):
@@ -1675,6 +1699,7 @@ class EngineerScreen(ttk.Frame):
             self.training_detail.set_payload({})
             return
         item = self._training_jobs[index]
+        self._active_training_job_id = str(item.get("id") or "").strip() or None
         self.training_summary.set_values(
             {
                 "base_model": item.get("base_model_display_name") or item.get("base_model") or "-",

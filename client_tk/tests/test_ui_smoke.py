@@ -889,6 +889,7 @@ class UiSmokeTest(unittest.TestCase):
             selected = screen._selected_dataset_version_record()
             self.assertIsNotNone(selected)
             self.assertEqual(selected.get("id"), "ver-2")
+            self.assertEqual(screen.train_dataset_version.get(), "v2 | Snapshot v2 | ready | 1/1 ann")
             self.assertEqual(screen.annot_dataset_var.get(), "ds-1")
             self.assertEqual(screen.annot_image_var.get(), "sample.png")
             self.assertIsNotNone(screen.annotation_canvas._source_frame)
