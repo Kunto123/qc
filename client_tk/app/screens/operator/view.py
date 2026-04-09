@@ -264,15 +264,15 @@ class OperatorScreen(ttk.Frame):
             self.preview_strip.rowconfigure(1, weight=3)
             self.preview_strip.columnconfigure(0, weight=1)
             self.preview_strip.columnconfigure(1, weight=0)
-            self.part_ready_preview.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
-            self.main_view.grid(row=1, column=0, sticky="nsew")
+            self.part_ready_preview.grid(row=0, column=0, sticky="nw", pady=(0, 8))
+            self.main_view.grid(row=1, column=0, sticky="nw")
         else:
             self.preview_strip.rowconfigure(0, weight=1)
             self.preview_strip.rowconfigure(1, weight=0)
             self.preview_strip.columnconfigure(0, weight=2)
             self.preview_strip.columnconfigure(1, weight=3)
-            self.part_ready_preview.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-            self.main_view.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+            self.part_ready_preview.grid(row=0, column=0, sticky="nw", padx=(0, 8))
+            self.main_view.grid(row=0, column=1, sticky="nw", padx=(8, 0))
 
     def _on_resize(self, _event=None) -> None:
         self.after_idle(self._apply_responsive_layout)

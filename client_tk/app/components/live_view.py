@@ -13,6 +13,9 @@ class LiveView(ttk.LabelFrame):
     def __init__(self, master, title: str, *, size: tuple[int, int] = (360, 240)):
         super().__init__(master, text=title)
         self._size = size
+        self.configure(width=size[0], height=size[1])
+        self.pack_propagate(False)
+        self.grid_propagate(False)
         self._label = tk.Label(
             self,
             text="No frame",

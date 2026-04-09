@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import mimetypes
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 
@@ -38,6 +39,24 @@ class ApiClient:
                 pass
             raise RuntimeError(f"{response.status_code}: {detail}")
         return response.json()
+
+    def _request_bytes(self, method: str, path: str, *, params: dict | None = None, payload: dict | None = None, timeout: int = 20) -> bytes:
+        response = self.session.request(
+            method=method,
+            url=f"{self.base_url}{path}",
+            params=params,
+            json=payload,
+            headers=self._headers(),
+            timeout=timeout,
+        )
+        if not response.ok:
+            detail = response.text
+            try:
+                detail = response.json().get("error") or detail
+            except ValueError:
+                pass
+            raise RuntimeError(f"{response.status_code}: {detail}")
+        return response.content
 
     def _get(self, path: str, params: dict | None = None):
         return self._request_json("GET", path, params=params, timeout=15)
@@ -250,6 +269,13 @@ class ApiClient:
 
     def save_annotation(self, dataset_id: str, image_name: str, labels: list[dict]) -> dict:
         return self._post(f"/datasets/{dataset_id}/annotations/{image_name}", {"labels": labels})
+
+    def download_dataset_file(self, dataset_id: str, target: str, file_name: str) -> bytes:
+        safe_name = quote(str(Path(file_name).name), safe="")
+        return self._request_bytes("GET", f"/datasets/{dataset_id}/files/{target}/{safe_name}", timeout=20)
+
+    def download_dataset_image(self, dataset_id: str, image_name: str) -> bytes:
+        return self.download_dataset_file(dataset_id, "images", image_name)
 
     def list_augment_jobs(self) -> list[dict]:
         return self._get("/augment/jobs")

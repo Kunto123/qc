@@ -10,6 +10,7 @@ import numpy as np
 
 from backend.app.services.calibration import CalibrationService
 from backend.app.core.model_catalog import list_base_models as catalog_list_base_models
+from client_tk.app.components.annotation_canvas import AnnotationCanvas
 from client_tk.app.components.live_view import LiveView
 from client_tk.app.components.roi_picker_canvas import RoiPickerCanvas
 from client_tk.app.components.scrollable_frame import ScrollableFrame
@@ -34,8 +35,18 @@ class EngineerScreen(ttk.Frame):
         self._training_jobs: list[dict] = []
         self._model_cache: list[dict] = []
         self._profile_cache: list[dict] = []
+        self._annotation_files: list[dict] = []
+        self._annotation_index: int | None = None
+        self._annotation_dataset_id: str | None = None
+        self._annotation_dataset_name: str = ""
+        self._annotation_class_name: str = "object"
+        self._annotation_class_options: list[str] = ["object"]
+        self._annotation_manual_classes: list[str] = []
+        self._annotation_selected_label_index: int | None = None
+        self._active_dataset_version_id: str | None = None
         self._tab_scrollers: dict[str, ScrollableFrame] = {}
         self._layout_compact: bool | None = None
+        self._ignore_next_dataset_list_selection_event: bool = False
 
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True)
@@ -120,22 +131,11 @@ class EngineerScreen(ttk.Frame):
         self._layout_data_annotation(compact=compact)
 
     def _layout_data_annotation(self, *, compact: bool) -> None:
-        for widget in (self.annot_left, self.annot_right):
-            widget.grid_forget()
-
         self.data_annotation_shell.columnconfigure(0, weight=1)
-        self.data_annotation_shell.columnconfigure(1, weight=0)
-        self.data_annotation_shell.rowconfigure(2, weight=0)
-        self.data_annotation_shell.rowconfigure(3, weight=0)
-
-        if compact:
-            self.data_annotation_shell.rowconfigure(2, weight=0)
-            self.data_annotation_shell.rowconfigure(3, weight=1)
-            self.annot_left.grid(row=2, column=0, sticky="nsew", padx=0, pady=(0, 8))
-            self.annot_right.grid(row=3, column=0, sticky="nsew")
-        else:
-            self.annot_left.grid(row=2, column=0, sticky="nsew", padx=(0, 8))
-            self.annot_right.grid(row=2, column=1, sticky="nsew")
+        self.data_annotation_shell.columnconfigure(1, weight=1)
+        self.data_annotation_shell.rowconfigure(2, weight=1)
+        if hasattr(self, "annotation_canvas"):
+            self.annotation_canvas.request_redraw()
 
     def _build_data_tab(self) -> None:
         self.data_container = ttk.Frame(self.data_tab)
@@ -269,76 +269,86 @@ class EngineerScreen(ttk.Frame):
             columns=2,
         )
         self.dataset_version_summary.pack(fill="x", pady=(8, 0))
-        self.dataset_version_detail = JsonEditor(version_frame, "Version Detail", {})
+        self.dataset_version_detail = JsonEditor(version_frame, "Version Detail", {}, text_height=8)
         self.dataset_version_detail.pack(fill="both", expand=True, pady=(8, 0))
 
         self.data_annotation_shell.columnconfigure(0, weight=1)
-        self.data_annotation_shell.columnconfigure(1, weight=2)
+        self.data_annotation_shell.columnconfigure(1, weight=1)
         self.data_annotation_shell.rowconfigure(2, weight=1)
-        ttk.Label(self.data_annotation_shell, text="Annotation Workflow", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(self.data_annotation_shell, text="Annotation Workflow", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
         ttk.Label(
             self.data_annotation_shell,
-            text="Dataset terpilih akan otomatis mengisi Dataset ID annotation. Pilih image lalu load/save labels JSON.",
+            text="Pilih dataset dan image, lalu anotasi langsung di atas gambar. Gunakan Previous / Next untuk berpindah image tanpa keluar dari alur kerja.",
             foreground="#475569",
             wraplength=900,
             justify="left",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 8))
+        ).grid(row=0, column=1, sticky="e", padx=(12, 0))
 
-        self.annot_left = ttk.Frame(self.data_annotation_shell)
-        self.annot_right = ttk.Frame(self.data_annotation_shell)
-        self.annot_left.grid(row=2, column=0, sticky="nsew", padx=(0, 8))
-        self.annot_right.grid(row=2, column=1, sticky="nsew")
-
-        annot_form = ttk.Frame(self.annot_left)
-        annot_form.pack(fill="x")
-        self.annot_dataset = ttk.Entry(annot_form)
-        self.annot_image = ttk.Entry(annot_form)
-        self._grid_entry(annot_form, 0, 0, "Dataset ID", self.annot_dataset)
-        self._grid_entry(annot_form, 1, 0, "Image Name", self.annot_image)
-        ttk.Button(annot_form, text="Load Annotation", command=self.load_annotation).grid(row=2, column=0, sticky="w", pady=(6, 0))
-        ttk.Button(annot_form, text="Save Annotation", command=self.save_annotation).grid(row=2, column=1, sticky="e", pady=(6, 0))
-        annot_form.columnconfigure(1, weight=1)
-
-        quick_label = ttk.LabelFrame(self.annot_left, text="Quick Label Builder", padding=8)
-        quick_label.pack(fill="x", pady=(10, 0))
-        quick_label.columnconfigure(1, weight=1)
-        quick_label.columnconfigure(3, weight=1)
-        self.annot_shape = ttk.Combobox(quick_label, values=["bbox", "polygon"], state="readonly")
+        annotation_toolbar = ttk.Frame(self.data_annotation_shell)
+        annotation_toolbar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 8))
+        annotation_toolbar.columnconfigure(1, weight=1)
+        annotation_toolbar.columnconfigure(3, weight=1)
+        annotation_toolbar.columnconfigure(5, weight=1)
+        annotation_toolbar.columnconfigure(7, weight=1)
+        self.annot_dataset_var = tk.StringVar(value="")
+        self.annot_image_var = tk.StringVar(value="")
+        self.annot_class_var = tk.StringVar(value="object")
+        self.annot_dataset = ttk.Combobox(annotation_toolbar, textvariable=self.annot_dataset_var, values=[], state="readonly")
+        self.annot_image = ttk.Entry(annotation_toolbar, textvariable=self.annot_image_var, state="readonly")
+        self.annot_shape = ttk.Combobox(annotation_toolbar, values=["bbox", "polygon"], state="readonly")
+        self.annot_class = ttk.Combobox(annotation_toolbar, textvariable=self.annot_class_var, values=["object"], state="normal")
         self.annot_shape.set("bbox")
-        self.annot_label_class = ttk.Entry(quick_label)
-        self.annot_bbox_x = ttk.Entry(quick_label)
-        self.annot_bbox_y = ttk.Entry(quick_label)
-        self.annot_bbox_w = ttk.Entry(quick_label)
-        self.annot_bbox_h = ttk.Entry(quick_label)
-        self.annot_polygon_points = ttk.Entry(quick_label)
-        for entry, default in (
-            (self.annot_bbox_x, "0.1"),
-            (self.annot_bbox_y, "0.1"),
-            (self.annot_bbox_w, "0.2"),
-            (self.annot_bbox_h, "0.2"),
-        ):
-            entry.insert(0, default)
-        self._grid_entry(quick_label, 0, 0, "Shape", self.annot_shape)
-        self._grid_entry(quick_label, 0, 2, "Class", self.annot_label_class)
-        self._grid_entry(quick_label, 1, 0, "BBox x", self.annot_bbox_x)
-        self._grid_entry(quick_label, 1, 2, "BBox y", self.annot_bbox_y)
-        self._grid_entry(quick_label, 2, 0, "BBox w", self.annot_bbox_w)
-        self._grid_entry(quick_label, 2, 2, "BBox h", self.annot_bbox_h)
-        ttk.Label(quick_label, text="Polygon points (x,y; x,y; ...)", foreground="#475569").grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
-        self.annot_polygon_points.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(4, 0))
-        quick_action_bar = ttk.Frame(quick_label)
-        quick_action_bar.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-        ttk.Button(quick_action_bar, text="Add Label", command=self.append_annotation_label).pack(side="left")
-        ttk.Label(quick_action_bar, text="BBox uses normalized coordinates 0..1.", foreground="#64748b").pack(side="left", padx=8)
+        self._grid_entry(annotation_toolbar, 0, 0, "Dataset ID", self.annot_dataset)
+        self._grid_entry(annotation_toolbar, 0, 2, "Image", self.annot_image)
+        self._grid_entry(annotation_toolbar, 0, 4, "Type", self.annot_shape)
+        self._grid_entry(annotation_toolbar, 0, 6, "Class", self.annot_class)
+        annotation_actions = ttk.Frame(annotation_toolbar)
+        annotation_actions.grid(row=1, column=0, columnspan=8, sticky="w", pady=(4, 0))
+        self.annot_save_button = ttk.Button(
+            annotation_actions,
+            text="Save Annotation",
+            command=self.save_current_annotation,
+        )
+        self.annot_save_button.pack(side="left")
+        self.annot_apply_class_button = ttk.Button(
+            annotation_actions,
+            text="Apply Class to Selected",
+            command=self._apply_class_to_selected_annotation,
+            state="disabled",
+        )
+        self.annot_apply_class_button.pack(side="left", padx=(6, 0))
+        self.annot_delete_label_button = ttk.Button(
+            annotation_actions,
+            text="Delete Selected Annotation",
+            command=self._delete_selected_annotation,
+            state="disabled",
+        )
+        self.annot_delete_label_button.pack(side="left", padx=(6, 0))
 
-        image_frame = ttk.LabelFrame(self.annot_left, text="Images", padding=8)
-        image_frame.pack(fill="both", expand=True, pady=(10, 0))
-        self.annot_images = tk.Listbox(image_frame)
-        self.annot_images.pack(fill="both", expand=True)
-        self.annot_images.bind("<<ListboxSelect>>", lambda _event: self.on_annotation_image_selected())
+        self.annotation_canvas = AnnotationCanvas(self.data_annotation_shell, title="Image Annotation", size=(980, 560))
+        self.annotation_canvas.grid(row=2, column=0, columnspan=2, sticky="nw")
 
-        self.annot_editor = JsonEditor(self.annot_right, "Labels JSON", {"schema_version": 1, "image_name": "", "labels": []})
-        self.annot_editor.pack(fill="both", expand=True)
+        annotation_nav = ttk.Frame(self.data_annotation_shell)
+        annotation_nav.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.annot_prev_button = ttk.Button(annotation_nav, text="Previous", command=self.previous_annotation_image)
+        self.annot_prev_button.pack(side="left")
+        self.annotation_status = tk.StringVar(value="Select a dataset to start annotating.")
+        ttk.Label(annotation_nav, textvariable=self.annotation_status, foreground="#64748b").pack(side="left", padx=12)
+        self.annot_next_button = ttk.Button(annotation_nav, text="Next", command=self.next_annotation_image)
+        self.annot_next_button.pack(side="right")
+
+        self.annot_shape.bind("<<ComboboxSelected>>", lambda _event: self._sync_annotation_mode())
+        self.annot_dataset.bind("<<ComboboxSelected>>", self._on_annotation_dataset_selected)
+        self.annot_class.bind("<<ComboboxSelected>>", self._on_annotation_class_input)
+        self.annot_class.bind("<Return>", self._on_annotation_class_input)
+        self.annot_class.bind("<FocusOut>", self._on_annotation_class_input)
+        self.annotation_canvas.set_mode(self.annot_shape.get())
+        self.annotation_canvas.on_labels_changed = self._on_annotation_labels_changed
+        self.annotation_canvas.on_selection_changed = self._on_annotation_selection_changed
+        data_scroller = self._tab_scrollers.get("data")
+        if data_scroller is not None:
+            data_scroller.bind("<<ScrollableFrameScrolled>>", self._on_data_tab_scrolled, add="+")
+            data_scroller.canvas.bind("<Configure>", self._on_data_tab_scrolled, add="+")
         self._layout_split_shell(self.data_top_container, self.dataset_panel, self.upload_panel, compact=False, left_weight=2, right_weight=2)
 
     def _build_training_tab(self) -> None:
@@ -577,9 +587,9 @@ class EngineerScreen(ttk.Frame):
         preview_frame.columnconfigure(1, weight=2)
         preview_frame.rowconfigure(0, weight=1)
         self.calibration_source_preview = LiveView(preview_frame, "Source Image", size=(520, 260))
-        self.calibration_source_preview.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self.calibration_source_preview.grid(row=0, column=0, sticky="nw", padx=(0, 8))
         self.calibration_crop_preview = LiveView(preview_frame, "ROI Crop", size=(300, 260))
-        self.calibration_crop_preview.grid(row=0, column=1, sticky="nsew")
+        self.calibration_crop_preview.grid(row=0, column=1, sticky="nw")
         self.calibration_preview_info = tk.StringVar(value="Pilih image untuk melihat preview ROI.")
         ttk.Label(
             self.calibration_left_panel,
@@ -682,11 +692,56 @@ class EngineerScreen(ttk.Frame):
             return None
         return self._dataset_cache[index]
 
+    def _dataset_record_for_id(self, dataset_id: str | None) -> dict | None:
+        target_id = str(dataset_id or "").strip()
+        if not target_id:
+            return None
+        for item in self._dataset_cache:
+            if str(item.get("id") or "").strip() == target_id:
+                return item
+        return None
+
+    def _select_dataset_in_listbox(self, dataset_id: str | None) -> None:
+        target_id = str(dataset_id or "").strip()
+        if not target_id or not hasattr(self, "dataset_list"):
+            return
+        for index, item in enumerate(self._dataset_cache):
+            item_id = str(item.get("id") or "").strip()
+            if item_id != target_id:
+                continue
+            self.dataset_list.selection_clear(0, "end")
+            self.dataset_list.selection_set(index)
+            self.dataset_list.see(index)
+            return
+
+    def _dataset_id_options(self) -> list[str]:
+        options: list[str] = []
+        for item in self._dataset_cache:
+            dataset_id = str(item.get("id") or "").strip()
+            if dataset_id and dataset_id not in options:
+                options.append(dataset_id)
+        return options
+
+    def _sync_annotation_dataset_selector(self, *, preferred_dataset_id: str | None = None) -> None:
+        if not hasattr(self, "annot_dataset"):
+            return
+        values = self._dataset_id_options()
+        self.annot_dataset.configure(values=values)
+        preferred = str(preferred_dataset_id or "").strip()
+        current = self.annot_dataset_var.get().strip()
+        if preferred and preferred in values:
+            self.annot_dataset_var.set(preferred)
+            return
+        if current and current in values:
+            return
+        if not values:
+            self.annot_dataset_var.set("")
+
     def _current_dataset_id(self) -> str | None:
         for candidate in (
             self._selected_dataset_id(),
             self.upload_dataset_id.get().strip(),
-            self.annot_dataset.get().strip(),
+            self._annotation_dataset_id,
             self.augment_dataset.get().strip(),
             self.train_dataset.get().strip(),
         ):
@@ -763,17 +818,43 @@ class EngineerScreen(ttk.Frame):
         )
 
     def on_dataset_selected(self) -> None:
+        if self._ignore_next_dataset_list_selection_event:
+            self._ignore_next_dataset_list_selection_event = False
+            return
         dataset = self._selected_dataset_record()
         dataset_id = str(dataset.get("id")) if dataset else None
         if not dataset_id:
-            return
-        for widget in (self.upload_dataset_id, self.annot_dataset, self.augment_dataset, self.train_dataset):
+            fallback_dataset_id = self._resolve_annotation_dataset_id() or self._current_dataset_id()
+            dataset = self._dataset_record_for_id(fallback_dataset_id)
+            if fallback_dataset_id and dataset is None:
+                self._reset_dataset_context()
+                return
+            if not fallback_dataset_id:
+                self._reset_annotation_state()
+                return
+            dataset_id = fallback_dataset_id
+            if dataset is None:
+                dataset = {"id": dataset_id, "name": self._annotation_dataset_name or dataset_id}
+            if self._selected_dataset_id() != dataset_id:
+                self._ignore_next_dataset_list_selection_event = True
+                self.after_idle(lambda dataset_id=dataset_id: self._select_dataset_in_listbox(dataset_id))
+        previous_dataset_id = self._annotation_dataset_id
+        if previous_dataset_id and previous_dataset_id != dataset_id:
+            self._annotation_manual_classes = []
+            self._active_dataset_version_id = None
+        self._annotation_dataset_id = dataset_id
+        self._annotation_dataset_name = str(dataset.get("name") or dataset_id).strip()
+        self.annot_dataset_var.set(dataset_id)
+        self._sync_annotation_dataset_selector(preferred_dataset_id=dataset_id)
+        self._select_dataset_in_listbox(dataset_id)
+        for widget in (self.upload_dataset_id, self.augment_dataset, self.train_dataset):
             widget.delete(0, "end")
             widget.insert(0, dataset_id)
         self._update_dataset_summary(dataset)
         self.refresh_dataset_files()
         self.refresh_annotation_images()
         self.refresh_dataset_versions()
+        self._sync_annotation_class_name()
 
     def refresh_datasets(self):
         try:
@@ -781,18 +862,62 @@ class EngineerScreen(ttk.Frame):
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Dataset", str(exc))
             return
+        previous_selected_id = self._selected_dataset_id()
         self._dataset_cache = items
+        self._sync_annotation_dataset_selector(preferred_dataset_id=previous_selected_id)
         self.dataset_list.delete(0, "end")
         for item in items:
             summary = f"{item.get('image_count', 0)} imgs / {item.get('annotated_image_count', 0)} ann / {item.get('augmented_count', 0)} aug"
             self.dataset_list.insert("end", f"{item['id']} | {item['name']} | {summary}")
-        selected_dataset = self._selected_dataset_record()
+        selected_dataset = None
+        if previous_selected_id:
+            for index, item in enumerate(items):
+                if str(item.get("id") or "") == previous_selected_id:
+                    self.dataset_list.selection_clear(0, "end")
+                    self.dataset_list.selection_set(index)
+                    self.dataset_list.see(index)
+                    selected_dataset = item
+                    break
+        if selected_dataset is None and items:
+            selected_dataset = items[0]
+            self.dataset_list.selection_clear(0, "end")
+            self.dataset_list.selection_set(0)
+            self.dataset_list.see(0)
         self.dataset_summary.reset()
         self._update_dataset_summary(selected_dataset)
-        if selected_dataset:
-            self.refresh_dataset_versions()
+        if selected_dataset is not None:
+            self.on_dataset_selected()
         else:
-            self._update_dataset_version_summary(None)
+            self._reset_dataset_context()
+
+    def _on_annotation_dataset_selected(self, _event=None) -> None:
+        dataset_id = self.annot_dataset_var.get().strip()
+        if not dataset_id:
+            return
+        for index, item in enumerate(self._dataset_cache):
+            item_id = str(item.get("id") or "").strip()
+            if item_id != dataset_id:
+                continue
+            self.dataset_list.selection_clear(0, "end")
+            self.dataset_list.selection_set(index)
+            self.dataset_list.see(index)
+            self.on_dataset_selected()
+            return
+
+    def _restore_annotation_context_after_toolbar_change(self) -> None:
+        dataset_id = self._resolve_annotation_dataset_id()
+        if dataset_id:
+            self._sync_annotation_dataset_selector(preferred_dataset_id=dataset_id)
+        if not hasattr(self, "annotation_canvas"):
+            return
+        if self._annotation_files and self.annotation_canvas._source_frame is None:
+            self._reload_active_annotation_image()
+            return
+        if self.annotation_canvas._source_frame is not None:
+            if self.annotation_canvas._photo is None:
+                self.annotation_canvas.redraw()
+            else:
+                self.annotation_canvas.request_redraw()
 
     def create_dataset(self):
         try:
@@ -805,28 +930,27 @@ class EngineerScreen(ttk.Frame):
         self.refresh_datasets()
 
     def delete_dataset(self):
-        dataset_id = self._selected_dataset_id()
+        dataset = self._selected_dataset_record()
+        dataset_id = self._selected_dataset_id() or self._resolve_annotation_dataset_id() or self._current_dataset_id()
+        if not dataset_id and len(self._dataset_cache) == 1:
+            dataset_id = str(self._dataset_cache[0].get("id") or "").strip() or None
         if not dataset_id:
+            messagebox.showwarning("Dataset", "Pilih dataset dulu atau pastikan context annotation aktif.", parent=self.winfo_toplevel())
             return
-        if not messagebox.askyesno("Dataset", "Delete selected dataset?"):
+        dataset_name = ""
+        if dataset and str(dataset.get("id") or "").strip() == dataset_id:
+            dataset_name = str(dataset.get("name") or "").strip()
+        if not dataset_name:
+            dataset_name = self._annotation_dataset_name or dataset_id
+        confirm_message = f"Delete dataset '{dataset_name}' ({dataset_id})?"
+        if not messagebox.askyesno("Dataset", confirm_message, parent=self.winfo_toplevel()):
             return
         try:
             self.api.delete_dataset(dataset_id)
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Dataset", str(exc))
+            messagebox.showerror("Dataset", str(exc), parent=self.winfo_toplevel())
             return
-        self.dataset_list.selection_clear(0, "end")
-        for widget in (self.upload_dataset_id, self.annot_dataset, self.augment_dataset, self.train_dataset):
-            widget.delete(0, "end")
-        self.train_dataset_version.set("")
         self.refresh_datasets()
-        self.dataset_files.delete(0, "end")
-        self.annot_images.delete(0, "end")
-        self.dataset_summary.reset()
-        self._dataset_version_cache = []
-        self._dataset_version_lookup = {}
-        self.dataset_versions.delete(0, "end")
-        self._update_dataset_version_summary(None)
 
     def _choose_upload_file(self):
         target = self.upload_target.get().strip() or "images"
@@ -891,14 +1015,24 @@ class EngineerScreen(ttk.Frame):
             marker = "✓" if item.get("annotation_exists") else "•"
             self.dataset_files.insert("end", f"{marker} {item['name']} | {item.get('size', 0)} bytes")
 
-    def refresh_dataset_versions(self):
+    def refresh_dataset_versions(self, *, preferred_version_id: str | None = None, preserve_selection: bool = True):
+        previous_selected = self._selected_dataset_version_record()
+        previous_selected_id = None
+        if preserve_selection:
+            previous_selected_id = self._active_dataset_version_id
+            if previous_selected_id is None and previous_selected is not None:
+                previous_selected_id = str(previous_selected.get("id") or "").strip() or None
+        preferred_id = str(preferred_version_id or "").strip() or None
+
         dataset_id = self._current_dataset_id()
         self.dataset_versions.delete(0, "end")
         self._dataset_version_cache = []
         self._dataset_version_lookup = {}
         if not dataset_id:
             self.train_dataset_version["values"] = []
+            self._active_dataset_version_id = None
             self._update_dataset_version_summary(None)
+            self._sync_annotation_class_name()
             return
 
         try:
@@ -907,12 +1041,13 @@ class EngineerScreen(ttk.Frame):
             messagebox.showerror("Dataset Versions", str(exc))
             return
 
-        self._dataset_version_cache = items
+        visible_versions: list[dict] = []
         values: list[str] = []
         for item in items:
             display_label = str(item.get("display_label") or item.get("id") or "").strip()
             if not display_label:
                 continue
+            visible_versions.append(item)
             values.append(display_label)
             self._dataset_version_lookup[display_label] = item
             self._dataset_version_lookup[str(item.get("id") or "")] = item
@@ -920,19 +1055,29 @@ class EngineerScreen(ttk.Frame):
                 "end",
                 f"{display_label} | {item.get('export_format') or 'yolo'} | {item.get('export_root') or '-'}",
             )
+        self._dataset_version_cache = visible_versions
 
         self.train_dataset_version["values"] = values
         if values:
-            current = self.train_dataset_version.get().strip()
-            if current not in values:
-                self.train_dataset_version.set(values[0])
+            selected_index = 0
+            target_id = preferred_id or previous_selected_id
+            if target_id:
+                for index, item in enumerate(visible_versions):
+                    if str(item.get("id") or "").strip() == target_id:
+                        selected_index = index
+                        break
             self.dataset_versions.selection_clear(0, "end")
-            self.dataset_versions.selection_set(0)
-            self.dataset_versions.see(0)
-            self.on_dataset_version_selected()
+            self.dataset_versions.selection_set(selected_index)
+            self.dataset_versions.see(selected_index)
+            selected_version = visible_versions[selected_index]
+            self.train_dataset_version.set(self._version_lookup_key(selected_version))
+            self._active_dataset_version_id = str(selected_version.get("id") or "").strip() or None
+            self._update_dataset_version_summary(selected_version)
         else:
             self.train_dataset_version.set("")
+            self._active_dataset_version_id = None
             self._update_dataset_version_summary(None)
+        self._sync_annotation_class_name()
         self._refresh_train_dataset_version_info()
 
     def create_dataset_version(self):
@@ -969,7 +1114,8 @@ class EngineerScreen(ttk.Frame):
             return
 
         self.dataset_version_detail.set_payload(created)
-        self.refresh_dataset_versions()
+        self.refresh_dataset_versions(preferred_version_id=str(created.get("id") or ""), preserve_selection=False)
+        self._reload_active_annotation_image()
         messagebox.showinfo("Dataset Versions", f"Version '{created.get('display_label')}' berhasil dibuat.")
 
     def rebuild_dataset_version_export(self):
@@ -984,144 +1130,371 @@ class EngineerScreen(ttk.Frame):
             messagebox.showerror("Dataset Versions", str(exc))
             return
         self.dataset_version_detail.set_payload(refreshed)
-        self.refresh_dataset_versions()
+        self.refresh_dataset_versions(preferred_version_id=str(refreshed.get("id") or ""), preserve_selection=False)
+        self._reload_active_annotation_image()
         messagebox.showinfo("Dataset Versions", f"Export version '{refreshed.get('display_label')}' selesai diperbarui.")
 
-    def refresh_annotation_images(self):
-        dataset_id = self.annot_dataset.get().strip() or self._selected_dataset_id()
-        self.annot_images.delete(0, "end")
+    def _reload_active_annotation_image(self) -> None:
+        dataset_id = self._resolve_annotation_dataset_id()
         if not dataset_id:
             return
+        if not self._annotation_files:
+            self.refresh_annotation_images()
+            return
+        index = self._annotation_image_index()
+        if index is None:
+            self.refresh_annotation_images()
+            return
+        self._load_annotation_for_index(index, save_current=False)
+
+    def _reset_annotation_state(self) -> None:
+        self._annotation_files = []
+        self._annotation_index = None
+        self._annotation_dataset_id = None
+        self._annotation_dataset_name = ""
+        self._active_dataset_version_id = None
+        self.annot_dataset_var.set("")
+        self.annot_image_var.set("")
+        self.annotation_status.set("Select a dataset to start annotating.")
+        if hasattr(self, "annotation_canvas"):
+            self.annotation_canvas.clear()
+        if hasattr(self, "annot_shape"):
+            self.annot_shape.set("bbox")
+        self._reset_annotation_class_state()
+        self._update_annotation_nav_state()
+
+    def _reset_dataset_context(self) -> None:
+        for widget in (self.upload_dataset_id, self.augment_dataset, self.train_dataset):
+            widget.delete(0, "end")
+        self.dataset_files.delete(0, "end")
+        self.dataset_versions.delete(0, "end")
+        self._dataset_version_cache = []
+        self._dataset_version_lookup = {}
+        self.dataset_summary.reset()
+        self._reset_annotation_state()
+        self._sync_annotation_dataset_selector()
+        self._update_dataset_version_summary(None)
+
+    def _resolve_annotation_dataset_id(self) -> str | None:
+        for candidate in (
+            self.annot_dataset_var.get().strip(),
+            self._annotation_dataset_id,
+            self._selected_dataset_id(),
+        ):
+            if candidate:
+                return candidate
+        return None
+
+    def _sync_annotation_mode(self) -> None:
+        if not hasattr(self, "annotation_canvas"):
+            return
+        mode = (self.annot_shape.get().strip() or "bbox").lower()
+        if mode not in {"bbox", "polygon"}:
+            mode = "bbox"
+        self.annotation_canvas.set_mode(mode)
+
+    def _on_data_tab_scrolled(self, _event=None) -> None:
+        if hasattr(self, "annotation_canvas"):
+            self.annotation_canvas.request_redraw()
+
+    def _reset_annotation_class_state(self) -> None:
+        self._annotation_class_name = "object"
+        self._annotation_class_options = ["object"]
+        self._annotation_manual_classes = []
+        self._annotation_selected_label_index = None
+        if hasattr(self, "annot_class"):
+            self.annot_class.configure(values=self._annotation_class_options)
+        if hasattr(self, "annot_class_var"):
+            self.annot_class_var.set("object")
+        if hasattr(self, "annotation_canvas"):
+            self.annotation_canvas.set_class_name("object")
+            self.annotation_canvas.set_selected_label_index(None)
+        if hasattr(self, "annot_apply_class_button"):
+            self.annot_apply_class_button.configure(state="disabled")
+        if hasattr(self, "annot_delete_label_button"):
+            self.annot_delete_label_button.configure(state="disabled")
+
+    def _normalize_annotation_class_name(self, value: str | None) -> str:
+        return str(value or "").strip() or "object"
+
+    def _annotation_label_class_name(self, label: dict | None) -> str | None:
+        if not isinstance(label, dict):
+            return None
+        class_name = str(label.get("class_name") or label.get("class") or label.get("label") or "").strip()
+        return class_name or None
+
+    def _ensure_manual_annotation_class(self, class_name: str) -> None:
+        normalized = self._normalize_annotation_class_name(class_name)
+        if normalized == "object":
+            return
+        if normalized not in self._annotation_manual_classes:
+            self._annotation_manual_classes.append(normalized)
+
+    def _label_class_names(self, labels: list[dict] | None = None) -> list[str]:
+        source = labels if labels is not None else (self.annotation_canvas.get_labels() if hasattr(self, "annotation_canvas") else [])
+        names: list[str] = []
+        for label in source:
+            class_name = self._annotation_label_class_name(label)
+            if class_name and class_name not in names:
+                names.append(class_name)
+        return names
+
+    def _version_class_names(self) -> list[str]:
+        names: list[str] = []
+        for version in self._dataset_version_cache:
+            class_names = version.get("class_names")
+            if not isinstance(class_names, list):
+                continue
+            for item in class_names:
+                class_name = str(item).strip()
+                if class_name and class_name not in names:
+                    names.append(class_name)
+        return names
+
+    def _sync_annotation_class_name(self, *, preferred_class: str | None = None, labels: list[dict] | None = None) -> None:
+        if preferred_class:
+            self._ensure_manual_annotation_class(preferred_class)
+
+        class_options: list[str] = []
+
+        def _push(name: str) -> None:
+            normalized = self._normalize_annotation_class_name(name)
+            if normalized not in class_options:
+                class_options.append(normalized)
+
+        _push("object")
+        for name in self._version_class_names():
+            _push(name)
+        for name in self._annotation_manual_classes:
+            _push(name)
+        for name in self._label_class_names(labels):
+            _push(name)
+
+        selected_label = None
+        if self._annotation_selected_label_index is not None and hasattr(self, "annotation_canvas"):
+            current_labels = self.annotation_canvas.get_labels()
+            if 0 <= self._annotation_selected_label_index < len(current_labels):
+                selected_label = current_labels[self._annotation_selected_label_index]
+        selected_class = self._annotation_label_class_name(selected_label)
+
+        active_class = self._normalize_annotation_class_name(
+            preferred_class
+            or selected_class
+            or self.annot_class_var.get().strip()
+            or self._annotation_class_name
+        )
+        _push(active_class)
+
+        self._annotation_class_options = class_options
+        self._annotation_class_name = active_class
+        if hasattr(self, "annot_class"):
+            self.annot_class.configure(values=self._annotation_class_options)
+        if hasattr(self, "annot_class_var"):
+            self.annot_class_var.set(active_class)
+        if hasattr(self, "annotation_canvas"):
+            self.annotation_canvas.set_class_name(active_class)
+
+    def _apply_class_to_active_annotation(self, class_name: str) -> bool:
+        canvas_selected = self.annotation_canvas.get_selected_label_index() if hasattr(self, "annotation_canvas") else None
+        if canvas_selected is None:
+            return False
+        if not self.annotation_canvas.set_selected_label_class_name(class_name):
+            return False
+        self.annotation_status.set(f"Class '{class_name}' applied to selected annotation.")
+        return True
+
+    def _on_annotation_class_input(self, _event=None) -> None:
+        class_name = self._normalize_annotation_class_name(self.annot_class_var.get())
+        self._ensure_manual_annotation_class(class_name)
+        if self._apply_class_to_active_annotation(class_name):
+            return
+        self._sync_annotation_class_name(preferred_class=class_name)
+
+    def _apply_class_to_selected_annotation(self) -> None:
+        class_name = self._normalize_annotation_class_name(self.annot_class_var.get())
+        self._ensure_manual_annotation_class(class_name)
+        if not self._apply_class_to_active_annotation(class_name):
+            messagebox.showinfo("Annotate", "Pilih anotasi dulu dengan klik kanan pada object di canvas.")
+            self._sync_annotation_class_name(preferred_class=class_name)
+            return
+        self._sync_annotation_class_name(preferred_class=class_name)
+
+    def _delete_selected_annotation(self) -> None:
+        if self._annotation_selected_label_index is None:
+            messagebox.showinfo("Annotate", "Pilih anotasi dulu dengan klik kanan pada object di canvas.")
+            return
+        if not self.annotation_canvas.delete_selected_label():
+            messagebox.showwarning("Annotate", "Anotasi terpilih tidak ditemukan.")
+            return
+        self.annotation_status.set("Selected annotation deleted.")
+
+    def _on_annotation_selection_changed(self, label: dict | None, index: int | None) -> None:
+        self._annotation_selected_label_index = index
+        has_selection = index is not None
+        if hasattr(self, "annot_apply_class_button"):
+            self.annot_apply_class_button.configure(state="normal" if has_selection else "disabled")
+        if hasattr(self, "annot_delete_label_button"):
+            self.annot_delete_label_button.configure(state="normal" if has_selection else "disabled")
+        class_name = self._annotation_label_class_name(label)
+        if class_name:
+            self._sync_annotation_class_name(preferred_class=class_name)
+
+    def _update_annotation_nav_state(self) -> None:
+        if not hasattr(self, "annot_prev_button") or not hasattr(self, "annot_next_button"):
+            return
+        has_items = bool(self._annotation_files)
+        index = self._annotation_index if self._annotation_index is not None else -1
+        self.annot_prev_button.configure(state="normal" if has_items and index > 0 else "disabled")
+        self.annot_next_button.configure(state="normal" if has_items and 0 <= index < len(self._annotation_files) - 1 else "disabled")
+
+    def _annotation_image_index(self, image_name: str | None = None) -> int | None:
+        if not self._annotation_files:
+            return None
+        target = (image_name or self.annot_image_var.get()).strip()
+        if target:
+            for index, item in enumerate(self._annotation_files):
+                if str(item.get("name") or "").strip() == target:
+                    return index
+        if self._annotation_index is not None and 0 <= self._annotation_index < len(self._annotation_files):
+            return self._annotation_index
+        return 0
+
+    def _load_annotation_for_index(self, index: int, *, save_current: bool = True) -> None:
+        if index < 0 or index >= len(self._annotation_files):
+            return
+        if save_current and not self._save_current_annotation(silent=True):
+            self.annotation_status.set("Autosave failed. Stay on the current image and try again.")
+            return
+        item = self._annotation_files[index]
+        dataset_id = self._resolve_annotation_dataset_id()
+        image_name = str(item.get("name") or "").strip()
+        image_path = str(item.get("path") or "").strip()
+        self._annotation_index = index
+        self.annot_image_var.set(image_name or "-")
+        base_status = f"{index + 1} / {len(self._annotation_files)} images"
+        self.annotation_status.set(base_status)
+        loaded = False
+        loaded_source = ""
+        if dataset_id and image_name:
+            try:
+                image_bytes = self.api.download_dataset_image(dataset_id, image_name)
+            except Exception:
+                image_bytes = b""
+            if image_bytes:
+                loaded = self.annotation_canvas.load_image_bytes(image_bytes, image_name=image_name)
+                if loaded:
+                    loaded_source = "backend"
+        if not loaded and image_path:
+            loaded = self.annotation_canvas.load_image_path(image_path)
+            if loaded:
+                loaded_source = "local"
+        if not loaded:
+            self.annotation_canvas.clear()
+            self.annotation_status.set(f"{image_name or 'image'} could not be loaded")
+        elif loaded_source:
+            self.annotation_status.set(f"{base_status} | loaded via {loaded_source}")
+        self.annotation_canvas.set_image_name(image_name)
+        self.annotation_canvas.set_class_name(self._annotation_class_name)
+        labels_payload: list[dict] = []
+        if dataset_id and image_name:
+            try:
+                payload = self.api.get_annotation(dataset_id, image_name)
+            except Exception:
+                payload = {"labels": []}
+            labels = payload.get("labels") if isinstance(payload, dict) else []
+            if isinstance(labels, list):
+                labels_payload = labels
+        self.annotation_canvas.set_labels(labels_payload)
+        self._sync_annotation_class_name(labels=labels_payload)
+        self._sync_annotation_mode()
+        self.annotation_canvas.request_redraw()
+        self._update_annotation_nav_state()
+
+    def refresh_annotation_images(self) -> None:
+        dataset_id = self._resolve_annotation_dataset_id()
+        self._annotation_files = []
+        self._annotation_index = None
+        if not dataset_id:
+            self._reset_annotation_state()
+            return
+        self._annotation_dataset_id = dataset_id
+        self.annot_dataset_var.set(dataset_id)
         try:
             items = self.api.list_dataset_files(dataset_id, "images")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Annotate", str(exc))
+            self._reset_annotation_state()
             return
-        for item in items:
-            marker = "✓" if item.get("annotation_exists") else "•"
-            self.annot_images.insert("end", f"{marker} {item['name']}")
+        self._annotation_files = items
+        if not items:
+            self.annot_image_var.set("-")
+            self.annotation_canvas.clear()
+            self.annotation_status.set("Dataset has no images to annotate.")
+            self._update_annotation_nav_state()
+            return
+        preferred = self._annotation_image_index()
+        if preferred is None:
+            preferred = 0
+        self._load_annotation_for_index(preferred, save_current=False)
 
     def on_annotation_image_selected(self):
-        index = self._selected_listbox_index(self.annot_images)
+        index = self._annotation_image_index()
         if index is None:
             return
-        image_name = self.annot_images.get(index).split(" ", 1)[-1]
-        self.annot_image.delete(0, "end")
-        self.annot_image.insert(0, image_name)
+        self._load_annotation_for_index(index)
+
+    def previous_annotation_image(self) -> None:
+        if self._annotation_index is None:
+            return
+        self._load_annotation_for_index(max(0, self._annotation_index - 1))
+
+    def next_annotation_image(self) -> None:
+        if self._annotation_index is None:
+            return
+        self._load_annotation_for_index(min(len(self._annotation_files) - 1, self._annotation_index + 1))
+
+    def _save_current_annotation(self, *, silent: bool = False) -> bool:
+        dataset_id = self._resolve_annotation_dataset_id()
+        image_name = self.annot_image_var.get().strip()
+        if not dataset_id or not image_name or image_name == "-":
+            return False
+        try:
+            payload = self.annotation_canvas.get_labels()
+            self.api.save_annotation(dataset_id, image_name, payload)
+        except Exception as exc:  # noqa: BLE001
+            self.annotation_status.set(f"Autosave failed for {image_name}")
+            if not silent:
+                messagebox.showerror("Annotate", str(exc))
+            return False
+        self.annotation_status.set(f"Saved {image_name}")
+        return True
+
+    def save_current_annotation(self) -> None:
+        dataset_id = self._resolve_annotation_dataset_id()
+        image_name = self.annot_image_var.get().strip()
+        if not dataset_id or not image_name or image_name == "-":
+            messagebox.showwarning("Annotate", "Pilih dataset dan image dulu.")
+            return
+        self._save_current_annotation(silent=False)
+
+    def _on_annotation_labels_changed(self, _labels: list[dict]) -> None:
+        self._sync_annotation_class_name(labels=_labels)
+        self._save_current_annotation(silent=True)
 
     def on_dataset_version_selected(self) -> None:
         version = self._selected_dataset_version_record()
         if not version:
+            self._active_dataset_version_id = None
             self._update_dataset_version_summary(None)
+            self._sync_annotation_class_name()
             return
+        self._active_dataset_version_id = str(version.get("id") or "").strip() or None
         self._update_dataset_version_summary(version)
-
-    def _annotation_editor_payload(self) -> dict:
-        try:
-            payload = self.annot_editor.get_payload()
-        except Exception:
-            payload = {}
-        if isinstance(payload, dict):
-            record = dict(payload)
-        elif isinstance(payload, list):
-            record = {"schema_version": 1, "image_name": self.annot_image.get().strip(), "labels": payload}
+        self._sync_annotation_class_name()
+        if self.annotation_canvas._source_frame is None:
+            self._reload_active_annotation_image()
         else:
-            record = {"schema_version": 1, "image_name": self.annot_image.get().strip(), "labels": []}
-        record.setdefault("schema_version", 1)
-        record.setdefault("image_name", self.annot_image.get().strip())
-        labels = record.get("labels")
-        if not isinstance(labels, list):
-            labels = []
-        record["labels"] = labels
-        return record
-
-    def _parse_polygon_points(self, raw_points: str) -> list[dict[str, float]]:
-        points: list[dict[str, float]] = []
-        for chunk in (piece.strip() for piece in raw_points.split(";")):
-            if not chunk:
-                continue
-            if "," not in chunk:
-                raise ValueError("Polygon points harus berformat x,y; x,y; ...")
-            x_raw, y_raw = (piece.strip() for piece in chunk.split(",", 1))
-            points.append({"x": float(x_raw), "y": float(y_raw)})
-        if len(points) < 3:
-            raise ValueError("Polygon membutuhkan minimal 3 titik.")
-        return points
-
-    def append_annotation_label(self):
-        class_name = self.annot_label_class.get().strip()
-        if not class_name:
-            messagebox.showwarning("Annotate", "Class Name wajib diisi.")
-            return
-        shape = (self.annot_shape.get().strip() or "bbox").lower()
-        payload = self._annotation_editor_payload()
-        labels = list(payload.get("labels") or [])
-        try:
-            if shape == "polygon":
-                label = {
-                    "type": "polygon",
-                    "shape_type": "polygon",
-                    "class": class_name,
-                    "class_name": class_name,
-                    "points": self._parse_polygon_points(self.annot_polygon_points.get().strip()),
-                    "normalized": True,
-                    "source": "manual",
-                }
-            else:
-                bbox = {
-                    "x": float(self.annot_bbox_x.get().strip()),
-                    "y": float(self.annot_bbox_y.get().strip()),
-                    "w": float(self.annot_bbox_w.get().strip()),
-                    "h": float(self.annot_bbox_h.get().strip()),
-                }
-                label = {
-                    "type": "bbox",
-                    "shape_type": "bbox",
-                    "class": class_name,
-                    "class_name": class_name,
-                    "bbox": bbox,
-                    "normalized": True,
-                    "source": "manual",
-                }
-        except ValueError as exc:
-            messagebox.showerror("Annotate", str(exc))
-            return
-        labels.append(label)
-        payload["labels"] = labels
-        payload["label_count"] = len(labels)
-        self.annot_editor.set_payload(payload)
-
-    def _annotation_labels(self) -> list[dict]:
-        payload = self._annotation_editor_payload()
-        labels = payload.get("labels")
-        return list(labels) if isinstance(labels, list) else []
-
-    def load_annotation(self):
-        dataset_id = self.annot_dataset.get().strip()
-        image_name = self.annot_image.get().strip()
-        if not dataset_id or not image_name:
-            messagebox.showwarning("Annotate", "Dataset ID dan Image Name wajib diisi.")
-            return
-        try:
-            payload = self.api.get_annotation(dataset_id, image_name)
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Annotate", str(exc))
-            return
-        self.annot_editor.set_payload(payload)
-
-    def save_annotation(self):
-        dataset_id = self.annot_dataset.get().strip()
-        image_name = self.annot_image.get().strip()
-        if not dataset_id or not image_name:
-            messagebox.showwarning("Annotate", "Dataset ID dan Image Name wajib diisi.")
-            return
-        try:
-            payload = self._annotation_editor_payload()
-            self.api.save_annotation(dataset_id, image_name, payload.get("labels") or [])
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Annotate", str(exc))
-            return
-        messagebox.showinfo("Annotate", "Annotation saved.")
+            self.annotation_canvas.request_redraw()
 
     def refresh_augment_jobs(self):
         try:

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import base64
 from datetime import UTC, datetime
+from pathlib import Path
 
-from flask import Blueprint, g, jsonify, request
+from flask import Blueprint, g, jsonify, request, send_file
 
 from backend.app.core.config import MODELS_DIR
 from backend.app.core.container import (
@@ -65,6 +66,18 @@ def list_dataset_files(dataset_id: str):
         return jsonify(datasets_repo.list_files(dataset_id, target))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
+
+@workstation_blueprint.get("/datasets/<dataset_id>/files/<target>/<path:file_name>")
+@require_auth
+def download_dataset_file(dataset_id: str, target: str, file_name: str):
+    allowed_targets = {"images", "labels", "exports"}
+    if target not in allowed_targets:
+        return jsonify({"error": f"Invalid dataset target '{target}'"}), 400
+    file_path = datasets_repo.dataset_dir(dataset_id) / target / Path(file_name).name
+    if not file_path.exists() or not file_path.is_file():
+        return jsonify({"error": "File not found"}), 404
+    return send_file(file_path, as_attachment=False)
 
 
 @workstation_blueprint.get("/datasets/<dataset_id>/versions")

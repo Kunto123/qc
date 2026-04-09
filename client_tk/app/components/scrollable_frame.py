@@ -7,6 +7,7 @@ from tkinter import ttk
 
 _SCROLLABLE_FRAMES: weakref.WeakSet["ScrollableFrame"] = weakref.WeakSet()
 _SCROLL_DISPATCH_BOUND = False
+_SCROLLED_EVENT = "<<ScrollableFrameScrolled>>"
 
 
 def _dispatch_mousewheel(event) -> None:
@@ -81,7 +82,7 @@ class ScrollableFrame(ttk.Frame):
         self.columnconfigure(0, weight=1)
 
         self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, background=background)
-        self.v_scrollbar = AutoHideScrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.v_scrollbar = AutoHideScrollbar(self, orient="vertical", command=self._on_scrollbar_scroll)
         self.canvas.configure(yscrollcommand=self.v_scrollbar.set)
 
         self.body = ttk.Frame(self)
@@ -105,6 +106,14 @@ class ScrollableFrame(ttk.Frame):
 
     def _sync_body_width(self, event) -> None:
         self.canvas.itemconfigure(self._window_id, width=event.width)
+        self._emit_scrolled_event()
+
+    def _on_scrollbar_scroll(self, *args) -> None:
+        self.canvas.yview(*args)
+        self._emit_scrolled_event()
+
+    def _emit_scrolled_event(self) -> None:
+        self.event_generate(_SCROLLED_EVENT, when="tail")
 
     def _contains_widget_path(self, widget_path: str) -> bool:
         body_path = str(self.body)
@@ -133,4 +142,5 @@ class ScrollableFrame(ttk.Frame):
             return False
 
         self.canvas.yview_scroll(direction, "units")
+        self._emit_scrolled_event()
         return True

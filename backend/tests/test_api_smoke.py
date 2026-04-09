@@ -757,6 +757,46 @@ class ApiSmokeTest(unittest.TestCase):
         profile_payload = calibration_response.get_json()
         self.assertEqual(profile_payload["colorspace"], "LAB")
 
+    def test_05a_engineer_dataset_download_and_delete(self) -> None:
+        dataset_name = f"dataset-delete-{uuid4().hex[:8]}"
+        dataset_response = self.client.post(
+            "/datasets",
+            json={"name": dataset_name, "description": "delete smoke"},
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
+        dataset = dataset_response.get_json()
+        dataset_dir = TEST_DATA_ROOT / "datasets" / str(dataset["id"])
+
+        upload_response = self.client.post(
+            f"/datasets/{dataset['id']}/upload",
+            json={
+                "file_name": "delete-me.jpg",
+                "target": "images",
+                "content_b64": _sample_image_b64(),
+            },
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(upload_response.status_code, 201, upload_response.get_json())
+
+        download_response = self.client.get(
+            f"/datasets/{dataset['id']}/files/images/delete-me.jpg",
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(download_response.status_code, 200, download_response.get_json())
+        self.assertGreater(len(download_response.data), 0)
+        download_response.close()
+
+        delete_response = self.client.delete(f"/datasets/{dataset['id']}", headers=_headers(self.engineer_token))
+        self.assertEqual(delete_response.status_code, 200, delete_response.get_json())
+        self.assertTrue(delete_response.get_json()["deleted"])
+        self.assertFalse(dataset_dir.exists())
+
+        dataset_list_response = self.client.get("/datasets", headers=_headers(self.engineer_token))
+        self.assertEqual(dataset_list_response.status_code, 200, dataset_list_response.get_json())
+        dataset_list = dataset_list_response.get_json()
+        self.assertFalse(any(item["id"] == dataset["id"] for item in dataset_list))
+
     def test_06_session_accepts_independent_dual_roi_updates(self) -> None:
         session_response = self.client.post(
             "/inspection/sessions/start",
@@ -958,27 +998,6 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
         dataset = dataset_response.get_json()
 
-        training_response = self.client.post(
-            "/train/jobs",
-            json={
-                "dataset_id": dataset["id"],
-                "base_model": "yolov11m",
-                "device_mode": "cpu",
-                "classes": ["K0W-HB0", "K1Z-FA0"],
-                "note": "phase8 regression",
-            },
-            headers=_headers(self.engineer_token),
-        )
-        self.assertEqual(training_response.status_code, 201, training_response.get_json())
-        training_payload = training_response.get_json()
-        self.assertEqual(training_payload["params"]["classes"], ["K0W-HB0", "K1Z-FA0"])
-        self.assertEqual(training_payload["requested_device_mode"], "cpu")
-        self.assertEqual(training_payload["params"]["device_mode"], "cpu")
-        self.assertEqual(training_payload["base_model"], "yolov11m")
-        self.assertEqual(training_payload["base_model_family"], "yolov11")
-        self.assertEqual(training_payload["base_model_variant"], "m")
-        self.assertEqual(training_payload["base_model_display_name"], "YOLOv11 Medium")
-
         model_name = f"phase8-model-{uuid4().hex[:8]}"
         model_response = self.client.post(
             "/models",
@@ -1077,6 +1096,37 @@ class ApiSmokeTest(unittest.TestCase):
                 for item in filtered_results
             )
         )
+
+    def test_08a_training_job_request_records_metadata(self) -> None:
+        dataset_name = f"phase8-train-{uuid4().hex[:8]}"
+        dataset_response = self.client.post(
+            "/datasets",
+            json={"name": dataset_name, "description": "phase8 train metadata"},
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
+        dataset = dataset_response.get_json()
+
+        training_response = self.client.post(
+            "/train/jobs",
+            json={
+                "dataset_id": dataset["id"],
+                "base_model": "yolov11m",
+                "device_mode": "cpu",
+                "classes": ["K0W-HB0", "K1Z-FA0"],
+                "note": "phase8 regression",
+            },
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(training_response.status_code, 201, training_response.get_json())
+        training_payload = training_response.get_json()
+        self.assertEqual(training_payload["params"]["classes"], ["K0W-HB0", "K1Z-FA0"])
+        self.assertEqual(training_payload["requested_device_mode"], "cpu")
+        self.assertEqual(training_payload["params"]["device_mode"], "cpu")
+        self.assertEqual(training_payload["base_model"], "yolov11m")
+        self.assertEqual(training_payload["base_model_family"], "yolov11")
+        self.assertEqual(training_payload["base_model_variant"], "m")
+        self.assertEqual(training_payload["base_model_display_name"], "YOLOv11 Medium")
 
         filtered_dashboard_response = self.client.get(
             "/dashboard/summary?line_id=LINE-FILTER&station_id=ST-FILTER&template_version_id=1",

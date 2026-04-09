@@ -27,7 +27,15 @@ def _int_or_none(value: str) -> int | None:
 
 
 class JsonEditor(ttk.LabelFrame):
-    def __init__(self, master, title: str, initial_payload: dict | None = None):
+    def __init__(
+        self,
+        master,
+        title: str,
+        initial_payload: dict | None = None,
+        *,
+        text_height: int = 18,
+        text_width: int = 60,
+    ):
         super().__init__(master, text=title, padding=8)
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
@@ -39,8 +47,8 @@ class JsonEditor(ttk.LabelFrame):
 
         self.text = Text(
             shell,
-            height=18,
-            width=60,
+            height=max(4, int(text_height)),
+            width=max(20, int(text_width)),
             wrap="none",
             undo=True,
             font=("Consolas", 10),
