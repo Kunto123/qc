@@ -1,7 +1,38 @@
 from __future__ import annotations
 
 import tkinter as tk
+import weakref
 from tkinter import ttk
+
+
+_SCROLLABLE_FRAMES: weakref.WeakSet["ScrollableFrame"] = weakref.WeakSet()
+_SCROLL_DISPATCH_BOUND = False
+
+
+def _dispatch_mousewheel(event) -> None:
+    widget = getattr(event, "widget", None)
+    if widget is None:
+        return
+
+    widget_path = str(widget)
+    matching_frames = []
+    for frame in list(_SCROLLABLE_FRAMES):
+        if _frame_is_alive(frame) and frame._contains_widget_path(widget_path):
+            matching_frames.append(frame)
+    if not matching_frames:
+        return
+
+    matching_frames.sort(key=lambda frame: len(str(frame.body)), reverse=True)
+    for frame in matching_frames:
+        if frame._scroll_from_event(event):
+            break
+
+
+def _frame_is_alive(frame: "ScrollableFrame") -> bool:
+    try:
+        return bool(frame.winfo_exists())
+    except tk.TclError:
+        return False
 
 
 class AutoHideScrollbar(ttk.Scrollbar):
@@ -55,15 +86,19 @@ class ScrollableFrame(ttk.Frame):
 
         self.body = ttk.Frame(self)
         self._window_id = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
+        _SCROLLABLE_FRAMES.add(self)
 
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.v_scrollbar.grid(row=0, column=1, sticky="ns")
 
         self.body.bind("<Configure>", self._sync_scroll_region)
         self.canvas.bind("<Configure>", self._sync_body_width)
-        self.canvas.bind("<MouseWheel>", self._on_mousewheel, add="+")
-        self.canvas.bind("<Button-4>", self._on_mousewheel_linux_up, add="+")
-        self.canvas.bind("<Button-5>", self._on_mousewheel_linux_down, add="+")
+        global _SCROLL_DISPATCH_BOUND
+        if not _SCROLL_DISPATCH_BOUND:
+            self.winfo_toplevel().bind_all("<MouseWheel>", _dispatch_mousewheel, add="+")
+            self.winfo_toplevel().bind_all("<Button-4>", _dispatch_mousewheel, add="+")
+            self.winfo_toplevel().bind_all("<Button-5>", _dispatch_mousewheel, add="+")
+            _SCROLL_DISPATCH_BOUND = True
 
     def _sync_scroll_region(self, _event=None) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -71,15 +106,31 @@ class ScrollableFrame(ttk.Frame):
     def _sync_body_width(self, event) -> None:
         self.canvas.itemconfigure(self._window_id, width=event.width)
 
-    def _on_mousewheel(self, event) -> None:
-        if not self.v_scrollbar.winfo_manager() or event.delta == 0:
-            return
-        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    def _contains_widget_path(self, widget_path: str) -> bool:
+        body_path = str(self.body)
+        return widget_path == body_path or widget_path.startswith(f"{body_path}.")
 
-    def _on_mousewheel_linux_up(self, _event) -> None:
-        if self.v_scrollbar.winfo_manager():
-            self.canvas.yview_scroll(-1, "units")
+    def _scroll_from_event(self, event) -> bool:
+        if not self.v_scrollbar.winfo_manager():
+            return False
 
-    def _on_mousewheel_linux_down(self, _event) -> None:
-        if self.v_scrollbar.winfo_manager():
-            self.canvas.yview_scroll(1, "units")
+        direction = 0
+        event_num = getattr(event, "num", None)
+        if event_num == 4:
+            direction = -1
+        elif event_num == 5:
+            direction = 1
+        else:
+            delta = int(getattr(event, "delta", 0) or 0)
+            if delta == 0:
+                return False
+            direction = -1 if delta > 0 else 1
+
+        first, last = self.canvas.yview()
+        if direction < 0 and first <= 0.0:
+            return False
+        if direction > 0 and last >= 1.0:
+            return False
+
+        self.canvas.yview_scroll(direction, "units")
+        return True

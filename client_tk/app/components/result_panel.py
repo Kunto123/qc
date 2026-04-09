@@ -24,6 +24,7 @@ class ResultPanel(ttk.LabelFrame):
     def __init__(self, master):
         super().__init__(master, text="Inspection Status", padding=12)
         self.columnconfigure(0, weight=1)
+        self._value_widgets: list[ttk.Label] = []
 
         self.decision_banner = tk.Label(
             self,
@@ -83,6 +84,7 @@ class ResultPanel(ttk.LabelFrame):
         self.db_var = self._build_field(self.commit_frame, 4, "DB Write")
         self.event_var = self._build_field(self.commit_frame, 5, "Event ID")
         self.commit_var = self._build_field(self.commit_frame, 6, "Committed At")
+        self.bind("<Configure>", self._on_resize, add="+")
 
     def _build_field(self, master, row: int, title: str) -> ttk.Label:
         master.columnconfigure(1, weight=1)
@@ -95,7 +97,13 @@ class ResultPanel(ttk.LabelFrame):
         )
         value = ttk.Label(master, text="-", wraplength=210, justify="left")
         value.grid(row=row, column=1, sticky="w", pady=2)
+        self._value_widgets.append(value)
         return value
+
+    def _on_resize(self, event) -> None:
+        wraplength = max(140, min(280, event.width - 170))
+        for widget in self._value_widgets:
+            widget.configure(wraplength=wraplength)
 
     def update_payload(self, payload: dict | None) -> None:
         if not payload:

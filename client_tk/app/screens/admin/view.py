@@ -49,6 +49,8 @@ class AdminScreen(ttk.Frame):
         self.api = api_client
         self.state = session_state
         self.current_template_id: int | None = None
+        self._tab_scrollers: dict[str, ScrollableFrame] = {}
+        self._layout_compact: bool | None = None
 
         self._template_summary_lookup: dict[str, dict] = {}
         self._templates_cache: list[dict] = []
@@ -87,30 +89,30 @@ class AdminScreen(ttk.Frame):
         self.refresh_all()
 
     def _build_header(self) -> None:
-        header = ttk.Frame(self, padding=(12, 8, 12, 6))
-        header.grid(row=0, column=0, sticky="ew")
-        header.columnconfigure(0, weight=1)
+        self.header = ttk.Frame(self, padding=(12, 8, 12, 6))
+        self.header.grid(row=0, column=0, sticky="ew")
+        self.header.columnconfigure(0, weight=1)
 
-        top = ttk.Frame(header)
-        top.grid(row=0, column=0, sticky="ew")
-        top.columnconfigure(0, weight=1)
+        self.header_top = ttk.Frame(self.header)
+        self.header_top.grid(row=0, column=0, sticky="ew")
+        self.header_top.columnconfigure(0, weight=1)
+        self.header_top.columnconfigure(1, weight=0)
 
         user = self.state.user or {}
         identity = f"{_safe_text(user.get('username'))} ({_safe_text(user.get('role'))})"
-        ttk.Label(top, text="Admin Workspace", font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            top,
+        ttk.Label(self.header_top, text="Admin Workspace", font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky="w")
+        self.header_identity = ttk.Label(
+            self.header_top,
             text=f"{identity}  |  {_safe_text(self.state.base_url)}  |  Kelola template, deployment, user, hasil inspeksi, dan dashboard.",
             foreground=MUTED_TEXT,
             wraplength=860,
             justify="left",
-        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        )
 
-        actions = ttk.Frame(top)
-        actions.grid(row=0, column=1, rowspan=2, sticky="e")
-        ttk.Button(actions, text="Refresh All", command=self.refresh_all).pack(side="left")
+        self.header_actions = ttk.Frame(self.header_top)
+        ttk.Button(self.header_actions, text="Refresh All", command=self.refresh_all).pack(side="left")
 
-        self.overview_cards_frame = ttk.Frame(header, padding=(0, 8, 0, 0))
+        self.overview_cards_frame = ttk.Frame(self.header, padding=(0, 8, 0, 0))
         self.overview_cards_frame.grid(row=1, column=0, sticky="ew")
         for index in range(4):
             self.overview_cards_frame.columnconfigure(index, weight=1)
@@ -120,24 +122,30 @@ class AdminScreen(ttk.Frame):
             "users": CompactStatCard(self.overview_cards_frame, "Users", background="#7c2d12", foreground="#fff7ed"),
             "results": CompactStatCard(self.overview_cards_frame, "Visible Results", background="#1d4ed8", foreground="#eff6ff"),
         }
-        for column, key in enumerate(("templates", "deployments", "users", "results")):
-            self.admin_cards[key].grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 4, 4 if column < 3 else 0))
+        self._layout_header(compact=False)
+        self._layout_overview_cards(compact=False)
 
     def _build_tabs(self) -> None:
         notebook = ttk.Notebook(self)
         notebook.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
 
-        self.templates_tab = ttk.Frame(notebook)
-        self.deployments_tab = ttk.Frame(notebook)
-        self.users_tab = ttk.Frame(notebook)
-        self.results_tab = ttk.Frame(notebook)
-        self.dashboard_tab = ttk.Frame(notebook)
+        templates_tab = ttk.Frame(notebook)
+        deployments_tab = ttk.Frame(notebook)
+        users_tab = ttk.Frame(notebook)
+        results_tab = ttk.Frame(notebook)
+        dashboard_tab = ttk.Frame(notebook)
 
-        notebook.add(self.templates_tab, text="Templates")
-        notebook.add(self.deployments_tab, text="Deployments")
-        notebook.add(self.users_tab, text="Users")
-        notebook.add(self.results_tab, text="Results")
-        notebook.add(self.dashboard_tab, text="Dashboard")
+        notebook.add(templates_tab, text="Templates")
+        notebook.add(deployments_tab, text="Deployments")
+        notebook.add(users_tab, text="Users")
+        notebook.add(results_tab, text="Results")
+        notebook.add(dashboard_tab, text="Dashboard")
+
+        self.templates_tab = self._make_scrollable_page(templates_tab, "templates")
+        self.deployments_tab = self._make_scrollable_page(deployments_tab, "deployments")
+        self.users_tab = self._make_scrollable_page(users_tab, "users")
+        self.results_tab = self._make_scrollable_page(results_tab, "results")
+        self.dashboard_tab = self._make_scrollable_page(dashboard_tab, "dashboard")
 
         self._build_templates_tab()
         self._build_deployments_tab()
@@ -150,11 +158,84 @@ class AdminScreen(ttk.Frame):
         status_bar.grid(row=2, column=0, sticky="ew")
         ttk.Label(status_bar, textvariable=self.status_var, foreground=MUTED_TEXT).pack(anchor="w")
 
+    def _make_scrollable_page(self, tab: ttk.Frame, key: str) -> ttk.Frame:
+        scroller = ScrollableFrame(tab)
+        scroller.pack(fill="both", expand=True)
+        self._tab_scrollers[key] = scroller
+        scroller.body.columnconfigure(0, weight=1)
+        return scroller.body
+
+    def _layout_header(self, *, compact: bool) -> None:
+        self.header_actions.grid_forget()
+        if compact:
+            self.header_identity.configure(wraplength=760)
+            self.header_top.columnconfigure(0, weight=1)
+            self.header_top.columnconfigure(1, weight=0)
+            self.header_actions.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        else:
+            self.header_identity.configure(wraplength=860)
+            self.header_top.columnconfigure(0, weight=1)
+            self.header_top.columnconfigure(1, weight=0)
+            self.header_actions.grid(row=0, column=1, rowspan=2, sticky="e")
+
+    def _layout_overview_cards(self, *, compact: bool) -> None:
+        for widget in self.overview_cards_frame.grid_slaves():
+            widget.grid_forget()
+
+        columns = 2 if compact else 4
+        for column in range(columns):
+            self.overview_cards_frame.columnconfigure(column, weight=1)
+        rows = (len(self.admin_cards) + columns - 1) // columns
+        for row in range(rows):
+            self.overview_cards_frame.rowconfigure(row, weight=1)
+
+        for index, key in enumerate(("templates", "deployments", "users", "results")):
+            row = index // columns
+            column = index % columns
+            self.admin_cards[key].grid(row=row, column=column, sticky="ew", padx=(0 if column == 0 else 4, 4 if column < columns - 1 else 0), pady=4)
+
+    def _layout_tab_shell(
+        self,
+        shell: ttk.Frame,
+        left: ttk.Frame,
+        right: ttk.Frame,
+        *,
+        compact: bool,
+        left_weight: int,
+        right_weight: int,
+    ) -> None:
+        for widget in shell.grid_slaves():
+            widget.grid_forget()
+
+        if compact:
+            shell.columnconfigure(0, weight=1)
+            shell.rowconfigure(0, weight=1)
+            shell.rowconfigure(1, weight=1)
+            left.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+            right.grid(row=1, column=0, sticky="nsew")
+        else:
+            shell.columnconfigure(0, weight=left_weight)
+            shell.columnconfigure(1, weight=right_weight)
+            shell.rowconfigure(0, weight=1)
+            left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+            right.grid(row=0, column=1, sticky="nsew")
+
     def _on_resize(self, _event=None) -> None:
         self._apply_responsive_layout()
 
     def _apply_responsive_layout(self) -> None:
+        width = max(self.winfo_width(), self.winfo_toplevel().winfo_width())
         height = self.winfo_height()
+        compact = width < 1380
+        self._layout_compact = compact
+        self._layout_header(compact=compact)
+        self._layout_overview_cards(compact=compact)
+        self._layout_tab_shell(self.templates_shell, self.templates_left, self.templates_right, compact=compact, left_weight=2, right_weight=5)
+        self._layout_tab_shell(self.deployments_shell, self.deployments_left, self.deployments_right, compact=compact, left_weight=3, right_weight=2)
+        self._layout_tab_shell(self.users_shell, self.users_left, self.users_right, compact=compact, left_weight=3, right_weight=2)
+        self._layout_tab_shell(self.results_shell, self.results_left, self.results_right, compact=compact, left_weight=4, right_weight=3)
+        self._layout_dashboard_cards(compact=compact)
+
         should_show_cards = height <= 1 or height >= 760
         if should_show_cards == self._overview_cards_visible:
             return
@@ -165,15 +246,13 @@ class AdminScreen(ttk.Frame):
             self.overview_cards_frame.grid_remove()
 
     def _build_templates_tab(self) -> None:
-        container = ttk.Panedwindow(self.templates_tab, orient="horizontal")
-        container.pack(fill="both", expand=True, padx=2, pady=2)
+        self.templates_shell = ttk.Frame(self.templates_tab)
+        self.templates_shell.pack(fill="both", expand=True, padx=2, pady=2)
 
-        left = ttk.Frame(container, padding=8)
-        right = ttk.Frame(container, padding=8)
-        container.add(left, weight=2)
-        container.add(right, weight=5)
+        self.templates_left = ttk.Frame(self.templates_shell, padding=8)
+        self.templates_right = ttk.Frame(self.templates_shell, padding=8)
 
-        library = ttk.LabelFrame(left, text="Template Library", padding=12)
+        library = ttk.LabelFrame(self.templates_left, text="Template Library", padding=12)
         library.pack(fill="both", expand=True)
         library.columnconfigure(0, weight=1)
         library.rowconfigure(3, weight=1)
@@ -217,7 +296,7 @@ class AdminScreen(ttk.Frame):
         ttk.Button(actions, text="Load Selected", command=self.load_selected_template).pack(side="left")
         ttk.Button(actions, text="Delete Selected", command=self.delete_selected_template).pack(side="right")
 
-        editor = ttk.LabelFrame(right, text="Template Editor", padding=12)
+        editor = ttk.LabelFrame(self.templates_right, text="Template Editor", padding=12)
         editor.pack(fill="both", expand=True)
         editor.columnconfigure(0, weight=1)
         editor.rowconfigure(2, weight=1)
@@ -260,15 +339,13 @@ class AdminScreen(ttk.Frame):
         ttk.Button(footer, text="Save Template", command=self.save_template).pack(side="right")
 
     def _build_deployments_tab(self) -> None:
-        container = ttk.Panedwindow(self.deployments_tab, orient="horizontal")
-        container.pack(fill="both", expand=True, padx=2, pady=2)
+        self.deployments_shell = ttk.Frame(self.deployments_tab)
+        self.deployments_shell.pack(fill="both", expand=True, padx=2, pady=2)
 
-        left = ttk.Frame(container, padding=8)
-        right = ttk.Frame(container, padding=8)
-        container.add(left, weight=3)
-        container.add(right, weight=2)
+        self.deployments_left = ttk.Frame(self.deployments_shell, padding=8)
+        self.deployments_right = ttk.Frame(self.deployments_shell, padding=8)
 
-        listing = ttk.LabelFrame(left, text="Active Deployments", padding=12)
+        listing = ttk.LabelFrame(self.deployments_left, text="Active Deployments", padding=12)
         listing.pack(fill="both", expand=True)
         listing.columnconfigure(0, weight=1)
         listing.rowconfigure(2, weight=1)
@@ -302,7 +379,7 @@ class AdminScreen(ttk.Frame):
         ttk.Button(footer, text="Refresh", command=self.refresh_deployments).pack(side="right")
         ttk.Button(footer, text="Deactivate Selected", command=self.deactivate_selected_deployment).pack(side="right", padx=(0, 6))
 
-        form_card = ttk.LabelFrame(right, text="Deploy Template to Line / Station", padding=12)
+        form_card = ttk.LabelFrame(self.deployments_right, text="Deploy Template to Line / Station", padding=12)
         form_card.pack(fill="both", expand=True)
         form_card.columnconfigure(1, weight=1)
         form_card.columnconfigure(3, weight=1)
@@ -346,15 +423,13 @@ class AdminScreen(ttk.Frame):
         ttk.Button(action_bar, text="Deploy", command=self.deploy_template).pack(side="right")
 
     def _build_users_tab(self) -> None:
-        container = ttk.Panedwindow(self.users_tab, orient="horizontal")
-        container.pack(fill="both", expand=True, padx=2, pady=2)
+        self.users_shell = ttk.Frame(self.users_tab)
+        self.users_shell.pack(fill="both", expand=True, padx=2, pady=2)
 
-        left = ttk.Frame(container, padding=8)
-        right = ttk.Frame(container, padding=8)
-        container.add(left, weight=3)
-        container.add(right, weight=2)
+        self.users_left = ttk.Frame(self.users_shell, padding=8)
+        self.users_right = ttk.Frame(self.users_shell, padding=8)
 
-        listing = ttk.LabelFrame(left, text="User Access", padding=12)
+        listing = ttk.LabelFrame(self.users_left, text="User Access", padding=12)
         listing.pack(fill="both", expand=True)
         listing.columnconfigure(0, weight=1)
         listing.rowconfigure(3, weight=1)
@@ -399,7 +474,7 @@ class AdminScreen(ttk.Frame):
         ttk.Button(action_bar, text="Enable Selected", command=lambda: self.set_selected_user_active(True)).pack(side="right")
         ttk.Button(action_bar, text="Disable Selected", command=lambda: self.set_selected_user_active(False)).pack(side="right", padx=(0, 6))
 
-        form = ttk.LabelFrame(right, text="Create User", padding=12)
+        form = ttk.LabelFrame(self.users_right, text="Create User", padding=12)
         form.pack(fill="x")
         form.columnconfigure(1, weight=1)
         ttk.Label(
@@ -460,15 +535,13 @@ class AdminScreen(ttk.Frame):
         ttk.Button(filters, text="Refresh", command=self.refresh_results).grid(row=2, column=8, sticky="e", pady=4, padx=(6, 0))
         ttk.Button(filters, text="Export CSV", command=self._export_csv).grid(row=2, column=9, sticky="e", pady=4, padx=(6, 0))
 
-        container = ttk.Panedwindow(self.results_tab, orient="horizontal")
-        container.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.results_shell = ttk.Frame(self.results_tab)
+        self.results_shell.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
 
-        left = ttk.Frame(container, padding=8)
-        right = ttk.Frame(container, padding=8)
-        container.add(left, weight=4)
-        container.add(right, weight=3)
+        self.results_left = ttk.Frame(self.results_shell, padding=8)
+        self.results_right = ttk.Frame(self.results_shell, padding=8)
 
-        listing = ttk.LabelFrame(left, text="Inspection Results", padding=12)
+        listing = ttk.LabelFrame(self.results_left, text="Inspection Results", padding=12)
         listing.pack(fill="both", expand=True)
         ttk.Label(listing, textvariable=self.results_context_var, foreground=MUTED_TEXT, wraplength=560, justify="left").pack(
             anchor="w"
@@ -500,9 +573,9 @@ class AdminScreen(ttk.Frame):
         ttk.Button(result_actions, text="Open Selected", command=self.open_result).pack(side="right")
         ttk.Button(result_actions, text="Retry Selected Push", command=self.retry_selected_push).pack(side="right", padx=(0, 6))
 
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(0, weight=1)
-        detail_tabs = ttk.Notebook(right)
+        self.results_right.columnconfigure(0, weight=1)
+        self.results_right.rowconfigure(0, weight=1)
+        detail_tabs = ttk.Notebook(self.results_right)
         detail_tabs.grid(row=0, column=0, sticky="nsew")
 
         summary_tab = ttk.Frame(detail_tabs, padding=6)
@@ -572,21 +645,20 @@ class AdminScreen(ttk.Frame):
         ttk.Button(filters, text="Reset", command=self._reset_dashboard_filters).grid(row=2, column=9, sticky="e", pady=4)
         ttk.Button(filters, text="Refresh Dashboard", command=self.refresh_dashboard).grid(row=2, column=10, columnspan=2, sticky="e", pady=4, padx=(6, 0))
 
-        cards = ttk.Frame(self.dashboard_tab, padding=(8, 0, 8, 6))
-        cards.grid(row=1, column=0, sticky="ew")
+        self.dashboard_cards_frame = ttk.Frame(self.dashboard_tab, padding=(8, 0, 8, 6))
+        self.dashboard_cards_frame.grid(row=1, column=0, sticky="ew")
         for index in range(6):
-            cards.columnconfigure(index, weight=1)
+            self.dashboard_cards_frame.columnconfigure(index, weight=1)
         # Use CompactStatCard (same as header) to avoid wasting vertical space
         self.dashboard_cards = {
-            "total": CompactStatCard(cards, "Total", background="#0f172a", foreground="#f8fafc"),
-            "accept": CompactStatCard(cards, "Accept", background="#166534", foreground="#f0fdf4"),
-            "reject": CompactStatCard(cards, "Reject", background="#991b1b", foreground="#fef2f2"),
-            "part_ready": CompactStatCard(cards, "Part Ready", background="#1d4ed8", foreground="#eff6ff"),
-            "avg_conf": CompactStatCard(cards, "Avg Sticker Conf", background="#7c2d12", foreground="#fff7ed"),
-            "backend": CompactStatCard(cards, "ML Backend", background="#334155", foreground="#f8fafc"),
+            "total": CompactStatCard(self.dashboard_cards_frame, "Total", background="#0f172a", foreground="#f8fafc"),
+            "accept": CompactStatCard(self.dashboard_cards_frame, "Accept", background="#166534", foreground="#f0fdf4"),
+            "reject": CompactStatCard(self.dashboard_cards_frame, "Reject", background="#991b1b", foreground="#fef2f2"),
+            "part_ready": CompactStatCard(self.dashboard_cards_frame, "Part Ready", background="#1d4ed8", foreground="#eff6ff"),
+            "avg_conf": CompactStatCard(self.dashboard_cards_frame, "Avg Sticker Conf", background="#7c2d12", foreground="#fff7ed"),
+            "backend": CompactStatCard(self.dashboard_cards_frame, "ML Backend", background="#334155", foreground="#f8fafc"),
         }
-        for column, key in enumerate(("total", "accept", "reject", "part_ready", "avg_conf", "backend")):
-            self.dashboard_cards[key].grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 4, 4 if column < 5 else 0))
+        self._layout_dashboard_cards(compact=False)
 
         body_tabs = ttk.Notebook(self.dashboard_tab)
         body_tabs.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
@@ -619,6 +691,22 @@ class AdminScreen(ttk.Frame):
 
         self.dashboard_raw = JsonEditor(raw_tab, "Dashboard Raw", {})
         self.dashboard_raw.pack(fill="both", expand=True)
+
+    def _layout_dashboard_cards(self, *, compact: bool) -> None:
+        for widget in self.dashboard_cards_frame.grid_slaves():
+            widget.grid_forget()
+
+        columns = 3 if compact else 6
+        for column in range(columns):
+            self.dashboard_cards_frame.columnconfigure(column, weight=1)
+        rows = 2 if compact else 1
+        for row in range(rows):
+            self.dashboard_cards_frame.rowconfigure(row, weight=1)
+
+        for index, key in enumerate(("total", "accept", "reject", "part_ready", "avg_conf", "backend")):
+            row = index // columns
+            column = index % columns
+            self.dashboard_cards[key].grid(row=row, column=column, sticky="ew", padx=(0 if column == 0 else 4, 4 if column < columns - 1 else 0), pady=4)
 
     def _build_table(
         self,

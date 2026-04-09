@@ -9,6 +9,7 @@ import cv2
 from client_tk.app.components.counter_panel import CounterPanel
 from client_tk.app.components.live_view import LiveView
 from client_tk.app.components.result_panel import ResultPanel
+from client_tk.app.components.scrollable_frame import ScrollableFrame
 from client_tk.app.config import DEFAULT_UPLOAD_INTERVAL_MS
 from client_tk.app.services.camera_capture import CameraCaptureService
 from client_tk.app.services.frame_upload import FrameUploadService
@@ -78,44 +79,47 @@ class OperatorScreen(ttk.Frame):
         self._schedule_poll()
 
     def _build_top_bar(self) -> None:
-        frame = ttk.Frame(self)
-        frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        frame.columnconfigure(0, weight=1)
-        frame.columnconfigure(1, weight=0)
+        self.top_bar = ttk.Frame(self)
+        self.top_bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.top_bar.columnconfigure(0, weight=1)
 
-        action_bar = ttk.Frame(frame)
-        action_bar.grid(row=0, column=0, sticky="w")
-        ttk.Button(action_bar, text="\u2699 Settings", command=self._open_settings).pack(side="left", padx=(0, 6))
-        ttk.Button(action_bar, text="Load Deployment", command=self._load_deployment).pack(side="left", padx=6)
-        ttk.Button(action_bar, text="Start Camera", command=self._start_camera).pack(side="left", padx=6)
-        ttk.Button(action_bar, text="Stop Camera", command=self._stop_camera).pack(side="left", padx=6)
-        ttk.Button(action_bar, text="Start Session", command=self._start_session).pack(side="left", padx=6)
-        ttk.Button(action_bar, text="Stop Session", command=self._stop_session).pack(side="left", padx=6)
+        self.action_bar = ttk.Frame(self.top_bar)
+        self.action_bar.grid(row=0, column=0, sticky="ew")
+        self.action_buttons = [
+            ttk.Button(self.action_bar, text="\u2699 Settings", command=self._open_settings),
+            ttk.Button(self.action_bar, text="Load Deployment", command=self._load_deployment),
+            ttk.Button(self.action_bar, text="Start Camera", command=self._start_camera),
+            ttk.Button(self.action_bar, text="Stop Camera", command=self._stop_camera),
+            ttk.Button(self.action_bar, text="Start Session", command=self._start_session),
+            ttk.Button(self.action_bar, text="Stop Session", command=self._stop_session),
+        ]
 
-        template_box = ttk.LabelFrame(frame, text="Template", padding=8)
-        template_box.grid(row=0, column=1, sticky="e")
-        self.template_selector = ttk.Combobox(template_box, textvariable=self.template_choice, width=32, state="readonly")
+        self.template_box = ttk.LabelFrame(self.top_bar, text="Template", padding=8)
+        self.template_selector = ttk.Combobox(self.template_box, textvariable=self.template_choice, width=32, state="readonly")
         self.template_selector.grid(row=0, column=0, padx=(0, 6))
         self.template_selector.bind("<<ComboboxSelected>>", self._on_template_selected)
-        ttk.Button(template_box, text="Refresh", command=self._load_template_choices).grid(row=0, column=1)
+        ttk.Button(self.template_box, text="Refresh", command=self._load_template_choices).grid(row=0, column=1)
+
+        self._layout_top_bar(compact=False)
 
     def _build_context_bar(self) -> None:
-        frame = ttk.Frame(self)
-        frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        for index in range(4):
-            frame.columnconfigure(index, weight=1)
-        ttk.Label(frame, textvariable=self.operator_context, font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(frame, textvariable=self.line_context).grid(row=0, column=1, sticky="w", padx=8)
-        ttk.Label(frame, textvariable=self.station_context).grid(row=0, column=2, sticky="w", padx=8)
-        ttk.Label(frame, textvariable=self.template_context).grid(row=0, column=3, sticky="w", padx=8)
+        self.context_bar = ttk.Frame(self)
+        self.context_bar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        self.context_labels = {
+            "operator": ttk.Label(self.context_bar, textvariable=self.operator_context, font=("Segoe UI", 12, "bold")),
+            "line": ttk.Label(self.context_bar, textvariable=self.line_context),
+            "station": ttk.Label(self.context_bar, textvariable=self.station_context),
+            "template": ttk.Label(self.context_bar, textvariable=self.template_context),
+        }
+        self._layout_context_bar(compact=False)
 
     def _build_status_strip(self) -> None:
-        frame = ttk.LabelFrame(self, text="System Status", padding=8)
-        frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        self.status_frame = ttk.LabelFrame(self, text="System Status", padding=8)
+        self.status_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         self.badges: dict[str, tk.Label] = {}
         for key in ("SERVER", "CAMERA", "SESSION", "DB", "EVENT"):
             label = tk.Label(
-                frame,
+                self.status_frame,
                 text=f"{key}: -",
                 bg=BADGE_COLORS["neutral"][0],
                 fg=BADGE_COLORS["neutral"][1],
@@ -123,12 +127,13 @@ class OperatorScreen(ttk.Frame):
                 padx=10,
                 pady=6,
             )
-            label.pack(side="left", padx=4, pady=2)
             self.badges[key] = label
+        self._layout_status_strip(compact=False)
 
     def _build_content(self) -> None:
-        self.content = ttk.Frame(self)
-        self.content.grid(row=3, column=0, sticky="nsew")
+        self.content_scroller = ScrollableFrame(self)
+        self.content_scroller.grid(row=3, column=0, sticky="nsew")
+        self.content = self.content_scroller.body
         self.content.columnconfigure(0, weight=1)
         self.content.rowconfigure(0, weight=1)
         self.content.rowconfigure(1, weight=0)
@@ -218,6 +223,9 @@ class OperatorScreen(ttk.Frame):
     def _apply_responsive_layout(self) -> None:
         width = max(self.winfo_width(), self.winfo_toplevel().winfo_width())
         compact = width < RESPONSIVE_BREAKPOINT
+        self._layout_top_bar(compact=compact)
+        self._layout_context_bar(compact=compact)
+        self._layout_status_strip(compact=compact)
         if compact != self._is_compact_layout:
             self._is_compact_layout = compact
 
@@ -269,6 +277,66 @@ class OperatorScreen(ttk.Frame):
     def _on_resize(self, _event=None) -> None:
         self.after_idle(self._apply_responsive_layout)
 
+    def _layout_top_bar(self, *, compact: bool) -> None:
+        for widget in self.action_bar.grid_slaves():
+            widget.grid_forget()
+
+        for column in range(6):
+            self.action_bar.columnconfigure(column, weight=1 if compact else 0)
+        self.action_bar.rowconfigure(0, weight=1)
+        self.action_bar.rowconfigure(1, weight=1)
+
+        if compact:
+            self.action_bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+            self.template_box.grid(row=1, column=0, sticky="ew")
+            self.template_box.columnconfigure(0, weight=1)
+            self.template_box.columnconfigure(1, weight=0)
+            for index, button in enumerate(self.action_buttons):
+                row = 0 if index < 3 else 1
+                column = index if index < 3 else index - 3
+                button.grid(row=row, column=column, sticky="ew", padx=3, pady=3)
+        else:
+            self.action_bar.grid(row=0, column=0, sticky="w")
+            self.template_box.grid(row=0, column=1, sticky="e")
+            for index, button in enumerate(self.action_buttons):
+                button.grid(row=0, column=index, sticky="w", padx=(0 if index == 0 else 6, 0))
+
+    def _layout_context_bar(self, *, compact: bool) -> None:
+        for widget in self.context_bar.grid_slaves():
+            widget.grid_forget()
+
+        if compact:
+            self.context_bar.columnconfigure(0, weight=1)
+            self.context_bar.columnconfigure(1, weight=1)
+            self.context_labels["operator"].grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+            self.context_labels["line"].grid(row=1, column=0, sticky="w", padx=(0, 8))
+            self.context_labels["station"].grid(row=1, column=1, sticky="w")
+            self.context_labels["template"].grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        else:
+            for index in range(4):
+                self.context_bar.columnconfigure(index, weight=1)
+            self.context_labels["operator"].grid(row=0, column=0, sticky="w")
+            self.context_labels["line"].grid(row=0, column=1, sticky="w", padx=8)
+            self.context_labels["station"].grid(row=0, column=2, sticky="w", padx=8)
+            self.context_labels["template"].grid(row=0, column=3, sticky="w", padx=8)
+
+    def _layout_status_strip(self, *, compact: bool) -> None:
+        for widget in self.status_frame.grid_slaves():
+            widget.grid_forget()
+
+        keys = ["SERVER", "CAMERA", "SESSION", "DB", "EVENT"]
+        columns = 3 if compact else 5
+        rows = 2 if compact else 1
+        for column in range(columns):
+            self.status_frame.columnconfigure(column, weight=1)
+        for row in range(rows):
+            self.status_frame.rowconfigure(row, weight=1)
+
+        for index, key in enumerate(keys):
+            row = index // columns
+            column = index % columns
+            self.badges[key].grid(row=row, column=column, sticky="ew", padx=4, pady=3)
+
     def _open_settings(self) -> None:
         if self._settings_window and self._settings_window.winfo_exists():
             self._settings_window.lift()
@@ -277,14 +345,20 @@ class OperatorScreen(ttk.Frame):
 
         window = tk.Toplevel(self)
         window.title("Operator Settings")
-        window.geometry("660x430")
+        window.geometry("700x520")
         window.transient(self.winfo_toplevel())
-        window.resizable(True, False)
+        window.resizable(True, True)
         self._settings_window = window
         window.protocol("WM_DELETE_WINDOW", self._close_settings)
 
-        body = ttk.Frame(window, padding=14)
-        body.pack(fill="both", expand=True)
+        shell = ttk.Frame(window, padding=14)
+        shell.pack(fill="both", expand=True)
+        shell.columnconfigure(0, weight=1)
+        shell.rowconfigure(0, weight=1)
+
+        scroller = ScrollableFrame(shell)
+        scroller.grid(row=0, column=0, sticky="nsew")
+        body = scroller.body
         body.columnconfigure(0, weight=1)
         body.columnconfigure(1, weight=1)
 
@@ -337,8 +411,8 @@ class OperatorScreen(ttk.Frame):
             justify="left",
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
-        footer = ttk.Frame(body)
-        footer.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        footer = ttk.Frame(shell)
+        footer.grid(row=1, column=0, sticky="ew", pady=(14, 0))
         ttk.Button(footer, text="Load Deployment", command=self._load_deployment).pack(side="left")
         ttk.Button(footer, text="Use Template ROI", command=self._sync_selected_template_detail).pack(side="left", padx=8)
         ttk.Button(footer, text="Apply ROI", command=self._apply_roi).pack(side="left")

@@ -34,6 +34,8 @@ class EngineerScreen(ttk.Frame):
         self._training_jobs: list[dict] = []
         self._model_cache: list[dict] = []
         self._profile_cache: list[dict] = []
+        self._tab_scrollers: dict[str, ScrollableFrame] = {}
+        self._layout_compact: bool | None = None
 
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True)
@@ -48,10 +50,17 @@ class EngineerScreen(ttk.Frame):
         notebook.add(self.models_tab, text="Models")
         notebook.add(self.calibration_tab, text="Calibration")
 
+        self.data_tab = self._make_scrollable_page(self.data_tab, "data")
+        self.training_tab = self._make_scrollable_page(self.training_tab, "training")
+        self.models_tab = self._make_scrollable_page(self.models_tab, "models")
+
         self._build_data_tab()
         self._build_training_tab()
         self._build_models_tab()
         self._build_calibration_tab()
+
+        self.bind("<Configure>", self._on_resize)
+        self.after_idle(self._apply_responsive_layout)
 
         self.refresh_datasets()
         self.refresh_base_models()
@@ -60,46 +69,115 @@ class EngineerScreen(ttk.Frame):
         self.refresh_models()
         self.refresh_profiles()
 
+    def _make_scrollable_page(self, tab: ttk.Frame, key: str) -> ttk.Frame:
+        scroller = ScrollableFrame(tab)
+        scroller.pack(fill="both", expand=True)
+        self._tab_scrollers[key] = scroller
+        scroller.body.columnconfigure(0, weight=1)
+        return scroller.body
+
+    def _layout_split_shell(
+        self,
+        shell: ttk.Frame,
+        left: ttk.Frame,
+        right: ttk.Frame,
+        *,
+        compact: bool,
+        left_weight: int,
+        right_weight: int,
+    ) -> None:
+        for widget in shell.grid_slaves():
+            widget.grid_forget()
+
+        if compact:
+            shell.columnconfigure(0, weight=1)
+            shell.rowconfigure(0, weight=1)
+            shell.rowconfigure(1, weight=1)
+            left.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+            right.grid(row=1, column=0, sticky="nsew")
+        else:
+            shell.columnconfigure(0, weight=left_weight)
+            shell.columnconfigure(1, weight=right_weight)
+            shell.rowconfigure(0, weight=1)
+            left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+            right.grid(row=0, column=1, sticky="nsew")
+
+    def _on_resize(self, _event=None) -> None:
+        self.after_idle(self._apply_responsive_layout)
+
+    def _apply_responsive_layout(self) -> None:
+        width = max(self.winfo_width(), self.winfo_toplevel().winfo_width())
+        compact = width < 1360
+        if compact == self._layout_compact:
+            return
+        self._layout_compact = compact
+
+        self._layout_split_shell(self.data_top_container, self.dataset_panel, self.upload_panel, compact=compact, left_weight=2, right_weight=2)
+        self._layout_split_shell(self.training_container, self.augment_panel, self.train_panel, compact=compact, left_weight=1, right_weight=2)
+        self._layout_split_shell(self.training_lower, self.training_jobs_panel, self.training_detail_panel, compact=compact, left_weight=2, right_weight=3)
+        self._layout_split_shell(self.models_container, self.models_left_panel, self.models_right_panel, compact=compact, left_weight=2, right_weight=3)
+        self._layout_split_shell(self.calibration_container, self.calibration_left_panel, self.calibration_right_outer, compact=compact, left_weight=2, right_weight=2)
+        self._layout_data_annotation(compact=compact)
+
+    def _layout_data_annotation(self, *, compact: bool) -> None:
+        for widget in (self.annot_left, self.annot_right):
+            widget.grid_forget()
+
+        self.data_annotation_shell.columnconfigure(0, weight=1)
+        self.data_annotation_shell.columnconfigure(1, weight=0)
+        self.data_annotation_shell.rowconfigure(2, weight=0)
+        self.data_annotation_shell.rowconfigure(3, weight=0)
+
+        if compact:
+            self.data_annotation_shell.rowconfigure(2, weight=0)
+            self.data_annotation_shell.rowconfigure(3, weight=1)
+            self.annot_left.grid(row=2, column=0, sticky="nsew", padx=0, pady=(0, 8))
+            self.annot_right.grid(row=3, column=0, sticky="nsew")
+        else:
+            self.annot_left.grid(row=2, column=0, sticky="nsew", padx=(0, 8))
+            self.annot_right.grid(row=2, column=1, sticky="nsew")
+
     def _build_data_tab(self) -> None:
-        container = ttk.Panedwindow(self.data_tab, orient="vertical")
-        container.pack(fill="both", expand=True, padx=6, pady=6)
+        self.data_container = ttk.Frame(self.data_tab)
+        self.data_container.pack(fill="both", expand=True, padx=6, pady=6)
+        self.data_container.columnconfigure(0, weight=1)
+        self.data_container.rowconfigure(0, weight=3)
+        self.data_container.rowconfigure(1, weight=2)
 
-        top = ttk.Panedwindow(container, orient="horizontal")
-        bottom = ttk.Frame(container, padding=8)
-        container.add(top, weight=3)
-        container.add(bottom, weight=2)
+        self.data_top_container = ttk.Frame(self.data_container)
+        self.data_annotation_shell = ttk.Frame(self.data_container, padding=8)
+        self.data_top_container.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        self.data_annotation_shell.grid(row=1, column=0, sticky="nsew")
 
-        dataset_panel = ttk.Frame(top, padding=8)
-        upload_panel = ttk.Frame(top, padding=8)
-        top.add(dataset_panel, weight=2)
-        top.add(upload_panel, weight=2)
+        self.dataset_panel = ttk.Frame(self.data_top_container, padding=8)
+        self.upload_panel = ttk.Frame(self.data_top_container, padding=8)
 
-        ttk.Label(dataset_panel, text="Datasets", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(self.dataset_panel, text="Datasets", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
-            dataset_panel,
+            self.dataset_panel,
             text="Pilih dataset untuk sinkron ke upload, annotation, augment, dan training.",
             foreground="#475569",
             wraplength=420,
             justify="left",
         ).pack(anchor="w", pady=(2, 8))
-        self.dataset_list = tk.Listbox(dataset_panel, height=14)
+        self.dataset_list = tk.Listbox(self.dataset_panel, height=14)
         self.dataset_list.pack(fill="both", expand=True)
         self.dataset_list.bind("<<ListboxSelect>>", lambda _event: self.on_dataset_selected())
 
-        dataset_form = ttk.Frame(dataset_panel)
+        dataset_form = ttk.Frame(self.dataset_panel)
         dataset_form.pack(fill="x", pady=(8, 0))
         self.dataset_name = ttk.Entry(dataset_form)
         self.dataset_desc = ttk.Entry(dataset_form)
         self._grid_entry(dataset_form, 0, 0, "Name", self.dataset_name)
         self._grid_entry(dataset_form, 1, 0, "Description", self.dataset_desc)
-        action_bar = ttk.Frame(dataset_panel)
+        action_bar = ttk.Frame(self.dataset_panel)
         action_bar.pack(fill="x", pady=(8, 0))
         ttk.Button(action_bar, text="Create", command=self.create_dataset).pack(side="left")
         ttk.Button(action_bar, text="Delete Selected", command=self.delete_dataset).pack(side="left", padx=6)
         ttk.Button(action_bar, text="Refresh", command=self.refresh_datasets).pack(side="left")
 
         self.dataset_summary = LabeledValuePanel(
-            dataset_panel,
+            self.dataset_panel,
             "Dataset Summary",
             [
                 ("image_count", "Images"),
@@ -112,15 +190,15 @@ class EngineerScreen(ttk.Frame):
         )
         self.dataset_summary.pack(fill="x", pady=(8, 0))
 
-        ttk.Label(upload_panel, text="Upload and Browse Files", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(self.upload_panel, text="Upload and Browse Files", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
-            upload_panel,
+            self.upload_panel,
             text="Upload satu atau banyak file ke folder `images`, `labels`, atau `exports`, lalu lihat isi dataset aktif di browser file.",
             foreground="#475569",
             wraplength=420,
             justify="left",
         ).pack(anchor="w", pady=(2, 8))
-        upload_form = ttk.Frame(upload_panel)
+        upload_form = ttk.Frame(self.upload_panel)
         upload_form.pack(fill="x")
         self.upload_dataset_id = ttk.Entry(upload_form)
         self.upload_target = ttk.Combobox(upload_form, values=["images", "labels", "exports"], state="readonly")
@@ -134,7 +212,7 @@ class EngineerScreen(ttk.Frame):
         self.upload_file_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
         upload_form.columnconfigure(1, weight=1)
 
-        browser_frame = ttk.LabelFrame(upload_panel, text="Dataset Files", padding=8)
+        browser_frame = ttk.LabelFrame(self.upload_panel, text="Dataset Files", padding=8)
         browser_frame.pack(fill="both", expand=True, pady=(10, 0))
         toolbar = ttk.Frame(browser_frame)
         toolbar.pack(fill="x")
@@ -145,7 +223,7 @@ class EngineerScreen(ttk.Frame):
         self.dataset_files = tk.Listbox(browser_frame)
         self.dataset_files.pack(fill="both", expand=True, pady=(8, 0))
 
-        version_frame = ttk.LabelFrame(upload_panel, text="Dataset Versions", padding=8)
+        version_frame = ttk.LabelFrame(self.upload_panel, text="Dataset Versions", padding=8)
         version_frame.pack(fill="both", expand=True, pady=(10, 0))
         version_form = ttk.Frame(version_frame)
         version_form.pack(fill="x")
@@ -194,24 +272,24 @@ class EngineerScreen(ttk.Frame):
         self.dataset_version_detail = JsonEditor(version_frame, "Version Detail", {})
         self.dataset_version_detail.pack(fill="both", expand=True, pady=(8, 0))
 
-        bottom.columnconfigure(0, weight=1)
-        bottom.columnconfigure(1, weight=2)
-        bottom.rowconfigure(2, weight=1)
-        ttk.Label(bottom, text="Annotation Workflow", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+        self.data_annotation_shell.columnconfigure(0, weight=1)
+        self.data_annotation_shell.columnconfigure(1, weight=2)
+        self.data_annotation_shell.rowconfigure(2, weight=1)
+        ttk.Label(self.data_annotation_shell, text="Annotation Workflow", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(
-            bottom,
+            self.data_annotation_shell,
             text="Dataset terpilih akan otomatis mengisi Dataset ID annotation. Pilih image lalu load/save labels JSON.",
             foreground="#475569",
             wraplength=900,
             justify="left",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 8))
 
-        annot_left = ttk.Frame(bottom)
-        annot_left.grid(row=2, column=0, sticky="nsew", padx=(0, 8))
-        annot_right = ttk.Frame(bottom)
-        annot_right.grid(row=2, column=1, sticky="nsew")
+        self.annot_left = ttk.Frame(self.data_annotation_shell)
+        self.annot_right = ttk.Frame(self.data_annotation_shell)
+        self.annot_left.grid(row=2, column=0, sticky="nsew", padx=(0, 8))
+        self.annot_right.grid(row=2, column=1, sticky="nsew")
 
-        annot_form = ttk.Frame(annot_left)
+        annot_form = ttk.Frame(self.annot_left)
         annot_form.pack(fill="x")
         self.annot_dataset = ttk.Entry(annot_form)
         self.annot_image = ttk.Entry(annot_form)
@@ -221,7 +299,7 @@ class EngineerScreen(ttk.Frame):
         ttk.Button(annot_form, text="Save Annotation", command=self.save_annotation).grid(row=2, column=1, sticky="e", pady=(6, 0))
         annot_form.columnconfigure(1, weight=1)
 
-        quick_label = ttk.LabelFrame(annot_left, text="Quick Label Builder", padding=8)
+        quick_label = ttk.LabelFrame(self.annot_left, text="Quick Label Builder", padding=8)
         quick_label.pack(fill="x", pady=(10, 0))
         quick_label.columnconfigure(1, weight=1)
         quick_label.columnconfigure(3, weight=1)
@@ -253,33 +331,34 @@ class EngineerScreen(ttk.Frame):
         ttk.Button(quick_action_bar, text="Add Label", command=self.append_annotation_label).pack(side="left")
         ttk.Label(quick_action_bar, text="BBox uses normalized coordinates 0..1.", foreground="#64748b").pack(side="left", padx=8)
 
-        image_frame = ttk.LabelFrame(annot_left, text="Images", padding=8)
+        image_frame = ttk.LabelFrame(self.annot_left, text="Images", padding=8)
         image_frame.pack(fill="both", expand=True, pady=(10, 0))
         self.annot_images = tk.Listbox(image_frame)
         self.annot_images.pack(fill="both", expand=True)
         self.annot_images.bind("<<ListboxSelect>>", lambda _event: self.on_annotation_image_selected())
 
-        self.annot_editor = JsonEditor(annot_right, "Labels JSON", {"schema_version": 1, "image_name": "", "labels": []})
+        self.annot_editor = JsonEditor(self.annot_right, "Labels JSON", {"schema_version": 1, "image_name": "", "labels": []})
         self.annot_editor.pack(fill="both", expand=True)
+        self._layout_split_shell(self.data_top_container, self.dataset_panel, self.upload_panel, compact=False, left_weight=2, right_weight=2)
 
     def _build_training_tab(self) -> None:
-        container = ttk.Panedwindow(self.training_tab, orient="horizontal")
-        container.pack(fill="both", expand=True, padx=6, pady=6)
+        self.training_container = ttk.Frame(self.training_tab)
+        self.training_container.pack(fill="both", expand=True, padx=6, pady=6)
+        self.training_container.columnconfigure(0, weight=1)
+        self.training_container.rowconfigure(0, weight=1)
 
-        augment_panel = ttk.Frame(container, padding=8)
-        train_panel = ttk.Frame(container, padding=8)
-        container.add(augment_panel, weight=1)
-        container.add(train_panel, weight=2)
+        self.augment_panel = ttk.Frame(self.training_container, padding=8)
+        self.train_panel = ttk.Frame(self.training_container, padding=8)
 
-        ttk.Label(augment_panel, text="Augment Jobs", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(self.augment_panel, text="Augment Jobs", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
-            augment_panel,
+            self.augment_panel,
             text="MVP ini masih metadata-only, tapi panel ini tetap memisahkan pekerjaan augment dari training.",
             foreground="#475569",
             wraplength=320,
             justify="left",
         ).pack(anchor="w", pady=(2, 8))
-        augment_form = ttk.LabelFrame(augment_panel, text="Recipe", padding=8)
+        augment_form = ttk.LabelFrame(self.augment_panel, text="Recipe", padding=8)
         augment_form.pack(fill="x", pady=(8, 0))
         augment_form.columnconfigure(1, weight=1)
         augment_form.columnconfigure(3, weight=1)
@@ -296,19 +375,19 @@ class EngineerScreen(ttk.Frame):
         ttk.Button(augment_btn_bar, text="Create Augment Job", command=self.create_augment_job).pack(side="left")
         ttk.Button(augment_btn_bar, text="Refresh", command=self.refresh_augment_jobs).pack(side="left", padx=6)
 
-        self.augment_jobs = tk.Listbox(augment_panel, height=12)
+        self.augment_jobs = tk.Listbox(self.augment_panel, height=12)
         self.augment_jobs.pack(fill="both", expand=True, pady=(8, 0))
 
-        ttk.Label(train_panel, text="Training Jobs", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(self.train_panel, text="Training Jobs", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
-            train_panel,
+            self.train_panel,
             text="Training job untuk sticker detector. Pilih dataset, base model, dan device; backend akan memilih GPU dulu lalu fallback ke CPU bila GPU tidak tersedia.",
             foreground="#475569",
             wraplength=540,
             justify="left",
         ).pack(anchor="w", pady=(2, 8))
 
-        top = ttk.Frame(train_panel)
+        top = ttk.Frame(self.train_panel)
         top.pack(fill="x")
         top.columnconfigure(1, weight=1)
         top.columnconfigure(3, weight=1)
@@ -322,10 +401,10 @@ class EngineerScreen(ttk.Frame):
         ttk.Label(top, text="Device").grid(row=0, column=4, sticky="w", padx=(0, 8), pady=4)
         self.train_device.grid(row=0, column=5, sticky="ew", pady=4)
         self.train_base_model_info = tk.StringVar(value="Pilih base model dari katalog YOLOv5 / YOLOv11.")
-        ttk.Label(train_panel, textvariable=self.train_base_model_info, foreground="#475569", wraplength=540, justify="left").pack(anchor="w", pady=(4, 0))
+        ttk.Label(self.train_panel, textvariable=self.train_base_model_info, foreground="#475569", wraplength=540, justify="left").pack(anchor="w", pady=(4, 0))
         self.train_base_model.bind("<<ComboboxSelected>>", lambda _event: self._refresh_base_model_info())
 
-        version_panel = ttk.LabelFrame(train_panel, text="Dataset Version", padding=8)
+        version_panel = ttk.LabelFrame(self.train_panel, text="Dataset Version", padding=8)
         version_panel.pack(fill="x", pady=(8, 0))
         version_panel.columnconfigure(1, weight=1)
         self.train_dataset_version = ttk.Combobox(version_panel, state="readonly")
@@ -342,25 +421,23 @@ class EngineerScreen(ttk.Frame):
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.train_dataset_version.bind("<<ComboboxSelected>>", lambda _event: self._refresh_train_dataset_version_info())
 
-        button_bar = ttk.Frame(train_panel)
+        button_bar = ttk.Frame(self.train_panel)
         button_bar.pack(fill="x", pady=(8, 0))
         ttk.Button(button_bar, text="Start Training", command=self.create_training_job).pack(side="left")
         ttk.Button(button_bar, text="Cancel Selected", command=self.cancel_training_job).pack(side="left", padx=6)
         ttk.Button(button_bar, text="Refresh", command=self.refresh_training_jobs).pack(side="left")
 
-        lower = ttk.Panedwindow(train_panel, orient="horizontal")
-        lower.pack(fill="both", expand=True, pady=(10, 0))
-        jobs_panel = ttk.Frame(lower)
-        detail_panel = ttk.Frame(lower)
-        lower.add(jobs_panel, weight=2)
-        lower.add(detail_panel, weight=3)
+        self.training_lower = ttk.Frame(self.train_panel)
+        self.training_lower.pack(fill="both", expand=True, pady=(10, 0))
+        self.training_jobs_panel = ttk.Frame(self.training_lower)
+        self.training_detail_panel = ttk.Frame(self.training_lower)
 
-        self.train_jobs = tk.Listbox(jobs_panel)
+        self.train_jobs = tk.Listbox(self.training_jobs_panel)
         self.train_jobs.pack(fill="both", expand=True)
         self.train_jobs.bind("<<ListboxSelect>>", lambda _event: self.on_training_selected())
 
         self.training_summary = LabeledValuePanel(
-            detail_panel,
+            self.training_detail_panel,
             "Training Summary",
             [
                 ("id", "Job ID"),
@@ -380,34 +457,37 @@ class EngineerScreen(ttk.Frame):
             ],
         )
         self.training_summary.pack(fill="x")
-        self.training_detail = JsonEditor(detail_panel, "Training Job Detail", {})
+        self.training_detail = JsonEditor(self.training_detail_panel, "Training Job Detail", {})
         self.training_detail.pack(fill="both", expand=True, pady=(10, 0))
+        self._layout_split_shell(self.training_container, self.augment_panel, self.train_panel, compact=False, left_weight=1, right_weight=2)
+        self._layout_split_shell(self.training_lower, self.training_jobs_panel, self.training_detail_panel, compact=False, left_weight=2, right_weight=3)
 
     def _build_models_tab(self) -> None:
-        container = ttk.Panedwindow(self.models_tab, orient="horizontal")
-        container.pack(fill="both", expand=True, padx=6, pady=6)
+        self.models_container = ttk.Frame(self.models_tab)
+        self.models_container.pack(fill="both", expand=True, padx=6, pady=6)
+        self.models_container.columnconfigure(0, weight=2)
+        self.models_container.columnconfigure(1, weight=3)
+        self.models_container.rowconfigure(0, weight=1)
 
-        left = ttk.Frame(container, padding=8)
-        right = ttk.Frame(container, padding=8)
-        container.add(left, weight=2)
-        container.add(right, weight=3)
+        self.models_left_panel = ttk.Frame(self.models_container, padding=8)
+        self.models_right_panel = ttk.Frame(self.models_container, padding=8)
 
-        ttk.Label(left, text="Model Registry", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        self.models_list = tk.Listbox(left)
+        ttk.Label(self.models_left_panel, text="Model Registry", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        self.models_list = tk.Listbox(self.models_left_panel)
         self.models_list.pack(fill="both", expand=True, pady=(8, 0))
         self.models_list.bind("<<ListboxSelect>>", lambda _event: self.on_model_selected())
-        ttk.Button(left, text="Refresh", command=self.refresh_models).pack(anchor="e", pady=(8, 0))
+        ttk.Button(self.models_left_panel, text="Refresh", command=self.refresh_models).pack(anchor="e", pady=(8, 0))
 
-        ttk.Label(right, text="Register Sticker Model", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(self.models_right_panel, text="Register Sticker Model", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
         ttk.Label(
-            right,
+            self.models_right_panel,
             text="Registry ini menjadi sumber resmi model sticker yang akan dipakai template. Simpan `path`, `meta_path`, runtime, task, dan daftar class.",
             foreground="#475569",
             wraplength=620,
             justify="left",
         ).grid(row=1, column=0, sticky="w", pady=(2, 8))
 
-        form = ttk.LabelFrame(right, text="Model Form", padding=10)
+        form = ttk.LabelFrame(self.models_right_panel, text="Model Form", padding=10)
         form.grid(row=2, column=0, sticky="ew")
         form.columnconfigure(1, weight=1)
         form.columnconfigure(3, weight=1)
@@ -436,37 +516,40 @@ class EngineerScreen(ttk.Frame):
         ttk.Button(btn_bar, text="Upload .pt File", command=self._upload_model_file).pack(side="left")
         ttk.Button(btn_bar, text="Register Model (path only)", command=self.create_model).pack(side="right")
 
-        self.model_detail = JsonEditor(right, "Model Detail", {})
+        self.model_detail = JsonEditor(self.models_right_panel, "Model Detail", {})
         self.model_detail.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
-        right.rowconfigure(3, weight=1)
-        right.columnconfigure(0, weight=1)
+        self.models_right_panel.rowconfigure(3, weight=1)
+        self.models_right_panel.columnconfigure(0, weight=1)
+        self._layout_split_shell(self.models_container, self.models_left_panel, self.models_right_panel, compact=False, left_weight=2, right_weight=3)
 
     def _build_calibration_tab(self) -> None:
         self.calibration_scroller = ScrollableFrame(self.calibration_tab)
         self.calibration_scroller.pack(fill="both", expand=True, padx=6, pady=6)
 
-        container = ttk.Panedwindow(self.calibration_scroller.body, orient="horizontal")
-        container.pack(fill="both", expand=True)
+        self.calibration_container = ttk.Frame(self.calibration_scroller.body)
+        self.calibration_container.pack(fill="both", expand=True)
 
-        left = ttk.Frame(container, padding=8)
-        right_outer = ttk.Frame(container)
-        right_scroller = ScrollableFrame(right_outer)
+        self.calibration_container.columnconfigure(0, weight=2)
+        self.calibration_container.columnconfigure(1, weight=2)
+        self.calibration_container.rowconfigure(0, weight=1)
+
+        self.calibration_left_panel = ttk.Frame(self.calibration_container, padding=8)
+        self.calibration_right_outer = ttk.Frame(self.calibration_container)
+        right_scroller = ScrollableFrame(self.calibration_right_outer)
         right_scroller.pack(fill="both", expand=True)
-        right = ttk.Frame(right_scroller.body, padding=8)
-        right.pack(fill="both", expand=True)
-        container.add(left, weight=2)
-        container.add(right_outer, weight=2)
+        self.calibration_right_panel = ttk.Frame(right_scroller.body, padding=8)
+        self.calibration_right_panel.pack(fill="both", expand=True)
 
-        ttk.Label(left, text="Part Ready Color Calibration", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(self.calibration_left_panel, text="Part Ready Color Calibration", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
-            left,
+            self.calibration_left_panel,
             text="Flow: pilih image -> optional ROI -> compute profile -> save profile -> pakai `profile_id` itu di template part-ready.",
             foreground="#475569",
             wraplength=420,
             justify="left",
         ).pack(anchor="w", pady=(2, 8))
 
-        control = ttk.LabelFrame(left, text="Compute Profile", padding=10)
+        control = ttk.LabelFrame(self.calibration_left_panel, text="Compute Profile", padding=10)
         control.pack(fill="x")
         control.columnconfigure(1, weight=1)
         control.columnconfigure(3, weight=1)
@@ -488,7 +571,7 @@ class EngineerScreen(ttk.Frame):
         ttk.Button(button_bar, text="Compute", command=self.compute_profile).pack(side="left")
         ttk.Button(button_bar, text="Save Profile", command=self.save_profile).pack(side="left", padx=6)
 
-        preview_frame = ttk.LabelFrame(left, text="ROI Preview", padding=8)
+        preview_frame = ttk.LabelFrame(self.calibration_left_panel, text="ROI Preview", padding=8)
         preview_frame.pack(fill="both", expand=True, pady=(10, 0))
         preview_frame.columnconfigure(0, weight=3)
         preview_frame.columnconfigure(1, weight=2)
@@ -499,39 +582,39 @@ class EngineerScreen(ttk.Frame):
         self.calibration_crop_preview.grid(row=0, column=1, sticky="nsew")
         self.calibration_preview_info = tk.StringVar(value="Pilih image untuk melihat preview ROI.")
         ttk.Label(
-            left,
+            self.calibration_left_panel,
             textvariable=self.calibration_preview_info,
             foreground="#475569",
             wraplength=640,
             justify="left",
         ).pack(fill="x", pady=(6, 0))
 
-        self.calibration_editor = JsonEditor(left, "Computed Profile", {})
+        self.calibration_editor = JsonEditor(self.calibration_left_panel, "Computed Profile", {})
         self.calibration_editor.pack(fill="both", expand=True, pady=(10, 0))
 
-        ttk.Label(right, text="Saved Profiles", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        self.profiles_list = tk.Listbox(right, height=6)
+        ttk.Label(self.calibration_right_panel, text="Saved Profiles", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        self.profiles_list = tk.Listbox(self.calibration_right_panel, height=6)
         self.profiles_list.pack(fill="x", pady=(8, 0))
         self.profiles_list.bind("<<ListboxSelect>>", lambda _event: self.on_profile_selected())
-        action_bar = ttk.Frame(right)
+        action_bar = ttk.Frame(self.calibration_right_panel)
         action_bar.pack(fill="x", pady=(8, 0))
         ttk.Button(action_bar, text="Refresh", command=self.refresh_profiles).pack(side="left")
         ttk.Button(action_bar, text="Delete Selected", command=self.delete_selected_profile).pack(side="left", padx=6)
-        self.profile_detail = JsonEditor(right, "Profile Detail", {})
+        self.profile_detail = JsonEditor(self.calibration_right_panel, "Profile Detail", {})
         self.profile_detail.pack(fill="x", pady=(10, 0))
 
         # ── Sticker ROI Visual Setup ─────────────────────────────────
-        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=(12, 8))
-        ttk.Label(right, text="Sticker ROI Visual Setup", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Separator(self.calibration_right_panel, orient="horizontal").pack(fill="x", pady=(12, 8))
+        ttk.Label(self.calibration_right_panel, text="Sticker ROI Visual Setup", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
-            right,
+            self.calibration_right_panel,
             text="Muat gambar referensi → atur ROI sticker → klik pada area kuning untuk set expected center.",
             foreground="#475569",
             wraplength=340,
             justify="left",
         ).pack(anchor="w", pady=(2, 8))
 
-        sticker_setup_ctrl = ttk.LabelFrame(right, text="Sticker ROI (rasio 0-1)", padding=8)
+        sticker_setup_ctrl = ttk.LabelFrame(self.calibration_right_panel, text="Sticker ROI (rasio 0-1)", padding=8)
         sticker_setup_ctrl.pack(fill="x")
         sticker_setup_ctrl.columnconfigure(1, weight=1)
         sticker_setup_ctrl.columnconfigure(3, weight=1)
@@ -550,11 +633,11 @@ class EngineerScreen(ttk.Frame):
         self._grid_entry(sticker_setup_ctrl, 1, 0, "w", self.sticker_setup_roi_w)
         self._grid_entry(sticker_setup_ctrl, 1, 2, "h", self.sticker_setup_roi_h)
 
-        self.sticker_setup_picker = RoiPickerCanvas(right, "Visual Picker — klik area kuning", size=(340, 200))
+        self.sticker_setup_picker = RoiPickerCanvas(self.calibration_right_panel, "Visual Picker — klik area kuning", size=(340, 200))
         self.sticker_setup_picker.pack(fill="x", pady=(8, 0))
         self.sticker_setup_picker.on_center_changed = self._on_sticker_setup_center_changed
 
-        center_bar = ttk.Frame(right)
+        center_bar = ttk.Frame(self.calibration_right_panel)
         center_bar.pack(fill="x", pady=(6, 0))
         ttk.Label(center_bar, text="Expected Center X:").pack(side="left")
         self.sticker_setup_cx_var = tk.StringVar(value="0.5")
@@ -563,7 +646,7 @@ class EngineerScreen(ttk.Frame):
         ttk.Label(center_bar, text="Y:").pack(side="left")
         ttk.Entry(center_bar, textvariable=self.sticker_setup_cy_var, width=7).pack(side="left", padx=(4, 0))
 
-        sticker_btn_bar = ttk.Frame(right)
+        sticker_btn_bar = ttk.Frame(self.calibration_right_panel)
         sticker_btn_bar.pack(fill="x", pady=(6, 0))
         ttk.Button(sticker_btn_bar, text="Load Image", command=self._sticker_setup_load_image).pack(side="left", padx=(0, 6))
         ttk.Button(sticker_btn_bar, text="Clear", command=self.sticker_setup_picker.clear).pack(side="left", padx=(0, 6))
@@ -576,6 +659,7 @@ class EngineerScreen(ttk.Frame):
         for entry in (self.calib_roi_x, self.calib_roi_y, self.calib_roi_w, self.calib_roi_h):
             entry.bind("<KeyRelease>", self._on_calibration_roi_changed)
             entry.bind("<FocusOut>", self._on_calibration_roi_changed)
+        self._layout_split_shell(self.calibration_container, self.calibration_left_panel, self.calibration_right_outer, compact=False, left_weight=2, right_weight=2)
 
     def _grid_entry(self, master, row: int, column: int, label: str, widget) -> None:
         ttk.Label(master, text=label).grid(row=row, column=column, sticky="w", padx=(0, 8), pady=4)

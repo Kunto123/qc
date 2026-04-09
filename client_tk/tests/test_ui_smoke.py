@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
+from tkinter import ttk
 
 try:
     import tkinter as tk
@@ -12,6 +15,7 @@ except Exception:  # noqa: BLE001
 from client_tk.app.screens.admin.view import AdminScreen
 from client_tk.app.screens.engineer.view import EngineerScreen
 from client_tk.app.screens.operator.view import OperatorScreen
+from client_tk.app.components.scrollable_frame import ScrollableFrame, _dispatch_mousewheel
 from client_tk.app.services.session_state import SessionState
 
 
@@ -124,8 +128,26 @@ class UiSmokeTest(unittest.TestCase):
         self.api = _StubApi()
         self.state = SessionState(base_url="http://127.0.0.1:8100")
         self.state.user = {"id": 1, "username": "tester"}
+        self._async_patchers = [
+            mock.patch("client_tk.app.screens.admin.view.run_async", new=self._run_async_sync),
+        ]
+        for patcher in self._async_patchers:
+            patcher.start()
+
+    def _run_async_sync(self, widget, func, *, callback=None, args=(), kwargs=None):
+        try:
+            result = func(*args, **(kwargs or {}))
+        except Exception as exc:  # noqa: BLE001
+            if callback is not None:
+                callback(None, exc)
+            return None
+        if callback is not None:
+            callback(result, None)
+        return None
 
     def tearDown(self) -> None:
+        for patcher in getattr(self, "_async_patchers", []):
+            patcher.stop()
         if getattr(self, "root", None) is not None:
             self.root.update_idletasks()
             self.root.destroy()
@@ -136,6 +158,21 @@ class UiSmokeTest(unittest.TestCase):
         self.assertTrue(screen.winfo_exists())
         self.assertEqual(str(screen.template_selector["state"]), "readonly")
         self.assertTrue(screen.template_context.get().startswith("Template: -"))
+        screen.destroy()
+
+    def test_operator_layout_switches_to_compact(self) -> None:
+        screen = OperatorScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        with mock.patch.object(screen, "winfo_width", return_value=1000), mock.patch.object(
+            screen.winfo_toplevel(),
+            "winfo_width",
+            return_value=1000,
+        ):
+            screen._apply_responsive_layout()
+        self.assertTrue(screen._is_compact_layout)
+        self.assertEqual(int(screen.action_buttons[0].grid_info()["row"]), 0)
+        self.assertEqual(int(screen.action_buttons[3].grid_info()["row"]), 1)
+        self.assertEqual(int(screen.template_box.grid_info()["row"]), 1)
         screen.destroy()
 
     def test_operator_local_dual_views_refresh(self) -> None:
@@ -165,6 +202,36 @@ class UiSmokeTest(unittest.TestCase):
         self.assertIsNotNone(screen.template_form)
         screen.destroy()
 
+    def test_admin_layout_switches_to_compact(self) -> None:
+        screen = AdminScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        with mock.patch.object(screen, "winfo_width", return_value=1000), mock.patch.object(
+            screen.winfo_toplevel(),
+            "winfo_width",
+            return_value=1000,
+        ):
+            screen._apply_responsive_layout()
+        self.assertTrue(screen._layout_compact)
+        self.assertEqual(int(screen.templates_left.grid_info()["row"]), 0)
+        self.assertEqual(int(screen.templates_right.grid_info()["row"]), 1)
+        self.assertEqual(int(screen.deployments_left.grid_info()["row"]), 0)
+        self.assertEqual(int(screen.deployments_right.grid_info()["row"]), 1)
+        self.assertEqual(int(screen.users_left.grid_info()["row"]), 0)
+        self.assertEqual(int(screen.users_right.grid_info()["row"]), 1)
+        self.assertEqual(int(screen.results_left.grid_info()["row"]), 0)
+        self.assertEqual(int(screen.results_right.grid_info()["row"]), 1)
+        self.assertEqual(int(screen.admin_cards["templates"].grid_info()["row"]), 0)
+        self.assertEqual(int(screen.admin_cards["users"].grid_info()["row"]), 1)
+        screen.destroy()
+
+    def test_admin_overview_cards_hide_on_short_height(self) -> None:
+        screen = AdminScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        with mock.patch.object(screen, "winfo_height", return_value=700):
+            screen._apply_responsive_layout()
+        self.assertFalse(screen._overview_cards_visible)
+        screen.destroy()
+
     def test_engineer_screen_initializes(self) -> None:
         screen = EngineerScreen(self.root, self.api, self.state)
         screen.update_idletasks()
@@ -175,6 +242,32 @@ class UiSmokeTest(unittest.TestCase):
         self.assertTrue(screen.train_base_model.get())
         self.assertEqual(str(screen.train_base_model["state"]), "readonly")
         self.assertEqual(str(screen.train_dataset_version["state"]), "readonly")
+        screen.destroy()
+
+    def test_engineer_layout_switches_to_compact(self) -> None:
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        with mock.patch.object(screen, "winfo_width", return_value=1000), mock.patch.object(
+            screen.winfo_toplevel(),
+            "winfo_width",
+            return_value=1000,
+        ):
+            screen._apply_responsive_layout()
+        self.assertTrue(screen._layout_compact)
+        self.assertEqual(int(screen.data_top_container.grid_info()["row"]), 0)
+        self.assertEqual(int(screen.data_annotation_shell.grid_info()["row"]), 1)
+        self.assertEqual(int(screen.dataset_panel.grid_info()["row"]), 0)
+        self.assertEqual(int(screen.upload_panel.grid_info()["row"]), 1)
+        self.assertEqual(int(screen.augment_panel.grid_info()["row"]), 0)
+        self.assertEqual(int(screen.train_panel.grid_info()["row"]), 1)
+        self.assertEqual(int(screen.training_jobs_panel.grid_info()["row"]), 0)
+        self.assertEqual(int(screen.training_detail_panel.grid_info()["row"]), 1)
+        self.assertEqual(int(screen.models_left_panel.grid_info()["row"]), 0)
+        self.assertEqual(int(screen.models_right_panel.grid_info()["row"]), 1)
+        self.assertEqual(int(screen.calibration_left_panel.grid_info()["row"]), 0)
+        self.assertEqual(int(screen.calibration_right_outer.grid_info()["row"]), 1)
+        self.assertEqual(int(screen.annot_left.grid_info()["column"]), 0)
+        self.assertEqual(int(screen.annot_right.grid_info()["row"]), 3)
         screen.destroy()
 
     def test_engineer_calibration_roi_preview_refreshes(self) -> None:
@@ -196,3 +289,34 @@ class UiSmokeTest(unittest.TestCase):
         self.assertIsNotNone(screen.calibration_source_preview._photo)
         self.assertIsNotNone(screen.calibration_crop_preview._photo)
         screen.destroy()
+
+    def test_scrollable_frame_dispatches_to_nested_body(self) -> None:
+        container = ttk.Frame(self.root, width=240, height=140)
+        container.pack_propagate(False)
+        container.pack(fill="both", expand=False)
+
+        outer = ScrollableFrame(container)
+        outer.pack(fill="both", expand=True)
+        for index in range(6):
+            ttk.Label(outer.body, text=f"Outer Row {index}").pack(anchor="w")
+
+        inner = ScrollableFrame(outer.body)
+        inner.pack(fill="both", expand=True)
+        for index in range(40):
+            ttk.Label(inner.body, text=f"Inner Row {index}").pack(anchor="w")
+
+        for index in range(6, 12):
+            ttk.Label(outer.body, text=f"Outer Row {index}").pack(anchor="w")
+
+        self.root.update_idletasks()
+        outer_before = outer.canvas.yview()
+        inner_before = inner.canvas.yview()
+
+        _dispatch_mousewheel(SimpleNamespace(widget=inner.body, num=5, delta=0))
+        self.root.update_idletasks()
+
+        outer_after = outer.canvas.yview()
+        inner_after = inner.canvas.yview()
+
+        self.assertGreater(inner_after[0], inner_before[0])
+        self.assertEqual(outer_after, outer_before)

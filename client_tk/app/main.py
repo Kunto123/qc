@@ -77,7 +77,7 @@ class QcSuiteDesktopApp(tk.Tk):
         super().__init__()
         self.title("QC Suite Python")
         self.geometry("1440x900")
-        self.minsize(1200, 760)
+        self.minsize(1160, 720)
 
         style = ttk.Style(self)
         try:
