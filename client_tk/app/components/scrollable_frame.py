@@ -82,12 +82,13 @@ class ScrollableFrame(ttk.Frame):
         self.columnconfigure(0, weight=1)
 
         self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, background=background)
-        self.v_scrollbar = AutoHideScrollbar(self, orient="vertical", command=self._on_scrollbar_scroll)
+        self.v_scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._on_scrollbar_scroll)
         self.canvas.configure(yscrollcommand=self.v_scrollbar.set)
 
         self.body = ttk.Frame(self)
         self._window_id = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
         _SCROLLABLE_FRAMES.add(self)
+        self._scrolled_event_job: str | None = None
 
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.v_scrollbar.grid(row=0, column=1, sticky="ns")
@@ -113,6 +114,14 @@ class ScrollableFrame(ttk.Frame):
         self._emit_scrolled_event()
 
     def _emit_scrolled_event(self) -> None:
+        if self._scrolled_event_job is not None:
+            return
+        self._scrolled_event_job = self.after(16, self._flush_scrolled_event)
+
+    def _flush_scrolled_event(self) -> None:
+        self._scrolled_event_job = None
+        if not _frame_is_alive(self):
+            return
         self.event_generate(_SCROLLED_EVENT, when="tail")
 
     def _contains_widget_path(self, widget_path: str) -> bool:
