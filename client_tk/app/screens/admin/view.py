@@ -3,12 +3,15 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import customtkinter as ctk
+
 from client_tk.app.components.async_bridge import run_async
 from client_tk.app.components.scrollable_frame import AutoHideScrollbar, ScrollableFrame
 from client_tk.app.components.template_forms import JsonEditor, LabeledValuePanel, TemplateEditorForm
+from client_tk.app.theme import APP_BG, ACCENT, ACCENT_HOVER, BORDER, SHELL_BG, TEXT_ON_ACCENT, TEXT_PRIMARY, TEXT_SECONDARY
 
 
-MUTED_TEXT = "#475569"
+MUTED_TEXT = TEXT_SECONDARY
 
 
 def _safe_text(value: object, fallback: str = "-") -> str:
@@ -27,15 +30,18 @@ def _format_status(value: object) -> str:
     return "Active" if bool(value) else "Inactive"
 
 
-class CompactStatCard(ttk.Frame):
+class CompactStatCard(ctk.CTkFrame):
     def __init__(self, master, title: str, *, background: str, foreground: str):
-        super().__init__(master)
-        shell = tk.Frame(self, bg=background, padx=10, pady=6)
-        shell.pack(fill="both", expand=True)
-        tk.Label(shell, text=title, bg=background, fg=foreground, font=("Segoe UI", 8, "bold")).pack(anchor="w")
-        self.value_label = tk.Label(shell, text="0", bg=background, fg=foreground, font=("Segoe UI", 13, "bold"))
+        super().__init__(master, fg_color=background, corner_radius=16, border_width=1, border_color=BORDER)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        self._content = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
+        self._content.grid(row=0, column=0, sticky="nsew", padx=10, pady=8)
+        self._content.columnconfigure(0, weight=1)
+        ctk.CTkLabel(self._content, text=title, text_color=foreground, font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        self.value_label = ctk.CTkLabel(self._content, text="0", text_color=foreground, font=("Segoe UI", 13, "bold"))
         self.value_label.pack(anchor="w", pady=(2, 0))
-        self.note_label = tk.Label(shell, text="", bg=background, fg=foreground, font=("Segoe UI", 7))
+        self.note_label = ctk.CTkLabel(self._content, text="", text_color=foreground, font=("Segoe UI", 7))
         self.note_label.pack(anchor="w", pady=(1, 0))
 
     def set_value(self, value: object, note: str = "") -> None:
@@ -43,9 +49,9 @@ class CompactStatCard(ttk.Frame):
         self.note_label.configure(text=note)
 
 
-class AdminScreen(ttk.Frame):
+class AdminScreen(ctk.CTkFrame):
     def __init__(self, master, api_client, session_state):
-        super().__init__(master, padding=0)
+        super().__init__(master, fg_color=APP_BG, corner_radius=0)
         self.api = api_client
         self.state = session_state
         self.current_template_id: int | None = None
@@ -89,31 +95,39 @@ class AdminScreen(ttk.Frame):
         self.refresh_all()
 
     def _build_header(self) -> None:
-        self.header = ttk.Frame(self, padding=(12, 8, 12, 6))
-        self.header.grid(row=0, column=0, sticky="ew")
+        self.header = ctk.CTkFrame(self, fg_color=SHELL_BG, corner_radius=0)
+        self.header.grid(row=0, column=0, sticky="ew", padx=12, pady=(8, 6))
         self.header.columnconfigure(0, weight=1)
 
-        self.header_top = ttk.Frame(self.header)
+        self.header_top = ctk.CTkFrame(self.header, fg_color="transparent", corner_radius=0)
         self.header_top.grid(row=0, column=0, sticky="ew")
         self.header_top.columnconfigure(0, weight=1)
         self.header_top.columnconfigure(1, weight=0)
 
         user = self.state.user or {}
         identity = f"{_safe_text(user.get('username'))} ({_safe_text(user.get('role'))})"
-        ttk.Label(self.header_top, text="Admin Workspace", font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky="w")
-        self.header_identity = ttk.Label(
+        ctk.CTkLabel(self.header_top, text="Admin Workspace", font=("Segoe UI", 13, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w")
+        self.header_identity = ctk.CTkLabel(
             self.header_top,
             text=f"{identity}  |  {_safe_text(self.state.base_url)}  |  Kelola template, deployment, user, hasil inspeksi, dan dashboard.",
-            foreground=MUTED_TEXT,
+            text_color=MUTED_TEXT,
             wraplength=860,
             justify="left",
         )
+        self.header_identity.grid(row=1, column=0, sticky="w", pady=(4, 0))
 
-        self.header_actions = ttk.Frame(self.header_top)
-        ttk.Button(self.header_actions, text="Refresh All", command=self.refresh_all).pack(side="left")
+        self.header_actions = ctk.CTkFrame(self.header_top, fg_color="transparent", corner_radius=0)
+        ctk.CTkButton(
+            self.header_actions,
+            text="Refresh All",
+            command=self.refresh_all,
+            fg_color=ACCENT,
+            hover_color=ACCENT_HOVER,
+            text_color=TEXT_ON_ACCENT,
+        ).pack(side="left")
 
-        self.overview_cards_frame = ttk.Frame(self.header, padding=(0, 8, 0, 0))
-        self.overview_cards_frame.grid(row=1, column=0, sticky="ew")
+        self.overview_cards_frame = ctk.CTkFrame(self.header, fg_color="transparent", corner_radius=0)
+        self.overview_cards_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         for index in range(4):
             self.overview_cards_frame.columnconfigure(index, weight=1)
         self.admin_cards = {
@@ -154,9 +168,9 @@ class AdminScreen(ttk.Frame):
         self._build_dashboard_tab()
 
     def _build_status_bar(self) -> None:
-        status_bar = ttk.Frame(self, padding=(12, 0, 12, 12))
-        status_bar.grid(row=2, column=0, sticky="ew")
-        ttk.Label(status_bar, textvariable=self.status_var, foreground=MUTED_TEXT).pack(anchor="w")
+        status_bar = ctk.CTkFrame(self, fg_color=APP_BG, corner_radius=0)
+        status_bar.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 12))
+        ctk.CTkLabel(status_bar, textvariable=self.status_var, text_color=MUTED_TEXT).pack(anchor="w")
 
     def _make_scrollable_page(self, tab: ttk.Frame, key: str) -> ttk.Frame:
         scroller = ScrollableFrame(tab)

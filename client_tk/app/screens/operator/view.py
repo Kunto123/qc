@@ -4,6 +4,7 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+import customtkinter as ctk
 import cv2
 
 from client_tk.app.components.counter_panel import CounterPanel
@@ -13,6 +14,7 @@ from client_tk.app.components.scrollable_frame import ScrollableFrame
 from client_tk.app.config import DEFAULT_UPLOAD_INTERVAL_MS
 from client_tk.app.services.camera_capture import CameraCaptureService
 from client_tk.app.services.frame_upload import FrameUploadService
+from client_tk.app.theme import APP_BG, BORDER, PANEL_BG, SHELL_BG, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, ACCENT_HOVER, TEXT_ON_ACCENT
 
 
 BADGE_COLORS = {
@@ -25,9 +27,9 @@ BADGE_COLORS = {
 RESPONSIVE_BREAKPOINT = 1240
 
 
-class OperatorScreen(ttk.Frame):
+class OperatorScreen(ctk.CTkFrame):
     def __init__(self, master, api_client, session_state):
-        super().__init__(master, padding=10)
+        super().__init__(master, fg_color=APP_BG, corner_radius=0)
         self.api = api_client
         self.state = session_state
         self.capture = CameraCaptureService()
@@ -79,53 +81,61 @@ class OperatorScreen(ttk.Frame):
         self._schedule_poll()
 
     def _build_top_bar(self) -> None:
-        self.top_bar = ttk.Frame(self)
+        self.top_bar = ctk.CTkFrame(self, fg_color=APP_BG, corner_radius=0)
         self.top_bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         self.top_bar.columnconfigure(0, weight=1)
 
-        self.action_bar = ttk.Frame(self.top_bar)
+        self.action_bar = ctk.CTkFrame(self.top_bar, fg_color=APP_BG, corner_radius=0)
         self.action_bar.grid(row=0, column=0, sticky="ew")
         self.action_buttons = [
-            ttk.Button(self.action_bar, text="\u2699 Settings", command=self._open_settings),
-            ttk.Button(self.action_bar, text="Load Deployment", command=self._load_deployment),
-            ttk.Button(self.action_bar, text="Start Camera", command=self._start_camera),
-            ttk.Button(self.action_bar, text="Stop Camera", command=self._stop_camera),
-            ttk.Button(self.action_bar, text="Start Session", command=self._start_session),
-            ttk.Button(self.action_bar, text="Stop Session", command=self._stop_session),
+            ctk.CTkButton(self.action_bar, text="\u2699 Settings", command=self._open_settings, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
+            ctk.CTkButton(self.action_bar, text="Load Deployment", command=self._load_deployment, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
+            ctk.CTkButton(self.action_bar, text="Start Camera", command=self._start_camera, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
+            ctk.CTkButton(self.action_bar, text="Stop Camera", command=self._stop_camera, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
+            ctk.CTkButton(self.action_bar, text="Start Session", command=self._start_session, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
+            ctk.CTkButton(self.action_bar, text="Stop Session", command=self._stop_session, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
         ]
 
-        self.template_box = ttk.LabelFrame(self.top_bar, text="Template", padding=8)
+        self.template_box = ctk.CTkFrame(self.top_bar, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
+        self.template_box.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(self.template_box, text="Template", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 6))
         self.template_selector = ttk.Combobox(self.template_box, textvariable=self.template_choice, width=32, state="readonly")
-        self.template_selector.grid(row=0, column=0, padx=(0, 6))
+        self.template_selector.grid(row=1, column=0, padx=(10, 6), pady=(0, 10), sticky="ew")
         self.template_selector.bind("<<ComboboxSelected>>", self._on_template_selected)
-        ttk.Button(self.template_box, text="Refresh", command=self._load_template_choices).grid(row=0, column=1)
+        ctk.CTkButton(self.template_box, text="Refresh", command=self._load_template_choices, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT).grid(row=1, column=1, padx=(0, 10), pady=(0, 10))
 
         self._layout_top_bar(compact=False)
 
     def _build_context_bar(self) -> None:
-        self.context_bar = ttk.Frame(self)
+        self.context_bar = ctk.CTkFrame(self, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
         self.context_bar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         self.context_labels = {
-            "operator": ttk.Label(self.context_bar, textvariable=self.operator_context, font=("Segoe UI", 12, "bold")),
-            "line": ttk.Label(self.context_bar, textvariable=self.line_context),
-            "station": ttk.Label(self.context_bar, textvariable=self.station_context),
-            "template": ttk.Label(self.context_bar, textvariable=self.template_context),
+            "operator": ctk.CTkLabel(self.context_bar, textvariable=self.operator_context, font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY),
+            "line": ctk.CTkLabel(self.context_bar, textvariable=self.line_context, text_color=TEXT_SECONDARY),
+            "station": ctk.CTkLabel(self.context_bar, textvariable=self.station_context, text_color=TEXT_SECONDARY),
+            "template": ctk.CTkLabel(self.context_bar, textvariable=self.template_context, text_color=TEXT_SECONDARY),
         }
         self._layout_context_bar(compact=False)
 
     def _build_status_strip(self) -> None:
-        self.status_frame = ttk.LabelFrame(self, text="System Status", padding=8)
+        self.status_frame = ctk.CTkFrame(self, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
         self.status_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        self.badges: dict[str, tk.Label] = {}
+        ctk.CTkLabel(self.status_frame, text="System Status", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).pack(
+            anchor="w",
+            padx=10,
+            pady=(10, 6),
+        )
+        self.status_badges_container = ctk.CTkFrame(self.status_frame, fg_color="transparent")
+        self.status_badges_container.pack(fill="x", padx=10, pady=(0, 10))
+        self.badges: dict[str, ctk.CTkLabel] = {}
         for key in ("SERVER", "CAMERA", "SESSION", "DB", "EVENT"):
-            label = tk.Label(
-                self.status_frame,
+            label = ctk.CTkLabel(
+                self.status_badges_container,
                 text=f"{key}: -",
-                bg=BADGE_COLORS["neutral"][0],
-                fg=BADGE_COLORS["neutral"][1],
+                fg_color=BADGE_COLORS["neutral"][0],
+                text_color=BADGE_COLORS["neutral"][1],
                 font=("Segoe UI", 10, "bold"),
-                padx=10,
-                pady=6,
+                corner_radius=999,
             )
             self.badges[key] = label
         self._layout_status_strip(compact=False)
@@ -202,8 +212,7 @@ class OperatorScreen(ttk.Frame):
         background = style.lookup("TFrame", "background")
         if background:
             return str(background)
-        root_bg = self.winfo_toplevel().cget("bg")
-        return str(root_bg or "#f0f0f0")
+        return APP_BG
 
     def _sync_sidebar_scroll(self, _event=None) -> None:
         self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all"))
@@ -321,16 +330,16 @@ class OperatorScreen(ttk.Frame):
             self.context_labels["template"].grid(row=0, column=3, sticky="w", padx=8)
 
     def _layout_status_strip(self, *, compact: bool) -> None:
-        for widget in self.status_frame.grid_slaves():
+        for widget in self.status_badges_container.grid_slaves():
             widget.grid_forget()
 
         keys = ["SERVER", "CAMERA", "SESSION", "DB", "EVENT"]
         columns = 3 if compact else 5
         rows = 2 if compact else 1
         for column in range(columns):
-            self.status_frame.columnconfigure(column, weight=1)
+            self.status_badges_container.columnconfigure(column, weight=1)
         for row in range(rows):
-            self.status_frame.rowconfigure(row, weight=1)
+            self.status_badges_container.rowconfigure(row, weight=1)
 
         for index, key in enumerate(keys):
             row = index // columns
@@ -648,7 +657,7 @@ class OperatorScreen(ttk.Frame):
 
     def _set_badge(self, key: str, value: str, tone: str = "neutral") -> None:
         bg, fg = BADGE_COLORS.get(tone, BADGE_COLORS["neutral"])
-        self.badges[key].configure(text=f"{key}: {value}", bg=bg, fg=fg)
+        self.badges[key].configure(text=f"{key}: {value}", fg_color=bg, text_color=fg)
 
     def _refresh_context_summary(self) -> None:
         username = self.state.user.get("username") if self.state.user else "-"
@@ -670,8 +679,10 @@ class OperatorScreen(ttk.Frame):
         self._sync_template_selector()
 
     def _update_status_badges(self, payload: dict | None = None) -> None:
-        server_tone = "success" if self.state.token and not self.state.latest_error else "danger" if self.state.latest_error else "info"
-        self._set_badge("SERVER", "ONLINE" if self.state.token and not self.state.latest_error else "ISSUE", server_tone)
+        token = getattr(self.state, "token", None)
+        latest_error = getattr(self.state, "latest_error", None)
+        server_tone = "success" if token and not latest_error else "danger" if latest_error else "info"
+        self._set_badge("SERVER", "ONLINE" if token and not latest_error else "ISSUE", server_tone)
 
         camera_ready = self.capture.get_latest_frame() is not None
         self._set_badge("CAMERA", "READY" if camera_ready else "STOPPED", "success" if camera_ready else "neutral")

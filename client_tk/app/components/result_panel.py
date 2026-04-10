@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
+
+import customtkinter as ctk
+
+from client_tk.app.theme import BORDER, PANEL_ALT_BG, PANEL_BG, TEXT_PRIMARY, TEXT_SECONDARY, WARNING, WARNING_HOVER
 
 
 def _format_metric(value, *, precision: int = 3) -> str:
@@ -20,48 +23,52 @@ def _format_timestamp(value) -> str:
     return text.replace("T", " ")[:19]
 
 
-class ResultPanel(ttk.LabelFrame):
+class ResultPanel(ctk.CTkFrame):
     def __init__(self, master):
-        super().__init__(master, text="Inspection Status", padding=12)
+        super().__init__(master, fg_color=PANEL_BG, corner_radius=16, border_width=1, border_color=BORDER)
         self.columnconfigure(0, weight=1)
-        self._value_widgets: list[ttk.Label] = []
+        self._value_widgets: list[ctk.CTkLabel] = []
 
-        self.decision_banner = tk.Label(
+        ctk.CTkLabel(self, text="Inspection Status", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).pack(
+            anchor="w",
+            padx=12,
+            pady=(12, 8),
+        )
+
+        self.decision_banner = ctk.CTkLabel(
             self,
             text="WAITING",
-            bg="#334155",
-            fg="#f8fafc",
+            fg_color="#334155",
+            text_color="#f8fafc",
             font=("Segoe UI", 24, "bold"),
-            padx=16,
-            pady=14,
+            corner_radius=14,
+            anchor="center",
         )
-        self.decision_banner.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        self.decision_banner.pack(fill="x", padx=12, pady=(0, 10))
 
-        self.subtitle_var = ttk.Label(
+        self.subtitle_var = ctk.CTkLabel(
             self,
             text="Menunggu event inspeksi pertama.",
             font=("Segoe UI", 10),
             wraplength=320,
             justify="left",
+            text_color=TEXT_SECONDARY,
         )
-        self.subtitle_var.grid(row=1, column=0, sticky="w", pady=(0, 10))
+        self.subtitle_var.pack(anchor="w", padx=12, pady=(0, 10))
 
-        self.live_frame = ttk.LabelFrame(self, text="Live Stage", padding=8)
-        self.live_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        self.live_frame = self._build_section("Live Stage")
         self.live_state_var = self._build_field(self.live_frame, 0, "Event State")
         self.live_decision_var = self._build_field(self.live_frame, 1, "Live Decision")
         self.live_reason_var = self._build_field(self.live_frame, 2, "Live Reason")
 
-        self.part_ready_frame = ttk.LabelFrame(self, text="Part Ready Gate", padding=8)
-        self.part_ready_frame.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        self.part_ready_frame = self._build_section("Part Ready Gate")
         self.part_ready_status_var = self._build_field(self.part_ready_frame, 0, "Status")
         self.part_ready_ratio_var = self._build_field(self.part_ready_frame, 1, "Match Ratio (avg5)")
         self.part_ready_raw_ratio_var = self._build_field(self.part_ready_frame, 2, "Match Ratio (raw)")
         self.part_ready_distance_var = self._build_field(self.part_ready_frame, 3, "Mean Distance")
         self.part_ready_profile_var = self._build_field(self.part_ready_frame, 4, "Profile")
 
-        self.sticker_frame = ttk.LabelFrame(self, text="Sticker Validation", padding=8)
-        self.sticker_frame.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        self.sticker_frame = self._build_section("Sticker Validation")
         self.detected_class_var = self._build_field(self.sticker_frame, 0, "Detected Class")
         self.expected_class_var = self._build_field(self.sticker_frame, 1, "Expected Class")
         self.sticker_confidence_var = self._build_field(self.sticker_frame, 2, "Confidence")
@@ -69,14 +76,12 @@ class ResultPanel(ttk.LabelFrame):
         self.candidate_source_var = self._build_field(self.sticker_frame, 4, "Candidate Source")
         self.offset_var = self._build_field(self.sticker_frame, 5, "Offset")
 
-        self.debug_frame = ttk.LabelFrame(self, text="Inference Debug", padding=8)
-        self.debug_frame.grid(row=5, column=0, sticky="ew", pady=(0, 8))
+        self.debug_frame = self._build_section("Inference Debug")
         self.raw_detection_count_var = self._build_field(self.debug_frame, 0, "Raw Detections")
         self.fallback_reason_var = self._build_field(self.debug_frame, 1, "Fallback Reason")
         self.classes_filter_var = self._build_field(self.debug_frame, 2, "Classes Filter")
 
-        self.commit_frame = ttk.LabelFrame(self, text="Commit Details", padding=8)
-        self.commit_frame.grid(row=6, column=0, sticky="ew")
+        self.commit_frame = self._build_section("Commit Details")
         self.reason_var = self._build_field(self.commit_frame, 0, "Reason")
         self.part_var = self._build_field(self.commit_frame, 1, "Part")
         self.line_var = self._build_field(self.commit_frame, 2, "Line")
@@ -86,16 +91,25 @@ class ResultPanel(ttk.LabelFrame):
         self.commit_var = self._build_field(self.commit_frame, 6, "Committed At")
         self.bind("<Configure>", self._on_resize, add="+")
 
-    def _build_field(self, master, row: int, title: str) -> ttk.Label:
+    def _build_section(self, title: str) -> ctk.CTkFrame:
+        section = ctk.CTkFrame(self, fg_color=PANEL_ALT_BG, corner_radius=12, border_width=1, border_color=BORDER)
+        section.pack(fill="x", padx=12, pady=(0, 10))
+        ctk.CTkLabel(section, text=title, font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).pack(anchor="w", padx=10, pady=(10, 6))
+        body = ctk.CTkFrame(section, fg_color="transparent")
+        body.pack(fill="x", padx=10, pady=(0, 10))
+        body.grid_columnconfigure(1, weight=1)
+        return body
+
+    def _build_field(self, master, row: int, title: str) -> ctk.CTkLabel:
         master.columnconfigure(1, weight=1)
-        ttk.Label(master, text=f"{title}:", font=("Segoe UI", 9, "bold")).grid(
+        ctk.CTkLabel(master, text=f"{title}:", font=("Segoe UI", 9, "bold"), text_color=TEXT_PRIMARY).grid(
             row=row,
             column=0,
             sticky="w",
             padx=(0, 8),
             pady=2,
         )
-        value = ttk.Label(master, text="-", wraplength=210, justify="left")
+        value = ctk.CTkLabel(master, text="-", wraplength=210, justify="left", text_color=TEXT_SECONDARY)
         value.grid(row=row, column=1, sticky="w", pady=2)
         self._value_widgets.append(value)
         return value
@@ -138,7 +152,7 @@ class ResultPanel(ttk.LabelFrame):
             "WAITING": ("#334155", "#f8fafc"),
         }
         bg, fg = palette.get(decision, ("#334155", "#f8fafc"))
-        self.decision_banner.configure(bg=bg, fg=fg, text=decision)
+        self.decision_banner.configure(fg_color=bg, text_color=fg, text=decision)
         if committed_validation:
             self.subtitle_var.configure(
                 text="Banner menampilkan hasil committed terakhir. Detail live tetap menunjukkan frame yang sedang diproses."
@@ -206,7 +220,7 @@ class ResultPanel(ttk.LabelFrame):
         self.commit_var.configure(text=_format_timestamp(committed.get("committed_at")))
 
     def reset(self) -> None:
-        self.decision_banner.configure(bg="#334155", fg="#f8fafc", text="WAITING")
+        self.decision_banner.configure(fg_color="#334155", text_color="#f8fafc", text="WAITING")
         self.subtitle_var.configure(text="Menunggu event inspeksi pertama.")
         for widget in (
             self.live_state_var,

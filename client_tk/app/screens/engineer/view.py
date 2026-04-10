@@ -8,6 +8,8 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import customtkinter as ctk
+
 import cv2
 import numpy as np
 
@@ -20,11 +22,12 @@ from client_tk.app.components.live_view import LiveView
 from client_tk.app.components.roi_picker_canvas import RoiPickerCanvas
 from client_tk.app.components.scrollable_frame import ScrollableFrame
 from client_tk.app.components.template_forms import JsonEditor, LabeledValuePanel
+from client_tk.app.theme import APP_BG, BORDER
 
 
-class EngineerScreen(ttk.Frame):
+class EngineerScreen(ctk.CTkFrame):
     def __init__(self, master, api_client, session_state):
-        super().__init__(master, padding=8)
+        super().__init__(master, fg_color=APP_BG, corner_radius=0)
         self.api = api_client
         self.state = session_state
         self.upload_path: str | None = None
@@ -74,7 +77,7 @@ class EngineerScreen(ttk.Frame):
         self._training_jobs_refresh_sequence = 0
 
         notebook = ttk.Notebook(self)
-        notebook.pack(fill="both", expand=True)
+        notebook.pack(fill="both", expand=True, padx=8, pady=8)
 
         self.data_tab = ttk.Frame(notebook)
         self.training_tab = ttk.Frame(notebook)
@@ -200,19 +203,19 @@ class EngineerScreen(ttk.Frame):
             self.annotation_canvas.request_redraw()
 
     def _build_data_tab(self) -> None:
-        self.data_container = ttk.Frame(self.data_tab)
+        self.data_container = ctk.CTkFrame(self.data_tab, fg_color=APP_BG, corner_radius=14, border_width=1, border_color=BORDER)
         self.data_container.pack(fill="both", expand=True, padx=6, pady=6)
         self.data_container.columnconfigure(0, weight=1)
         self.data_container.rowconfigure(0, weight=3)
         self.data_container.rowconfigure(1, weight=2)
 
-        self.data_top_container = ttk.Frame(self.data_container)
-        self.data_annotation_shell = ttk.Frame(self.data_container, padding=8)
+        self.data_top_container = ctk.CTkFrame(self.data_container, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
+        self.data_annotation_shell = ctk.CTkFrame(self.data_container, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
         self.data_top_container.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
         self.data_annotation_shell.grid(row=1, column=0, sticky="nsew")
 
-        self.dataset_panel = ttk.Frame(self.data_top_container, padding=8)
-        self.upload_panel = ttk.Frame(self.data_top_container, padding=8)
+        self.dataset_panel = ctk.CTkFrame(self.data_top_container, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
+        self.upload_panel = ctk.CTkFrame(self.data_top_container, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
 
         ttk.Label(self.dataset_panel, text="Datasets", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
@@ -413,13 +416,13 @@ class EngineerScreen(ttk.Frame):
         self._layout_split_shell(self.data_top_container, self.dataset_panel, self.upload_panel, compact=False, left_weight=2, right_weight=2)
 
     def _build_training_tab(self) -> None:
-        self.training_container = ttk.Frame(self.training_tab)
+        self.training_container = ctk.CTkFrame(self.training_tab, fg_color=APP_BG, corner_radius=14, border_width=1, border_color=BORDER)
         self.training_container.pack(fill="both", expand=True, padx=6, pady=6)
         self.training_container.columnconfigure(0, weight=1)
         self.training_container.rowconfigure(0, weight=1)
 
-        self.augment_panel = ttk.Frame(self.training_container, padding=8)
-        self.train_panel = ttk.Frame(self.training_container, padding=8)
+        self.augment_panel = ctk.CTkFrame(self.training_container, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
+        self.train_panel = ctk.CTkFrame(self.training_container, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
 
         ttk.Label(self.augment_panel, text="Augment Jobs", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
@@ -498,10 +501,10 @@ class EngineerScreen(ttk.Frame):
         ttk.Button(button_bar, text="Cancel Selected", command=self.cancel_training_job).pack(side="left", padx=6)
         ttk.Button(button_bar, text="Refresh", command=self.refresh_training_jobs).pack(side="left")
 
-        self.training_lower = ttk.Frame(self.train_panel)
+        self.training_lower = ctk.CTkFrame(self.train_panel, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
         self.training_lower.pack(fill="both", expand=True, pady=(10, 0))
-        self.training_jobs_panel = ttk.Frame(self.training_lower)
-        self.training_detail_panel = ttk.Frame(self.training_lower)
+        self.training_jobs_panel = ctk.CTkFrame(self.training_lower, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
+        self.training_detail_panel = ctk.CTkFrame(self.training_lower, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
 
         self.train_jobs = tk.Listbox(self.training_jobs_panel)
         self.train_jobs.pack(fill="both", expand=True)
@@ -529,14 +532,14 @@ class EngineerScreen(ttk.Frame):
     def _build_models_tab(self) -> None:
         if self._models_tab_built:
             return
-        self.models_container = ttk.Frame(self.models_tab)
+        self.models_container = ctk.CTkFrame(self.models_tab, fg_color=APP_BG, corner_radius=14, border_width=1, border_color=BORDER)
         self.models_container.pack(fill="both", expand=True, padx=6, pady=6)
         self.models_container.columnconfigure(0, weight=2)
         self.models_container.columnconfigure(1, weight=3)
         self.models_container.rowconfigure(0, weight=1)
 
-        self.models_left_panel = ttk.Frame(self.models_container, padding=8)
-        self.models_right_panel = ttk.Frame(self.models_container, padding=8)
+        self.models_left_panel = ctk.CTkFrame(self.models_container, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
+        self.models_right_panel = ctk.CTkFrame(self.models_container, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
 
         ttk.Label(self.models_left_panel, text="Model Registry", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         self.models_list = tk.Listbox(self.models_left_panel)
@@ -596,18 +599,18 @@ class EngineerScreen(ttk.Frame):
         self.calibration_scroller = ScrollableFrame(self.calibration_tab)
         self.calibration_scroller.pack(fill="both", expand=True, padx=6, pady=6)
 
-        self.calibration_container = ttk.Frame(self.calibration_scroller.body)
+        self.calibration_container = ctk.CTkFrame(self.calibration_scroller.body, fg_color=APP_BG, corner_radius=14, border_width=1, border_color=BORDER)
         self.calibration_container.pack(fill="both", expand=True)
 
         self.calibration_container.columnconfigure(0, weight=2)
         self.calibration_container.columnconfigure(1, weight=2)
         self.calibration_container.rowconfigure(0, weight=1)
 
-        self.calibration_left_panel = ttk.Frame(self.calibration_container, padding=8)
-        self.calibration_right_outer = ttk.Frame(self.calibration_container)
+        self.calibration_left_panel = ctk.CTkFrame(self.calibration_container, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
+        self.calibration_right_outer = ctk.CTkFrame(self.calibration_container, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
         right_scroller = ScrollableFrame(self.calibration_right_outer)
         right_scroller.pack(fill="both", expand=True)
-        self.calibration_right_panel = ttk.Frame(right_scroller.body, padding=8)
+        self.calibration_right_panel = ctk.CTkFrame(right_scroller.body, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
         self.calibration_right_panel.pack(fill="both", expand=True)
 
         ttk.Label(self.calibration_left_panel, text="Part Ready Color Calibration", font=("Segoe UI", 11, "bold")).pack(anchor="w")
