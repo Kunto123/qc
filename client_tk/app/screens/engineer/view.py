@@ -75,11 +75,13 @@ class EngineerScreen(ttk.Frame):
         self.data_tab = self._make_scrollable_page(self.data_tab, "data")
         self.training_tab = self._make_scrollable_page(self.training_tab, "training")
         self.models_tab = self._make_scrollable_page(self.models_tab, "models")
+        self._notebook = notebook
+        self._models_tab_built = False
+        self._calibration_tab_built = False
+        notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
         self._build_data_tab()
         self._build_training_tab()
-        self._build_models_tab()
-        self._build_calibration_tab()
 
         self.bind("<Configure>", self._on_resize)
         self.after_idle(self._apply_responsive_layout)
@@ -137,9 +139,23 @@ class EngineerScreen(ttk.Frame):
         self._layout_split_shell(self.data_top_container, self.dataset_panel, self.upload_panel, compact=compact, left_weight=2, right_weight=2)
         self._layout_split_shell(self.training_container, self.augment_panel, self.train_panel, compact=compact, left_weight=1, right_weight=2)
         self._layout_split_shell(self.training_lower, self.training_jobs_panel, self.training_detail_panel, compact=compact, left_weight=2, right_weight=3)
-        self._layout_split_shell(self.models_container, self.models_left_panel, self.models_right_panel, compact=compact, left_weight=2, right_weight=3)
-        self._layout_split_shell(self.calibration_container, self.calibration_left_panel, self.calibration_right_outer, compact=compact, left_weight=2, right_weight=2)
+        if hasattr(self, "models_container"):
+            self._layout_split_shell(self.models_container, self.models_left_panel, self.models_right_panel, compact=compact, left_weight=2, right_weight=3)
+        if hasattr(self, "calibration_container"):
+            self._layout_split_shell(self.calibration_container, self.calibration_left_panel, self.calibration_right_outer, compact=compact, left_weight=2, right_weight=2)
         self._layout_data_annotation(compact=compact)
+
+    def _on_notebook_tab_changed(self, _event=None) -> None:
+        if not hasattr(self, "_notebook"):
+            return
+        selected_tab_text = self._notebook.tab(self._notebook.select(), "text")
+        if selected_tab_text == "Models":
+            self._ensure_models_tab_built()
+            self.refresh_models()
+        elif selected_tab_text == "Calibration":
+            self._ensure_calibration_tab_built()
+            self.refresh_profiles()
+        self.after_idle(self._apply_responsive_layout)
 
     def _layout_data_annotation(self, *, compact: bool) -> None:
         self.data_annotation_shell.columnconfigure(0, weight=1)
@@ -477,6 +493,8 @@ class EngineerScreen(ttk.Frame):
         self._layout_split_shell(self.training_lower, self.training_jobs_panel, self.training_detail_panel, compact=False, left_weight=2, right_weight=3)
 
     def _build_models_tab(self) -> None:
+        if self._models_tab_built:
+            return
         self.models_container = ttk.Frame(self.models_tab)
         self.models_container.pack(fill="both", expand=True, padx=6, pady=6)
         self.models_container.columnconfigure(0, weight=2)
@@ -535,8 +553,12 @@ class EngineerScreen(ttk.Frame):
         self.models_right_panel.rowconfigure(3, weight=1)
         self.models_right_panel.columnconfigure(0, weight=1)
         self._layout_split_shell(self.models_container, self.models_left_panel, self.models_right_panel, compact=False, left_weight=2, right_weight=3)
+        self._models_tab_built = True
+        self.refresh_models()
 
     def _build_calibration_tab(self) -> None:
+        if self._calibration_tab_built:
+            return
         self.calibration_scroller = ScrollableFrame(self.calibration_tab)
         self.calibration_scroller.pack(fill="both", expand=True, padx=6, pady=6)
 
@@ -674,6 +696,16 @@ class EngineerScreen(ttk.Frame):
             entry.bind("<KeyRelease>", self._on_calibration_roi_changed)
             entry.bind("<FocusOut>", self._on_calibration_roi_changed)
         self._layout_split_shell(self.calibration_container, self.calibration_left_panel, self.calibration_right_outer, compact=False, left_weight=2, right_weight=2)
+        self._calibration_tab_built = True
+        self.refresh_profiles()
+
+    def _ensure_models_tab_built(self) -> None:
+        if not self._models_tab_built:
+            self._build_models_tab()
+
+    def _ensure_calibration_tab_built(self) -> None:
+        if not self._calibration_tab_built:
+            self._build_calibration_tab()
 
     def _grid_entry(self, master, row: int, column: int, label: str, widget) -> None:
         ttk.Label(master, text=label).grid(row=row, column=column, sticky="w", padx=(0, 8), pady=4)
@@ -1399,6 +1431,20 @@ class EngineerScreen(ttk.Frame):
             return self._annotation_index
         return 0
 
+    def _annotation_widgets_alive(self) -> bool:
+        if not self.winfo_exists():
+            return False
+        for widget_name in ("dataset_list", "annotation_canvas", "dataset_versions", "train_jobs"):
+            widget = getattr(self, widget_name, None)
+            if widget is None:
+                continue
+            try:
+                if not widget.winfo_exists():
+                    return False
+            except tk.TclError:
+                return False
+        return True
+
     def _annotation_cache_key(self, dataset_id: str | None, image_name: str | None) -> tuple[str, str] | None:
         dataset_key = str(dataset_id or "").strip()
         image_key = str(image_name or "").strip()
@@ -1563,6 +1609,8 @@ class EngineerScreen(ttk.Frame):
 
         def _done(result, error):
             if load_sequence != self._annotation_load_sequence:
+                return
+            if not self._annotation_widgets_alive():
                 return
             if self._resolve_annotation_dataset_id() != dataset_id:
                 return
@@ -1958,6 +2006,8 @@ class EngineerScreen(ttk.Frame):
             messagebox.showerror("Models", str(exc))
             return
         self._model_cache = items
+        if not hasattr(self, "models_list"):
+            return
         self.models_list.delete(0, "end")
         for item in items:
             self.models_list.insert("end", f"{item['id']} | {item['name']} | {item['path']}")
@@ -2220,6 +2270,8 @@ class EngineerScreen(ttk.Frame):
             messagebox.showerror("Profiles", str(exc))
             return
         self._profile_cache = items
+        if not hasattr(self, "profiles_list"):
+            return
         self.profiles_list.delete(0, "end")
         for item in items:
             profile = item.get("profile") or {}

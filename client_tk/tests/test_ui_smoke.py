@@ -1218,6 +1218,9 @@ class UiSmokeTest(unittest.TestCase):
     def test_engineer_layout_switches_to_compact(self) -> None:
         screen = EngineerScreen(self.root, self.api, self.state)
         screen.update_idletasks()
+        screen._ensure_models_tab_built()
+        screen._ensure_calibration_tab_built()
+        screen._layout_compact = None
         with mock.patch.object(screen, "winfo_width", return_value=1000), mock.patch.object(
             screen.winfo_toplevel(),
             "winfo_width",
@@ -1246,6 +1249,7 @@ class UiSmokeTest(unittest.TestCase):
     def test_engineer_calibration_roi_preview_refreshes(self) -> None:
         screen = EngineerScreen(self.root, self.api, self.state)
         screen.update_idletasks()
+        screen._ensure_calibration_tab_built()
         screen.calibration_image = np.zeros((120, 200, 3), dtype=np.uint8)
         screen.calibration_image[:, :] = (10, 120, 220)
         for entry, value in (
