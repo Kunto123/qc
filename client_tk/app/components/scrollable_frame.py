@@ -54,8 +54,6 @@ class AutoHideScrollbar(ctk.CTkScrollbar):
         )
         self._grid_kwargs: dict | None = None
         self._pack_kwargs: dict | None = None
-        self._pending_visibility: str | None = None
-        self._visibility_job: str | None = None
 
     def grid(self, **kwargs):
         self._grid_kwargs = dict(kwargs)
@@ -68,40 +66,7 @@ class AutoHideScrollbar(ctk.CTkScrollbar):
         return super().pack(**kwargs)
 
     def set(self, first, last):
-        first_f = float(first)
-        last_f = float(last)
-        fully_visible = first_f <= 0.0 and last_f >= 1.0
-        self._pending_visibility = "hide" if fully_visible else "show"
-        if self._visibility_job is None:
-            try:
-                self._visibility_job = self.after_idle(self._apply_visibility)
-            except Exception:
-                self._visibility_job = None
-
         super().set(first, last)
-
-    def _apply_visibility(self) -> None:
-        self._visibility_job = None
-        target = self._pending_visibility
-        self._pending_visibility = None
-        if target is None:
-            return
-
-        try:
-            manager = self.winfo_manager()
-        except tk.TclError:
-            return
-
-        if target == "hide":
-            if manager == "grid":
-                self.grid_remove()
-            elif manager == "pack":
-                self.pack_forget()
-        elif not manager:
-            if self._grid_kwargs is not None:
-                super().grid(**self._grid_kwargs)
-            elif self._pack_kwargs is not None:
-                super().pack(**self._pack_kwargs)
 
 
 class ScrollableFrame(ttk.Frame):

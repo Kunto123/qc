@@ -75,6 +75,7 @@ class EngineerScreen(ctk.CTkFrame):
         self._models_refresh_sequence = 0
         self._profiles_refresh_sequence = 0
         self._training_jobs_refresh_sequence = 0
+        self._responsive_layout_job: str | None = None
 
         notebook = ctk.CTkTabview(self, fg_color=APP_BG, corner_radius=0, command=self._on_notebook_tab_changed)
         notebook.pack(fill="both", expand=True, padx=8, pady=8)
@@ -116,7 +117,7 @@ class EngineerScreen(ctk.CTkFrame):
         self._build_training_tab()
 
         self.bind("<Configure>", self._on_resize)
-        self.after_idle(self._apply_responsive_layout)
+        self._schedule_responsive_layout()
 
         self.after_idle(self.refresh_datasets)
         self.after_idle(self.refresh_base_models)
@@ -160,7 +161,33 @@ class EngineerScreen(ctk.CTkFrame):
             right.grid(row=0, column=1, sticky="nsew")
 
     def _on_resize(self, _event=None) -> None:
-        self.after_idle(self._apply_responsive_layout)
+        self._schedule_responsive_layout()
+
+    def _schedule_responsive_layout(self) -> None:
+        job_id = self._responsive_layout_job
+        if job_id is not None:
+            try:
+                self.after_cancel(job_id)
+            except tk.TclError:
+                pass
+        try:
+            self._responsive_layout_job = self.after(50, self._run_scheduled_responsive_layout)
+        except tk.TclError:
+            self._responsive_layout_job = None
+
+    def _run_scheduled_responsive_layout(self) -> None:
+        self._responsive_layout_job = None
+        self._apply_responsive_layout()
+
+    def _cancel_responsive_layout_job(self) -> None:
+        job_id = self._responsive_layout_job
+        self._responsive_layout_job = None
+        if job_id is None:
+            return
+        try:
+            self.after_cancel(job_id)
+        except tk.TclError:
+            return
 
     def _should_use_compact_layout(self, width: int) -> bool:
         if self._layout_compact is None:
@@ -209,7 +236,7 @@ class EngineerScreen(ctk.CTkFrame):
                 self._ensure_calibration_tab_built()
             else:
                 self.refresh_profiles()
-        self.after_idle(self._apply_responsive_layout)
+        self._schedule_responsive_layout()
 
     def select_tab(self, tab_name: str) -> None:
         if not hasattr(self, "_notebook"):
@@ -217,6 +244,10 @@ class EngineerScreen(ctk.CTkFrame):
         self._notebook.select(tab_name)
         if self._selected_tab_name != tab_name:
             self._on_notebook_tab_changed()
+
+    def destroy(self) -> None:
+        self._cancel_responsive_layout_job()
+        super().destroy()
 
     def _layout_data_annotation(self, *, compact: bool) -> None:
         self.data_annotation_shell.columnconfigure(0, weight=1)
