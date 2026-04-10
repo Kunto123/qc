@@ -374,6 +374,108 @@ class UiSmokeTest(unittest.TestCase):
 
             screen.destroy()
 
+    def test_engineer_training_job_uses_selected_dataset_version(self) -> None:
+        frame = np.zeros((24, 24, 3), dtype=np.uint8)
+        ok, buffer = cv2.imencode(".png", frame)
+        self.assertTrue(ok)
+        image_bytes = buffer.tobytes()
+
+        captured_payloads: list[dict] = []
+        versions = [
+            {
+                "id": "ver-1",
+                "display_label": "v1 | Snapshot v1 | ready | 1/1 ann",
+                "version_number": 1,
+                "name": "Snapshot v1",
+                "status": "ready",
+                "export_format": "yolo",
+                "export_root": "data/export/ver-1",
+                "image_count": 1,
+                "annotated_image_count": 1,
+                "coverage_percent": 100.0,
+                "class_names": ["K0W-HB0"],
+            },
+            {
+                "id": "ver-2",
+                "display_label": "v2 | Snapshot v2 | ready | 2/2 ann",
+                "version_number": 2,
+                "name": "Snapshot v2",
+                "status": "ready",
+                "export_format": "yolo",
+                "export_root": "data/export/ver-2",
+                "image_count": 2,
+                "annotated_image_count": 2,
+                "coverage_percent": 100.0,
+                "class_names": ["K0W-HB0", "K1Z-FA0"],
+            },
+        ]
+
+        def list_training_jobs():
+            if not captured_payloads:
+                return []
+            payload = captured_payloads[-1]
+            return [
+                {
+                    "id": "train-x",
+                    "dataset_id": payload.get("dataset_id", "ds-vers"),
+                    "status": "queued",
+                    "base_model": payload.get("base_model", "yolov5s"),
+                    "base_model_display_name": payload.get("base_model_display_name", "YOLOv5 Small"),
+                    "requested_device_mode": payload.get("device_mode", "auto"),
+                    "effective_device": "pending",
+                    "params": {"device_mode": payload.get("device_mode", "auto")},
+                    "dataset_version_id": payload.get("dataset_version_id"),
+                    "dataset_version_display_label": payload.get("dataset_version_display_label"),
+                }
+            ]
+
+        def create_training_job(payload: dict):
+            captured_payloads.append(dict(payload))
+            return {"id": "train-x", **payload}
+
+        with mock.patch.object(
+            self.api,
+            "list_datasets",
+            return_value=[{"id": "ds-vers", "name": "Dataset Versioned"}],
+        ), mock.patch.object(
+            self.api,
+            "list_dataset_files",
+            return_value=[{"name": "sample.png", "path": "Z:/missing/sample.png", "size": 123}],
+        ), mock.patch.object(
+            self.api,
+            "download_dataset_image",
+            return_value=image_bytes,
+        ), mock.patch.object(
+            self.api,
+            "get_annotation",
+            return_value={"labels": []},
+        ), mock.patch.object(
+            self.api,
+            "list_dataset_versions",
+            return_value=[dict(item) for item in versions],
+        ), mock.patch.object(
+            self.api,
+            "list_training_jobs",
+            side_effect=list_training_jobs,
+        ), mock.patch.object(
+            self.api,
+            "create_training_job",
+            side_effect=create_training_job,
+        ):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+
+            screen.train_dataset_version.set(versions[1]["display_label"])
+            screen.on_dataset_version_selected()
+            screen.create_training_job()
+
+            self.assertTrue(captured_payloads)
+            self.assertEqual(captured_payloads[-1].get("dataset_version_id"), "ver-2")
+            self.assertEqual(screen._active_dataset_version_id, "ver-2")
+            self.assertEqual(screen.train_dataset_version.get(), versions[1]["display_label"])
+
+            screen.destroy()
+
     def test_engineer_annotation_dataset_follows_selected_dataset(self) -> None:
         screen = EngineerScreen(self.root, self.api, self.state)
         screen.update_idletasks()

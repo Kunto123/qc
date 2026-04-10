@@ -256,7 +256,7 @@ class EngineerScreen(ttk.Frame):
         ttk.Button(version_btn_bar, text="Refresh", command=self.refresh_dataset_versions).pack(side="left")
         self.dataset_versions = tk.Listbox(version_frame, height=5)
         self.dataset_versions.pack(fill="both", expand=True, pady=(8, 0))
-        self.dataset_versions.bind("<<ListboxSelect>>", lambda _event: self.on_dataset_version_selected())
+        self.dataset_versions.bind("<<ListboxSelect>>", self.on_dataset_version_selected)
         self.dataset_version_summary = LabeledValuePanel(
             version_frame,
             "Version Summary",
@@ -431,7 +431,7 @@ class EngineerScreen(ttk.Frame):
             wraplength=540,
             justify="left",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        self.train_dataset_version.bind("<<ComboboxSelected>>", lambda _event: self._refresh_train_dataset_version_info())
+        self.train_dataset_version.bind("<<ComboboxSelected>>", self.on_dataset_version_selected)
 
         button_bar = ttk.Frame(self.train_panel)
         button_bar.pack(fill="x", pady=(8, 0))
@@ -1501,14 +1501,29 @@ class EngineerScreen(ttk.Frame):
         self._sync_annotation_class_name(labels=_labels)
         self._save_current_annotation(silent=True)
 
-    def on_dataset_version_selected(self) -> None:
-        version = self._selected_dataset_version_record()
+    def on_dataset_version_selected(self, event=None) -> None:
+        source_widget = getattr(event, "widget", None)
+        if source_widget is self.train_dataset_version:
+            version = self._selected_dataset_version_spec() or self._selected_dataset_version_record()
+        elif source_widget is self.dataset_versions:
+            version = self._selected_dataset_version_record() or self._selected_dataset_version_spec()
+        else:
+            version = self._selected_dataset_version_spec() or self._selected_dataset_version_record()
         if not version:
             self._active_dataset_version_id = None
             self._update_dataset_version_summary(None)
             self._sync_annotation_class_name()
             return
-        self._active_dataset_version_id = str(version.get("id") or "").strip() or None
+        selected_id = str(version.get("id") or "").strip() or None
+        self._active_dataset_version_id = selected_id
+        if selected_id:
+            for index, item in enumerate(self._dataset_version_cache):
+                if str(item.get("id") or "").strip() != selected_id:
+                    continue
+                self.dataset_versions.selection_clear(0, "end")
+                self.dataset_versions.selection_set(index)
+                self.dataset_versions.see(index)
+                break
         self._update_dataset_version_summary(version)
         self._sync_annotation_class_name()
         if self.annotation_canvas._source_frame is None:
