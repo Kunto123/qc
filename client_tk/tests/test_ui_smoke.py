@@ -334,8 +334,7 @@ class UiSmokeTest(unittest.TestCase):
             screen.train_base_model.configure(values=())
             screen.train_base_model.set("")
 
-            screen._notebook.select(screen._notebook.tabs()[1])
-            screen._on_notebook_tab_changed()
+            screen.select_tab("Training")
 
             self.assertEqual(base_model_calls, 1)
             self.assertTrue(screen.train_base_model.get())
@@ -354,8 +353,7 @@ class UiSmokeTest(unittest.TestCase):
             screen = EngineerScreen(self.root, self.api, self.state)
             screen.update_idletasks()
 
-            screen._notebook.select(screen._notebook.tabs()[2])
-            screen._on_notebook_tab_changed()
+            screen.select_tab("Models")
 
             self.assertEqual(model_calls, 1)
             self.assertEqual(len(screen._model_cache), 1)
@@ -374,8 +372,7 @@ class UiSmokeTest(unittest.TestCase):
             screen = EngineerScreen(self.root, self.api, self.state)
             screen.update_idletasks()
 
-            screen._notebook.select(screen._notebook.tabs()[3])
-            screen._on_notebook_tab_changed()
+            screen.select_tab("Calibration")
 
             self.assertEqual(profile_calls, 1)
             self.assertEqual(len(screen._profile_cache), 1)
@@ -519,8 +516,7 @@ class UiSmokeTest(unittest.TestCase):
         screen._annotation_dataset_id = "ds-context"
         screen.train_dataset.delete(0, "end")
 
-        screen._notebook.select(screen._notebook.tabs()[1])
-        screen._on_notebook_tab_changed()
+        screen.select_tab("Training")
 
         self.assertEqual(screen.train_dataset.get().strip(), "ds-context")
 

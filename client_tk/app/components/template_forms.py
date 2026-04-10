@@ -5,11 +5,14 @@ import json
 import tkinter as tk
 from tkinter import Text, filedialog, messagebox, ttk
 
+import customtkinter as ctk
+
 import cv2
 import numpy as np
 
 from client_tk.app.components.roi_picker_canvas import RoiPickerCanvas
 from client_tk.app.components.scrollable_frame import AutoHideScrollbar, ScrollableFrame
+from client_tk.app.theme import APP_BG, ACCENT, BORDER, INPUT_BG, PANEL_ALT_BG, PANEL_BG, TEXT_ON_ACCENT, TEXT_PRIMARY, TEXT_SECONDARY
 
 
 def _float_or_none(value: str) -> float | None:
@@ -18,7 +21,6 @@ def _float_or_none(value: str) -> float | None:
         return None
     return float(raw)
 
-
 def _int_or_none(value: str) -> int | None:
     raw = str(value or "").strip()
     if not raw:
@@ -26,7 +28,7 @@ def _int_or_none(value: str) -> int | None:
     return int(float(raw))
 
 
-class JsonEditor(ttk.LabelFrame):
+class JsonEditor(ctk.CTkFrame):
     def __init__(
         self,
         master,
@@ -36,12 +38,20 @@ class JsonEditor(ttk.LabelFrame):
         text_height: int = 18,
         text_width: int = 60,
     ):
-        super().__init__(master, text=title, padding=8)
+        super().__init__(master, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
 
-        shell = ttk.Frame(self)
-        shell.grid(row=0, column=0, sticky="nsew")
+        ctk.CTkLabel(self, text=title, font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=10,
+            pady=(10, 6),
+        )
+
+        shell = ctk.CTkFrame(self, fg_color="transparent")
+        shell.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
         shell.columnconfigure(0, weight=1)
         shell.rowconfigure(0, weight=1)
 
@@ -55,6 +65,11 @@ class JsonEditor(ttk.LabelFrame):
             padx=8,
             pady=8,
             borderwidth=0,
+            background=INPUT_BG,
+            foreground=TEXT_PRIMARY,
+            insertbackground=TEXT_PRIMARY,
+            selectbackground=ACCENT,
+            selectforeground=TEXT_ON_ACCENT,
         )
         y_scroll = AutoHideScrollbar(shell, orient="vertical", command=self.text.yview)
         x_scroll = AutoHideScrollbar(shell, orient="horizontal", command=self.text.xview)
@@ -77,26 +92,29 @@ class JsonEditor(ttk.LabelFrame):
         return json.loads(raw)
 
 
-class LabeledValuePanel(ttk.LabelFrame):
+class LabeledValuePanel(ctk.CTkFrame):
     def __init__(self, master, title: str, fields: list[tuple[str, str]], *, columns: int = 1):
-        super().__init__(master, text=title, padding=10)
-        self._labels: dict[str, ttk.Label] = {}
+        super().__init__(master, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
+        self._labels: dict[str, ctk.CTkLabel] = {}
         self._n_columns = max(1, columns)
         columns = self._n_columns
+        ctk.CTkLabel(self, text=title, font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).pack(anchor="w", padx=10, pady=(10, 6))
+
+        self._fields_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._fields_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         for col in range(columns * 2):
-            # label columns: no weight; value columns: weight=1 so they stretch
-            self.columnconfigure(col, weight=1 if col % 2 else 0)
+            self._fields_frame.columnconfigure(col, weight=1 if col % 2 else 0)
         for index, (key, label) in enumerate(fields):
             row = index // columns
             col = (index % columns) * 2
-            ttk.Label(self, text=f"{label}:", font=("Segoe UI", 9, "bold")).grid(
+            ctk.CTkLabel(self._fields_frame, text=f"{label}:", font=("Segoe UI", 9, "bold"), text_color=TEXT_PRIMARY).grid(
                 row=row,
                 column=col,
                 sticky="w",
                 padx=(0, 8),
                 pady=3,
             )
-            value = ttk.Label(self, text="-", wraplength=300, justify="left")
+            value = ctk.CTkLabel(self._fields_frame, text="-", wraplength=300, justify="left", text_color=TEXT_SECONDARY)
             value.grid(row=row, column=col + 1, sticky="ew", pady=3)
             self._labels[key] = value
 
@@ -121,15 +139,15 @@ class LabeledValuePanel(ttk.LabelFrame):
             widget.configure(text="-")
 
 
-class StatCard(ttk.Frame):
+class StatCard(ctk.CTkFrame):
     def __init__(self, master, title: str, *, background: str, foreground: str):
-        super().__init__(master)
-        shell = tk.Frame(self, bg=background, padx=14, pady=12)
-        shell.pack(fill="both", expand=True)
-        tk.Label(shell, text=title, bg=background, fg=foreground, font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        self.value_label = tk.Label(shell, text="0", bg=background, fg=foreground, font=("Segoe UI", 22, "bold"))
+        super().__init__(master, fg_color=background, corner_radius=14, border_width=1, border_color=BORDER)
+        shell = ctk.CTkFrame(self, fg_color="transparent")
+        shell.pack(fill="both", expand=True, padx=14, pady=12)
+        ctk.CTkLabel(shell, text=title, text_color=foreground, font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        self.value_label = ctk.CTkLabel(shell, text="0", text_color=foreground, font=("Segoe UI", 22, "bold"))
         self.value_label.pack(anchor="w", pady=(6, 0))
-        self.note_label = tk.Label(shell, text="", bg=background, fg=foreground, font=("Segoe UI", 8))
+        self.note_label = ctk.CTkLabel(shell, text="", text_color=foreground, font=("Segoe UI", 8))
         self.note_label.pack(anchor="w")
 
     def set_value(self, value: object, note: str = "") -> None:
@@ -137,9 +155,9 @@ class StatCard(ttk.Frame):
         self.note_label.configure(text=note)
 
 
-class TemplateEditorForm(ttk.Frame):
+class TemplateEditorForm(ctk.CTkFrame):
     def __init__(self, master):
-        super().__init__(master)
+        super().__init__(master, fg_color=APP_BG, corner_radius=0)
         self.columnconfigure(0, weight=1)
 
         self._model_lookup: dict[str, dict] = {}
@@ -197,36 +215,40 @@ class TemplateEditorForm(ttk.Frame):
 
         self.write_to_db_var = tk.BooleanVar(value=True)
 
-        header = ttk.LabelFrame(self, text="Template Identity", padding=10)
-        header.grid(row=0, column=0, sticky="ew")
+        header = ctk.CTkFrame(self, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
+        header.grid(row=0, column=0, sticky="ew", padx=0, pady=(0, 0))
         header.columnconfigure(1, weight=1)
         header.columnconfigure(3, weight=1)
-        self._entry(header, 0, 0, "Name", self.name_var)
-        self._entry(header, 0, 2, "Description", self.description_var)
-        ttk.Checkbutton(header, text="Active", variable=self.is_active_var).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ctk.CTkLabel(header, text="Template Identity", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
+            row=0,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            padx=10,
+            pady=(10, 6),
+        )
+        self._entry(header, 1, 0, "Name", self.name_var)
+        self._entry(header, 1, 2, "Description", self.description_var)
+        ctk.CTkCheckBox(header, text="Active", variable=self.is_active_var, text_color=TEXT_PRIMARY).grid(row=2, column=0, sticky="w", pady=(8, 10), padx=10)
 
-        notebook = ttk.Notebook(self)
+        notebook = ctk.CTkTabview(self)
         notebook.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
         self.rowconfigure(1, weight=1)
 
-        camera_tab = ttk.Frame(notebook, padding=10)
-        part_ready_tab = ttk.Frame(notebook, padding=10)
-        _sticker_tab_outer = ttk.Frame(notebook)
+        for tab_name in ("Camera", "Part Ready", "Sticker", "Vision", "Persistence", "Metadata"):
+            notebook.add(tab_name)
+
+        camera_tab = notebook.tab("Camera")
+        part_ready_tab = notebook.tab("Part Ready")
+        _sticker_tab_outer = notebook.tab("Sticker")
         _sticker_scroller = ScrollableFrame(_sticker_tab_outer)
         _sticker_scroller.pack(fill="both", expand=True)
-        sticker_tab = ttk.Frame(_sticker_scroller.body, padding=10)
+        sticker_tab = ctk.CTkFrame(_sticker_scroller.body, fg_color=APP_BG)
         sticker_tab.pack(fill="both", expand=True)
         sticker_tab.columnconfigure(0, weight=1)
-        vision_tab = ttk.Frame(notebook, padding=10)
-        persistence_tab = ttk.Frame(notebook, padding=10)
-        metadata_tab = ttk.Frame(notebook, padding=10)
-
-        notebook.add(camera_tab, text="Camera")
-        notebook.add(part_ready_tab, text="Part Ready")
-        notebook.add(_sticker_tab_outer, text="Sticker")
-        notebook.add(vision_tab, text="Vision")
-        notebook.add(persistence_tab, text="Persistence")
-        notebook.add(metadata_tab, text="Metadata")
+        vision_tab = notebook.tab("Vision")
+        persistence_tab = notebook.tab("Persistence")
+        metadata_tab = notebook.tab("Metadata")
 
         camera_tab.columnconfigure(1, weight=1)
         camera_tab.columnconfigure(3, weight=1)
@@ -238,51 +260,85 @@ class TemplateEditorForm(ttk.Frame):
         self._build_roi_section(part_ready_tab, "Part Ready ROI", 0, self.part_ready_roi_x_var, self.part_ready_roi_y_var, self.part_ready_roi_w_var, self.part_ready_roi_h_var)
         self._build_roi_section(sticker_tab, "Sticker ROI", 0, self.sticker_roi_x_var, self.sticker_roi_y_var, self.sticker_roi_w_var, self.sticker_roi_h_var)
 
-        part_ready_config = ttk.LabelFrame(part_ready_tab, text="Gate Config", padding=10)
+        part_ready_config = ctk.CTkFrame(part_ready_tab, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
         part_ready_config.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         part_ready_config.columnconfigure(1, weight=1)
         part_ready_config.columnconfigure(3, weight=1)
-        ttk.Checkbutton(part_ready_config, text="Enable Part Ready Gate", variable=self.part_ready_enabled_var).grid(row=0, column=0, sticky="w", pady=(0, 8))
-        ttk.Label(part_ready_config, text="Color Profile").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        ctk.CTkLabel(part_ready_config, text="Gate Config", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
+            row=0,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            padx=10,
+            pady=(10, 6),
+        )
+        ctk.CTkCheckBox(part_ready_config, text="Enable Part Ready Gate", variable=self.part_ready_enabled_var, text_color=TEXT_PRIMARY).grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(0, 8),
+            padx=10,
+        )
+        ctk.CTkLabel(part_ready_config, text="Color Profile", text_color=TEXT_PRIMARY).grid(row=2, column=0, sticky="w", padx=(10, 8), pady=4)
         self.profile_selector = ttk.Combobox(part_ready_config, textvariable=self.part_ready_profile_choice, state="readonly")
-        self.profile_selector.grid(row=1, column=1, sticky="ew", pady=4)
+        self.profile_selector.grid(row=2, column=1, sticky="ew", pady=4)
         self.profile_selector.bind("<<ComboboxSelected>>", self._on_profile_selected)
-        self._entry(part_ready_config, 1, 2, "Profile ID", self.part_ready_profile_id_var)
-        self._entry(part_ready_config, 2, 0, "Colorspace", self.part_ready_colorspace_var)
-        self._entry(part_ready_config, 2, 2, "Distance Threshold", self.part_ready_distance_var)
-        self._entry(part_ready_config, 3, 0, "Min Match Ratio", self.part_ready_ratio_var)
+        self._entry(part_ready_config, 2, 2, "Profile ID", self.part_ready_profile_id_var)
+        self._entry(part_ready_config, 3, 0, "Colorspace", self.part_ready_colorspace_var)
+        self._entry(part_ready_config, 3, 2, "Distance Threshold", self.part_ready_distance_var)
+        self._entry(part_ready_config, 4, 0, "Min Match Ratio", self.part_ready_ratio_var)
 
-        sticker_config = ttk.LabelFrame(sticker_tab, text="Sticker Rule", padding=10)
+        sticker_config = ctk.CTkFrame(sticker_tab, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
         sticker_config.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         sticker_config.columnconfigure(1, weight=1)
         sticker_config.columnconfigure(3, weight=1)
-        ttk.Checkbutton(sticker_config, text="Enable Sticker Validation", variable=self.sticker_enabled_var).grid(row=0, column=0, sticky="w", pady=(0, 8))
-        self._entry(sticker_config, 1, 0, "Part Name", self.sticker_part_name_var)
-        self._entry(sticker_config, 1, 2, "Expected Class", self.sticker_expected_class_var)
-        self._entry(sticker_config, 2, 0, "Line", self.sticker_line_var)
-        self._entry(sticker_config, 2, 2, "Validator Mode", self.sticker_validator_mode_var)
-        self._entry(sticker_config, 3, 0, "Min ROI Conf", self.sticker_min_roi_conf_var)
-        self._entry(sticker_config, 3, 2, "Min Class Conf", self.sticker_min_class_conf_var)
-        self._entry(sticker_config, 4, 0, "Max Offset X", self.sticker_max_offset_x_var)
-        self._entry(sticker_config, 4, 2, "Max Offset Y", self.sticker_max_offset_y_var)
-        self._entry(sticker_config, 5, 0, "Expected Center X (0-1)", self.sticker_expected_center_x_var)
-        self._entry(sticker_config, 5, 2, "Expected Center Y (0-1)", self.sticker_expected_center_y_var)
-        self._entry(sticker_config, 6, 0, "Stable Frames (debounce)", self.sticker_commit_stable_frames_var)
-        ttk.Label(sticker_config, text="Jumlah frame stabil berurutan sebelum keputusan dikunci (default 5).", foreground="#64748b", font=("Segoe UI", 8)).grid(
-            row=6, column=2, columnspan=2, sticky="w", padx=(0, 8))
-        ttk.Label(sticker_config, text="Kosong = auto center (0.5). Gunakan Visual Picker di bawah.", foreground="#64748b", font=("Segoe UI", 8)).grid(
-            row=6, column=0, columnspan=4, sticky="w", pady=(0, 4)
+        ctk.CTkLabel(sticker_config, text="Sticker Rule", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
+            row=0,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            padx=10,
+            pady=(10, 6),
+        )
+        ctk.CTkCheckBox(sticker_config, text="Enable Sticker Validation", variable=self.sticker_enabled_var, text_color=TEXT_PRIMARY).grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(0, 8),
+            padx=10,
+        )
+        self._entry(sticker_config, 2, 0, "Part Name", self.sticker_part_name_var)
+        self._entry(sticker_config, 2, 2, "Expected Class", self.sticker_expected_class_var)
+        self._entry(sticker_config, 3, 0, "Line", self.sticker_line_var)
+        self._entry(sticker_config, 3, 2, "Validator Mode", self.sticker_validator_mode_var)
+        self._entry(sticker_config, 4, 0, "Min ROI Conf", self.sticker_min_roi_conf_var)
+        self._entry(sticker_config, 4, 2, "Min Class Conf", self.sticker_min_class_conf_var)
+        self._entry(sticker_config, 5, 0, "Max Offset X", self.sticker_max_offset_x_var)
+        self._entry(sticker_config, 5, 2, "Max Offset Y", self.sticker_max_offset_y_var)
+        self._entry(sticker_config, 6, 0, "Expected Center X (0-1)", self.sticker_expected_center_x_var)
+        self._entry(sticker_config, 6, 2, "Expected Center Y (0-1)", self.sticker_expected_center_y_var)
+        self._entry(sticker_config, 7, 0, "Stable Frames (debounce)", self.sticker_commit_stable_frames_var)
+        ctk.CTkLabel(sticker_config, text="Jumlah frame stabil berurutan sebelum keputusan dikunci (default 5).", text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(
+            row=8, column=2, columnspan=2, sticky="w", padx=(0, 8))
+        ctk.CTkLabel(sticker_config, text="Kosong = auto center (0.5). Gunakan Visual Picker di bawah.", text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(
+            row=8, column=0, columnspan=4, sticky="w", pady=(0, 4), padx=10
         )
 
         # Visual ROI Picker
         self.roi_picker = RoiPickerCanvas(sticker_tab, "Visual ROI & Expected Center Picker", size=(640, 300))
         self.roi_picker.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
 
-        picker_actions = ttk.Frame(sticker_tab)
+        picker_actions = ctk.CTkFrame(sticker_tab, fg_color="transparent")
         picker_actions.grid(row=3, column=0, sticky="w", pady=(4, 0))
-        ttk.Button(picker_actions, text="Load Image", command=self._picker_load_image).pack(side="left", padx=(0, 6))
-        ttk.Button(picker_actions, text="Load from Session", command=self._picker_load_session).pack(side="left", padx=(0, 6))
-        ttk.Button(picker_actions, text="Clear", command=self.roi_picker.clear).pack(side="left")
+        ctk.CTkButton(picker_actions, text="Load Image", command=self._picker_load_image, fg_color=ACCENT, hover_color="#1d4ed8", text_color=TEXT_ON_ACCENT).pack(
+            side="left",
+            padx=(0, 6),
+        )
+        ctk.CTkButton(picker_actions, text="Load from Session", command=self._picker_load_session, fg_color=ACCENT, hover_color="#1d4ed8", text_color=TEXT_ON_ACCENT).pack(
+            side="left",
+            padx=(0, 6),
+        )
+        ctk.CTkButton(picker_actions, text="Clear", command=self.roi_picker.clear, fg_color=PANEL_ALT_BG, hover_color="#1f3b57", text_color=TEXT_PRIMARY).pack(side="left")
 
         self.roi_picker.on_center_changed = self._on_picker_center_changed
 
@@ -293,7 +349,7 @@ class TemplateEditorForm(ttk.Frame):
 
         vision_tab.columnconfigure(1, weight=1)
         vision_tab.columnconfigure(3, weight=1)
-        ttk.Label(vision_tab, text="Registered Model").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        ctk.CTkLabel(vision_tab, text="Registered Model", text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
         self.model_selector = ttk.Combobox(vision_tab, textvariable=self.model_choice_var, state="readonly")
         self.model_selector.grid(row=0, column=1, columnspan=3, sticky="ew", pady=4)
         self.model_selector.bind("<<ComboboxSelected>>", self._on_model_selected)
@@ -307,16 +363,17 @@ class TemplateEditorForm(ttk.Frame):
         self._entry(vision_tab, 4, 2, "Classes CSV", self.model_classes_var)
 
         persistence_tab.columnconfigure(0, weight=1)
-        ttk.Checkbutton(persistence_tab, text="Write committed result to DB", variable=self.write_to_db_var).grid(
+        ctk.CTkCheckBox(persistence_tab, text="Write committed result to DB", variable=self.write_to_db_var, text_color=TEXT_PRIMARY).grid(
             row=0,
             column=0,
             sticky="w",
         )
-        ttk.Label(
+        ctk.CTkLabel(
             persistence_tab,
             text="Jika dimatikan, event tetap dihitung di session counter tetapi tidak dipersist ke inspection results repository.",
             wraplength=520,
             justify="left",
+            text_color=TEXT_SECONDARY,
         ).grid(row=1, column=0, sticky="w", pady=(10, 0))
 
         self.metadata_editor = Text(metadata_tab, height=10, width=40)
@@ -396,8 +453,14 @@ class TemplateEditorForm(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _entry(self, master, row: int, column: int, label: str, variable: tk.Variable) -> None:
-        ttk.Label(master, text=label).grid(row=row, column=column, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(master, textvariable=variable).grid(row=row, column=column + 1, sticky="ew", padx=(0, 12), pady=4)
+        ctk.CTkLabel(master, text=label, text_color=TEXT_PRIMARY).grid(row=row, column=column, sticky="w", padx=(0, 8), pady=4)
+        ctk.CTkEntry(master, textvariable=variable, fg_color=INPUT_BG, border_color=BORDER, text_color=TEXT_PRIMARY).grid(
+            row=row,
+            column=column + 1,
+            sticky="ew",
+            padx=(0, 12),
+            pady=4,
+        )
 
     def _build_roi_section(
         self,
@@ -409,18 +472,25 @@ class TemplateEditorForm(ttk.Frame):
         w_var: tk.StringVar,
         h_var: tk.StringVar,
     ) -> None:
-        frame = ttk.LabelFrame(master, text=title, padding=10)
+        frame = ctk.CTkFrame(master, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
         frame.grid(row=row, column=0, sticky="ew")
         for index in range(8):
             frame.columnconfigure(index, weight=1)
+        ctk.CTkLabel(frame, text=title, font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=8, sticky="w", padx=10, pady=(10, 6))
         self._roi_entry(frame, 0, "x", x_var)
         self._roi_entry(frame, 2, "y", y_var)
         self._roi_entry(frame, 4, "w", w_var)
         self._roi_entry(frame, 6, "h", h_var)
 
     def _roi_entry(self, master, column: int, label: str, variable: tk.StringVar) -> None:
-        ttk.Label(master, text=label).grid(row=0, column=column, sticky="w", padx=4, pady=4)
-        ttk.Entry(master, textvariable=variable, width=10).grid(row=0, column=column + 1, sticky="ew", padx=4, pady=4)
+        ctk.CTkLabel(master, text=label, text_color=TEXT_PRIMARY).grid(row=1, column=column, sticky="w", padx=4, pady=4)
+        ctk.CTkEntry(master, textvariable=variable, width=10, fg_color=INPUT_BG, border_color=BORDER, text_color=TEXT_PRIMARY).grid(
+            row=1,
+            column=column + 1,
+            sticky="ew",
+            padx=4,
+            pady=4,
+        )
 
     def set_model_options(self, models: list[dict]) -> None:
         self._model_lookup = {}

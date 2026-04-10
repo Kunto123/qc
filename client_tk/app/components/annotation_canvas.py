@@ -4,11 +4,14 @@ import copy
 from pathlib import Path
 from typing import Callable
 import tkinter as tk
-from tkinter import ttk
+
+import customtkinter as ctk
 
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
+
+from client_tk.app.theme import BORDER, PANEL_BG, TEXT_PRIMARY
 
 
 _BBOX_COLOR = (34, 197, 94)
@@ -21,13 +24,23 @@ _RESIZE_HANDLE_SIZE = 6
 _RESIZE_HIT_RADIUS = 12
 
 
-class AnnotationCanvas(ttk.LabelFrame):
+class AnnotationCanvas(ctk.CTkFrame):
     def __init__(self, master, title: str = "Image Annotation", *, size: tuple[int, int] = (960, 520)):
-        super().__init__(master, text=title, padding=6)
+        super().__init__(master, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
         self._display_size = size
-        self.configure(width=size[0], height=size[1])
+        self.configure(width=size[0], height=size[1] + 34)
         self.pack_propagate(False)
         self.grid_propagate(False)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(self, text=title, font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=10,
+            pady=(10, 6),
+        )
 
         self._canvas = tk.Canvas(
             self,
@@ -37,7 +50,7 @@ class AnnotationCanvas(ttk.LabelFrame):
             highlightthickness=0,
             cursor="crosshair",
         )
-        self._canvas.pack(fill="none", expand=False)
+        self._canvas.grid(row=1, column=0, sticky="nw", padx=10, pady=(0, 10))
         self._canvas.bind("<Configure>", lambda _event: self.request_redraw())
         self._canvas.bind("<Map>", self._on_canvas_visible)
         self._canvas.bind("<Visibility>", self._on_canvas_visible)

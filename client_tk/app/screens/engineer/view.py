@@ -76,26 +76,41 @@ class EngineerScreen(ctk.CTkFrame):
         self._profiles_refresh_sequence = 0
         self._training_jobs_refresh_sequence = 0
 
-        notebook = ttk.Notebook(self)
+        notebook = ctk.CTkTabview(self, fg_color=APP_BG, corner_radius=0, command=self._on_notebook_tab_changed)
         notebook.pack(fill="both", expand=True, padx=8, pady=8)
 
-        self.data_tab = ttk.Frame(notebook)
-        self.training_tab = ttk.Frame(notebook)
-        self.models_tab = ttk.Frame(notebook)
-        self.calibration_tab = ttk.Frame(notebook)
+        tab_names = ["Data", "Training", "Models", "Calibration"]
+        for tab_name in tab_names:
+            notebook.add(tab_name)
 
-        notebook.add(self.data_tab, text="Data")
-        notebook.add(self.training_tab, text="Training")
-        notebook.add(self.models_tab, text="Models")
-        notebook.add(self.calibration_tab, text="Calibration")
+        self.data_tab = self._make_scrollable_page(notebook.tab("Data"), "data")
+        self.training_tab = self._make_scrollable_page(notebook.tab("Training"), "training")
+        self.models_tab = self._make_scrollable_page(notebook.tab("Models"), "models")
 
-        self.data_tab = self._make_scrollable_page(self.data_tab, "data")
-        self.training_tab = self._make_scrollable_page(self.training_tab, "training")
-        self.models_tab = self._make_scrollable_page(self.models_tab, "models")
+        original_tab = notebook.tab
+
+        def _tabs() -> list[str]:
+            return list(tab_names)
+
+        def _select(tab_id: str | None = None):
+            if tab_id is None:
+                return notebook.get()
+            notebook.set(tab_id)
+            return tab_id
+
+        def _tab(tab_id: str, option: str | None = None):
+            if option == "text":
+                return tab_id
+            return original_tab(tab_id)
+
+        notebook.tabs = _tabs  # type: ignore[attr-defined]
+        notebook.select = _select  # type: ignore[attr-defined]
+        notebook.tab = _tab  # type: ignore[attr-defined]
+
         self._notebook = notebook
+        self._selected_tab_name = tab_names[0]
         self._models_tab_built = False
         self._calibration_tab_built = False
-        notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
         self._build_data_tab()
         self._build_training_tab()
@@ -174,6 +189,7 @@ class EngineerScreen(ctk.CTkFrame):
         if not hasattr(self, "_notebook"):
             return
         selected_tab_text = self._notebook.tab(self._notebook.select(), "text")
+        self._selected_tab_name = selected_tab_text
         if selected_tab_text == "Training":
             current_dataset_id = self._current_dataset_id()
             if current_dataset_id and not self.train_dataset.get().strip():
@@ -194,6 +210,13 @@ class EngineerScreen(ctk.CTkFrame):
             else:
                 self.refresh_profiles()
         self.after_idle(self._apply_responsive_layout)
+
+    def select_tab(self, tab_name: str) -> None:
+        if not hasattr(self, "_notebook"):
+            return
+        self._notebook.select(tab_name)
+        if self._selected_tab_name != tab_name:
+            self._on_notebook_tab_changed()
 
     def _layout_data_annotation(self, *, compact: bool) -> None:
         self.data_annotation_shell.columnconfigure(0, weight=1)
@@ -596,7 +619,7 @@ class EngineerScreen(ctk.CTkFrame):
     def _build_calibration_tab(self) -> None:
         if self._calibration_tab_built:
             return
-        self.calibration_scroller = ScrollableFrame(self.calibration_tab)
+        self.calibration_scroller = ScrollableFrame(self._notebook.tab("Calibration"))
         self.calibration_scroller.pack(fill="both", expand=True, padx=6, pady=6)
 
         self.calibration_container = ctk.CTkFrame(self.calibration_scroller.body, fg_color=APP_BG, corner_radius=14, border_width=1, border_color=BORDER)

@@ -4,6 +4,9 @@ import tkinter as tk
 import weakref
 from tkinter import ttk
 
+import customtkinter as ctk
+
+from client_tk.app.theme import ACCENT, ACCENT_HOVER, APP_BG
 
 _SCROLLABLE_FRAMES: weakref.WeakSet["ScrollableFrame"] = weakref.WeakSet()
 _SCROLL_DISPATCH_BOUND = False
@@ -36,9 +39,19 @@ def _frame_is_alive(frame: "ScrollableFrame") -> bool:
         return False
 
 
-class AutoHideScrollbar(ttk.Scrollbar):
+class AutoHideScrollbar(ctk.CTkScrollbar):
     def __init__(self, master, **kwargs):
-        super().__init__(master, **kwargs)
+        orientation = kwargs.pop("orientation", kwargs.pop("orient", "vertical"))
+        super().__init__(
+            master,
+            orientation=orientation,
+            fg_color=APP_BG,
+            button_color=ACCENT,
+            button_hover_color=ACCENT_HOVER,
+            corner_radius=8,
+            width=12,
+            **kwargs,
+        )
         self._grid_kwargs: dict | None = None
         self._pack_kwargs: dict | None = None
         self._pending_visibility: str | None = None
@@ -94,17 +107,15 @@ class AutoHideScrollbar(ttk.Scrollbar):
 class ScrollableFrame(ttk.Frame):
     def __init__(self, master, *, padding: int = 0):
         super().__init__(master, padding=padding)
-        style = ttk.Style()
-        background = style.lookup("TFrame", "background") or "#f3f4f6"
 
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
 
-        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, background=background)
-        self.v_scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._on_scrollbar_scroll)
+        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, background=APP_BG)
+        self.v_scrollbar = AutoHideScrollbar(self, orientation="vertical", command=self._on_scrollbar_scroll)
         self.canvas.configure(yscrollcommand=self.v_scrollbar.set)
 
-        self.body = ttk.Frame(self)
+        self.body = tk.Frame(self, bg=APP_BG, highlightthickness=0, borderwidth=0)
         self._window_id = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
         _SCROLLABLE_FRAMES.add(self)
         self._scrolled_event_job: str | None = None
@@ -122,26 +133,45 @@ class ScrollableFrame(ttk.Frame):
             _SCROLL_DISPATCH_BOUND = True
 
     def _sync_scroll_region(self, _event=None) -> None:
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        try:
+            if not _frame_is_alive(self):
+                return
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        except tk.TclError:
+            return
 
     def _sync_body_width(self, event) -> None:
-        self.canvas.itemconfigure(self._window_id, width=event.width)
-        self._emit_scrolled_event()
+        try:
+            if not _frame_is_alive(self):
+                return
+            self.canvas.itemconfigure(self._window_id, width=event.width)
+            self._emit_scrolled_event()
+        except tk.TclError:
+            return
 
     def _on_scrollbar_scroll(self, *args) -> None:
-        self.canvas.yview(*args)
-        self._emit_scrolled_event()
+        try:
+            self.canvas.yview(*args)
+            self._emit_scrolled_event()
+        except tk.TclError:
+            return
 
     def _emit_scrolled_event(self) -> None:
-        if self._scrolled_event_job is not None:
+        if self._scrolled_event_job is not None or not _frame_is_alive(self):
             return
-        self._scrolled_event_job = self.after(16, self._flush_scrolled_event)
+        try:
+            self._scrolled_event_job = self.after(16, self._flush_scrolled_event)
+        except tk.TclError:
+            self._scrolled_event_job = None
 
     def _flush_scrolled_event(self) -> None:
         self._scrolled_event_job = None
         if not _frame_is_alive(self):
             return
-        self.event_generate(_SCROLLED_EVENT, when="tail")
+        try:
+            self.event_generate(_SCROLLED_EVENT, when="tail")
+        except tk.TclError:
+            return
 
     def _contains_widget_path(self, widget_path: str) -> bool:
         body_path = str(self.body)

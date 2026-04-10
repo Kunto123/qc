@@ -140,20 +140,18 @@ class AdminScreen(ctk.CTkFrame):
         self._layout_overview_cards(compact=False)
 
     def _build_tabs(self) -> None:
-        notebook = ttk.Notebook(self)
+        notebook = ctk.CTkTabview(self, fg_color=APP_BG, corner_radius=0)
         notebook.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
 
-        templates_tab = ttk.Frame(notebook)
-        deployments_tab = ttk.Frame(notebook)
-        users_tab = ttk.Frame(notebook)
-        results_tab = ttk.Frame(notebook)
-        dashboard_tab = ttk.Frame(notebook)
+        tab_names = ["Templates", "Deployments", "Users", "Results", "Dashboard"]
+        for tab_name in tab_names:
+            notebook.add(tab_name)
 
-        notebook.add(templates_tab, text="Templates")
-        notebook.add(deployments_tab, text="Deployments")
-        notebook.add(users_tab, text="Users")
-        notebook.add(results_tab, text="Results")
-        notebook.add(dashboard_tab, text="Dashboard")
+        templates_tab = notebook.tab("Templates")
+        deployments_tab = notebook.tab("Deployments")
+        users_tab = notebook.tab("Users")
+        results_tab = notebook.tab("Results")
+        dashboard_tab = notebook.tab("Dashboard")
 
         self.templates_tab = self._make_scrollable_page(templates_tab, "templates")
         self.deployments_tab = self._make_scrollable_page(deployments_tab, "deployments")
@@ -161,11 +159,33 @@ class AdminScreen(ctk.CTkFrame):
         self.results_tab = self._make_scrollable_page(results_tab, "results")
         self.dashboard_tab = self._make_scrollable_page(dashboard_tab, "dashboard")
 
+        original_tab = notebook.tab
+
+        def _tabs() -> list[str]:
+            return list(tab_names)
+
+        def _select(tab_id: str | None = None):
+            if tab_id is None:
+                return notebook.get()
+            notebook.set(tab_id)
+            return tab_id
+
+        def _tab(tab_id: str, option: str | None = None):
+            if option == "text":
+                return tab_id
+            return original_tab(tab_id)
+
+        notebook.tabs = _tabs  # type: ignore[attr-defined]
+        notebook.select = _select  # type: ignore[attr-defined]
+        notebook.tab = _tab  # type: ignore[attr-defined]
+
         self._build_templates_tab()
         self._build_deployments_tab()
         self._build_users_tab()
         self._build_results_tab()
         self._build_dashboard_tab()
+
+        self._notebook = notebook
 
     def _build_status_bar(self) -> None:
         status_bar = ctk.CTkFrame(self, fg_color=APP_BG, corner_radius=0)
@@ -324,13 +344,13 @@ class AdminScreen(ctk.CTkFrame):
         ).grid(row=0, column=0, sticky="w")
         ttk.Label(editor, textvariable=self.template_context_var, font=("Segoe UI", 9, "bold")).grid(row=1, column=0, sticky="w", pady=(8, 8))
 
-        editor_tabs = ttk.Notebook(editor)
+        editor_tabs = ctk.CTkTabview(editor, fg_color=APP_BG, corner_radius=0)
         editor_tabs.grid(row=2, column=0, sticky="nsew")
 
-        structured_tab = ttk.Frame(editor_tabs, padding=4)
-        raw_tab = ttk.Frame(editor_tabs, padding=4)
-        editor_tabs.add(structured_tab, text="Structured Form")
-        editor_tabs.add(raw_tab, text="Raw JSON")
+        editor_tabs.add("Structured Form")
+        editor_tabs.add("Raw JSON")
+        structured_tab = editor_tabs.tab("Structured Form")
+        raw_tab = editor_tabs.tab("Raw JSON")
 
         structured_tab.columnconfigure(0, weight=1)
         structured_tab.rowconfigure(0, weight=1)
@@ -589,13 +609,13 @@ class AdminScreen(ctk.CTkFrame):
 
         self.results_right.columnconfigure(0, weight=1)
         self.results_right.rowconfigure(0, weight=1)
-        detail_tabs = ttk.Notebook(self.results_right)
+        detail_tabs = ctk.CTkTabview(self.results_right, fg_color=APP_BG, corner_radius=0)
         detail_tabs.grid(row=0, column=0, sticky="nsew")
 
-        summary_tab = ttk.Frame(detail_tabs, padding=6)
-        raw_tab = ttk.Frame(detail_tabs, padding=6)
-        detail_tabs.add(summary_tab, text="Summary")
-        detail_tabs.add(raw_tab, text="Raw JSON")
+        detail_tabs.add("Summary")
+        detail_tabs.add("Raw JSON")
+        summary_tab = detail_tabs.tab("Summary")
+        raw_tab = detail_tabs.tab("Raw JSON")
 
         summary_tab.columnconfigure(0, weight=1)
         summary_tab.rowconfigure(0, weight=1)
@@ -674,13 +694,13 @@ class AdminScreen(ctk.CTkFrame):
         }
         self._layout_dashboard_cards(compact=False)
 
-        body_tabs = ttk.Notebook(self.dashboard_tab)
+        body_tabs = ctk.CTkTabview(self.dashboard_tab, fg_color=APP_BG, corner_radius=0)
         body_tabs.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
 
-        trend_tab = ttk.Frame(body_tabs, padding=8)
-        raw_tab = ttk.Frame(body_tabs, padding=8)
-        body_tabs.add(trend_tab, text="Trend")
-        body_tabs.add(raw_tab, text="Raw JSON")
+        body_tabs.add("Trend")
+        body_tabs.add("Raw JSON")
+        trend_tab = body_tabs.tab("Trend")
+        raw_tab = body_tabs.tab("Raw JSON")
 
         bucket_card = ttk.LabelFrame(trend_tab, text="Bucket Trend", padding=12)
         bucket_card.pack(fill="both", expand=True)

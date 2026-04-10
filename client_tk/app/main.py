@@ -119,7 +119,7 @@ class QcSuiteDesktopApp(ctk.CTk):
         configure_ttk_navy_theme(style)
 
         self.api = ApiClient(DEFAULT_SERVER_URL)
-        self.state = SessionState(base_url=DEFAULT_SERVER_URL)
+        self.session_state = SessionState(base_url=DEFAULT_SERVER_URL)
         self.active_screen: ttk.Frame | None = None
 
         self.login_frame = LoginFrame(self, self._handle_login)
@@ -152,7 +152,7 @@ class QcSuiteDesktopApp(ctk.CTk):
     def _show_login(self) -> None:
         self._teardown_screen()
         self.shell.pack_forget()
-        self.login_frame.set_base_url(self.state.base_url)
+        self.login_frame.set_base_url(self.session_state.base_url)
         self.login_frame.pack(fill="both", expand=True)
         self.login_frame.focus_credentials()
 
@@ -174,7 +174,7 @@ class QcSuiteDesktopApp(ctk.CTk):
             messagebox.showerror("Login failed", str(exc))
             return
 
-        self.state = SessionState(base_url=base_url, token=token, user=user)
+        self.session_state = SessionState(base_url=base_url, token=token, user=user)
         self._mount_screen(user.get("role"))
 
     def _mount_screen(self, role: str | None) -> None:
@@ -184,9 +184,9 @@ class QcSuiteDesktopApp(ctk.CTk):
             self._show_login()
             return
         self._teardown_screen()
-        self.user_label.configure(text=f"{self.state.user.get('username')} ({self.state.user.get('role')})")
-        self.endpoint_label.configure(text=self.state.base_url)
-        self.active_screen = screen_class(self.screen_host, self.api, self.state)
+        self.user_label.configure(text=f"{self.session_state.user.get('username')} ({self.session_state.user.get('role')})")
+        self.endpoint_label.configure(text=self.session_state.base_url)
+        self.active_screen = screen_class(self.screen_host, self.api, self.session_state)
         self.active_screen.pack(fill="both", expand=True)
         self._show_shell()
 
@@ -202,15 +202,15 @@ class QcSuiteDesktopApp(ctk.CTk):
         self.active_screen = None
 
     def _logout(self) -> None:
-        base_url = self.state.base_url or DEFAULT_SERVER_URL
-        if self.state.token:
+        base_url = self.session_state.base_url or DEFAULT_SERVER_URL
+        if self.session_state.token:
             try:
                 self.api.logout()
             except Exception:  # noqa: BLE001
                 pass
         self._teardown_screen()
         self.api.set_token(None)
-        self.state = SessionState(base_url=base_url)
+        self.session_state = SessionState(base_url=base_url)
         self.user_label.configure(text="Not authenticated")
         self.endpoint_label.configure(text=base_url)
         self._show_login()

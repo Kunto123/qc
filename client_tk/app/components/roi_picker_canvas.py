@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
 from typing import Callable
+
+import customtkinter as ctk
 
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
+
+from client_tk.app.theme import BORDER, PANEL_BG, TEXT_PRIMARY, TEXT_SECONDARY
 
 
 _COLOR_PART_READY = (50, 180, 255)   # BGR oranye
@@ -47,7 +50,7 @@ def _draw_crosshair(frame, px: int, py: int, color, label: str = "") -> None:
         )
 
 
-class RoiPickerCanvas(ttk.LabelFrame):
+class RoiPickerCanvas(ctk.CTkFrame):
     """Interactive canvas for visualising ROI boxes and picking expected center.
 
     Usage::
@@ -61,8 +64,19 @@ class RoiPickerCanvas(ttk.LabelFrame):
     """
 
     def __init__(self, master, title: str = "ROI Visual Picker", *, size: tuple[int, int] = (640, 360)):
-        super().__init__(master, text=title, padding=6)
+        super().__init__(master, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
         self._display_size = size
+        self.configure(width=size[0], height=size[1] + 56)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(self, text=title, font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=10,
+            pady=(10, 6),
+        )
         self._source_frame: np.ndarray | None = None
         self._part_ready_roi: dict = {}
         self._sticker_roi: dict = {}
@@ -78,18 +92,18 @@ class RoiPickerCanvas(ttk.LabelFrame):
             cursor="crosshair",
             highlightthickness=0,
         )
-        self._canvas.pack(fill="both", expand=True)
+        self._canvas.grid(row=1, column=0, sticky="nw", padx=10)
         self._canvas.bind("<Button-1>", self._on_click)
         self._canvas.bind("<Configure>", lambda _: self.redraw())
 
-        self._hint = ttk.Label(
+        self._hint = ctk.CTkLabel(
             self,
             text="Klik dalam area kuning (Sticker ROI) untuk set expected center.",
-            foreground="#94a3b8",
             font=("Segoe UI", 9),
             wraplength=size[0] - 12,
+            text_color=TEXT_SECONDARY,
         )
-        self._hint.pack(anchor="w", pady=(4, 0))
+        self._hint.grid(row=2, column=0, sticky="w", padx=10, pady=(6, 10))
         self._photo = None
 
     # ------------------------------------------------------------------
