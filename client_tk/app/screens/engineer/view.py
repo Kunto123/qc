@@ -712,9 +712,13 @@ class EngineerScreen(ttk.Frame):
         widget.grid(row=row, column=column + 1, sticky="ew", pady=4)
 
     def _selected_listbox_index(self, listbox: tk.Listbox) -> int | None:
-        if not listbox.curselection():
+        try:
+            selection = listbox.curselection()
+        except tk.TclError:
             return None
-        return int(listbox.curselection()[0])
+        if not selection:
+            return None
+        return int(selection[0])
 
     def _selected_dataset_id(self) -> str | None:
         index = self._selected_listbox_index(self.dataset_list)
@@ -1238,10 +1242,20 @@ class EngineerScreen(ttk.Frame):
         self._update_dataset_version_summary(None)
 
     def _resolve_annotation_dataset_id(self) -> str | None:
+        try:
+            annot_dataset_id = self.annot_dataset_var.get().strip()
+        except tk.TclError:
+            annot_dataset_id = ""
+
+        try:
+            selected_dataset_id = self._selected_dataset_id()
+        except tk.TclError:
+            selected_dataset_id = None
+
         for candidate in (
-            self.annot_dataset_var.get().strip(),
+            annot_dataset_id,
             self._annotation_dataset_id,
-            self._selected_dataset_id(),
+            selected_dataset_id,
         ):
             if candidate:
                 return candidate
@@ -1612,9 +1626,7 @@ class EngineerScreen(ttk.Frame):
                 return
             if not self._annotation_widgets_alive():
                 return
-            if self._resolve_annotation_dataset_id() != dataset_id:
-                return
-            if self.annot_image_var.get().strip() != image_name:
+            if self._annotation_dataset_id != dataset_id:
                 return
             if self._annotation_index != index:
                 return

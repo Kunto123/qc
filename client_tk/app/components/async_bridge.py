@@ -53,10 +53,16 @@ def run_async(
         try:
             result = fn(*args, **_kwargs)
             if callback is not None:
-                widget.after(0, lambda: callback(result, None))
+                try:
+                    widget.after(0, lambda: callback(result, None))
+                except Exception:
+                    return
         except Exception as exc:  # noqa: BLE001
             if callback is not None:
-                widget.after(0, lambda e=exc: callback(None, e))
+                try:
+                    widget.after(0, lambda e=exc: callback(None, e))
+                except Exception:
+                    return
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()

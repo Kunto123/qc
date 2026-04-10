@@ -532,6 +532,18 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(screen._selected_dataset_id(), "ds-2")
         screen.destroy()
 
+    def test_engineer_annotation_dataset_resolution_handles_destroyed_listbox(self) -> None:
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        screen.annot_dataset_var.set("")
+        screen._annotation_dataset_id = None
+        screen.dataset_list.destroy()
+
+        self.assertIsNone(screen._selected_dataset_id())
+        self.assertIsNone(screen._resolve_annotation_dataset_id())
+
+        screen.destroy()
+
     def test_engineer_empty_dataset_selection_keeps_annotation_context(self) -> None:
         frame = np.zeros((24, 24, 3), dtype=np.uint8)
         ok, buffer = cv2.imencode(".png", frame)
