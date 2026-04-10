@@ -90,10 +90,6 @@ class EngineerScreen(ttk.Frame):
 
         self.after_idle(self.refresh_datasets)
         self.after_idle(self.refresh_base_models)
-        self.after_idle(self.refresh_augment_jobs)
-        self.after_idle(self.refresh_training_jobs)
-        self.after_idle(self.refresh_models)
-        self.after_idle(self.refresh_profiles)
 
     def _make_scrollable_page(self, tab: ttk.Frame, key: str) -> ttk.Frame:
         scroller = ScrollableFrame(tab)
@@ -151,6 +147,10 @@ class EngineerScreen(ttk.Frame):
         if not hasattr(self, "_notebook"):
             return
         selected_tab_text = self._notebook.tab(self._notebook.select(), "text")
+        if selected_tab_text == "Training":
+            self.refresh_base_models()
+            self.refresh_augment_jobs()
+            self.refresh_training_jobs()
         if selected_tab_text == "Models":
             self._ensure_models_tab_built()
             self.refresh_models()
@@ -752,12 +752,20 @@ class EngineerScreen(ttk.Frame):
             if item_id != target_id:
                 continue
             self._ignore_next_dataset_list_selection_event = True
+            self.after_idle(self._clear_dataset_list_selection_guard)
             self.dataset_list.selection_clear(0, "end")
             self.dataset_list.selection_set(index)
             self.dataset_list.see(index)
-            if self._ignore_next_dataset_list_selection_event:
-                self._ignore_next_dataset_list_selection_event = False
             return
+
+    def _clear_dataset_list_selection_guard(self) -> None:
+        self._ignore_next_dataset_list_selection_event = False
+
+    def _clear_training_job_selection_guard(self) -> None:
+        self._ignore_next_training_job_selection_event = False
+
+    def _clear_dataset_version_selection_guard(self) -> None:
+        self._ignore_next_dataset_version_selection_events = 0
 
     def _dataset_id_options(self) -> list[str]:
         options: list[str] = []
@@ -889,8 +897,10 @@ class EngineerScreen(ttk.Frame):
 
     def on_dataset_selected(self) -> None:
         if self._ignore_next_dataset_list_selection_event:
-            self._ignore_next_dataset_list_selection_event = False
             return
+        self._apply_dataset_selection()
+
+    def _apply_dataset_selection(self) -> None:
         dataset = self._selected_dataset_record()
         dataset_id = str(dataset.get("id")) if dataset else None
         if not dataset_id:
@@ -951,15 +961,14 @@ class EngineerScreen(ttk.Frame):
         if selected_dataset is None and items:
             selected_dataset = items[0]
             self._ignore_next_dataset_list_selection_event = True
+            self.after_idle(self._clear_dataset_list_selection_guard)
             self.dataset_list.selection_clear(0, "end")
             self.dataset_list.selection_set(0)
             self.dataset_list.see(0)
         self.dataset_summary.reset()
         self._update_dataset_summary(selected_dataset)
         if selected_dataset is not None:
-            if self._ignore_next_dataset_list_selection_event:
-                self._ignore_next_dataset_list_selection_event = False
-                self.on_dataset_selected()
+            self._apply_dataset_selection()
         else:
             self._reset_dataset_context()
 
@@ -972,12 +981,11 @@ class EngineerScreen(ttk.Frame):
             if item_id != dataset_id:
                 continue
             self._ignore_next_dataset_list_selection_event = True
+            self.after_idle(self._clear_dataset_list_selection_guard)
             self.dataset_list.selection_clear(0, "end")
             self.dataset_list.selection_set(index)
             self.dataset_list.see(index)
-            if self._ignore_next_dataset_list_selection_event:
-                self._ignore_next_dataset_list_selection_event = False
-                self.on_dataset_selected()
+            self._apply_dataset_selection()
             return
 
     def _restore_annotation_context_after_toolbar_change(self) -> None:
@@ -1143,14 +1151,14 @@ class EngineerScreen(ttk.Frame):
                         selected_index = index
                         break
             self._ignore_next_dataset_version_selection_events += 2
+            self.after_idle(self._clear_dataset_version_selection_guard)
             self.dataset_versions.selection_clear(0, "end")
             self.dataset_versions.selection_set(selected_index)
             self.dataset_versions.see(selected_index)
             selected_version = visible_versions[selected_index]
-            if self.train_dataset_version.current() != selected_index:
-                self.train_dataset_version.current(selected_index)
-            if self._ignore_next_dataset_version_selection_events > 0:
-                self._ignore_next_dataset_version_selection_events = 0
+            selected_value = self._version_lookup_key(selected_version)
+            if self.train_dataset_version.get().strip() != selected_value:
+                self.train_dataset_version.set(selected_value)
             self._active_dataset_version_id = str(selected_version.get("id") or "").strip() or None
             self._update_dataset_version_summary(selected_version)
         else:
@@ -1889,11 +1897,10 @@ class EngineerScreen(ttk.Frame):
         self._refresh_train_dataset_version_info()
         if items:
             self._ignore_next_training_job_selection_event = True
+            self.after_idle(self._clear_training_job_selection_guard)
             if not self._select_training_job_in_listbox(self._active_training_job_id):
                 self._select_training_job_in_listbox(items[0].get("id"))
-            if self._ignore_next_training_job_selection_event:
-                self._ignore_next_training_job_selection_event = False
-                self.on_training_selected()
+            self._apply_training_selected()
         else:
             self._active_training_job_id = None
             self.training_summary.reset()
@@ -1943,8 +1950,10 @@ class EngineerScreen(ttk.Frame):
 
     def on_training_selected(self):
         if self._ignore_next_training_job_selection_event:
-            self._ignore_next_training_job_selection_event = False
             return
+        self._apply_training_selected()
+
+    def _apply_training_selected(self):
         index = self._selected_listbox_index(self.train_jobs)
         if index is None or index >= len(self._training_jobs):
             self.training_summary.reset()
