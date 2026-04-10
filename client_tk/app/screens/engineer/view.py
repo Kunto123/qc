@@ -60,6 +60,8 @@ class EngineerScreen(ttk.Frame):
         self._ignore_next_dataset_list_selection_event: bool = False
         self._ignore_next_training_job_selection_event: bool = False
         self._ignore_next_dataset_version_selection_events: int = 0
+        self._augment_jobs_refresh_sequence = 0
+        self._training_jobs_refresh_sequence = 0
 
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True)
@@ -127,9 +129,16 @@ class EngineerScreen(ttk.Frame):
     def _on_resize(self, _event=None) -> None:
         self.after_idle(self._apply_responsive_layout)
 
+    def _should_use_compact_layout(self, width: int) -> bool:
+        if self._layout_compact is None:
+            return width < 1360
+        if self._layout_compact:
+            return width < 1400
+        return width < 1320
+
     def _apply_responsive_layout(self) -> None:
         width = max(self.winfo_width(), self.winfo_toplevel().winfo_width())
-        compact = width < 1360
+        compact = self._should_use_compact_layout(width)
         if compact == self._layout_compact:
             return
         self._layout_compact = compact
@@ -148,7 +157,8 @@ class EngineerScreen(ttk.Frame):
             return
         selected_tab_text = self._notebook.tab(self._notebook.select(), "text")
         if selected_tab_text == "Training":
-            self.refresh_base_models()
+            if not self._base_model_cache or not self.train_base_model["values"]:
+                self.refresh_base_models()
             self.refresh_augment_jobs()
             self.refresh_training_jobs()
         if selected_tab_text == "Models":
@@ -1771,16 +1781,81 @@ class EngineerScreen(ttk.Frame):
             self.annotation_canvas.request_redraw()
 
     def refresh_augment_jobs(self):
-        try:
-            items = self.api.list_augment_jobs()
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Augment", str(exc))
-            return
+        self._augment_jobs_refresh_sequence += 1
+        refresh_sequence = self._augment_jobs_refresh_sequence
+
+        def _load():
+            return self.api.list_augment_jobs()
+
+        def _done(result, error):
+            if refresh_sequence != self._augment_jobs_refresh_sequence:
+                return
+            if not self.winfo_exists():
+                return
+            if error:
+                messagebox.showerror("Augment", str(error))
+                return
+            if not isinstance(result, list):
+                return
+            self._apply_augment_jobs(result)
+
+        run_async(self, _load, callback=_done)
+
+    def _apply_augment_jobs(self, items: list[dict]) -> None:
         self.augment_jobs.delete(0, "end")
         for item in items:
             transforms = ", ".join(item.get("transforms") or [])
             multiplier = item.get("multiplier") or 1
             self.augment_jobs.insert("end", f"{item.get('id')} | {item.get('dataset_id')} | {item.get('status')} | x{multiplier} | {transforms}")
+
+    def refresh_training_jobs(self):
+        self._refresh_train_dataset_version_info()
+        self._training_jobs_refresh_sequence += 1
+        refresh_sequence = self._training_jobs_refresh_sequence
+
+        def _load():
+            return self.api.list_training_jobs()
+
+        def _done(result, error):
+            if refresh_sequence != self._training_jobs_refresh_sequence:
+                return
+            if not self.winfo_exists():
+                return
+            if error:
+                messagebox.showerror("Training", str(error))
+                return
+            if not isinstance(result, list):
+                return
+            self._apply_training_jobs(result)
+
+        run_async(self, _load, callback=_done)
+
+    def _apply_training_jobs(self, items: list[dict]) -> None:
+        self._training_jobs = items
+        try:
+            self.train_jobs.delete(0, "end")
+        except Exception:
+            return
+        for item in items:
+            device_mode = item.get("requested_device_mode") or item.get("device_mode") or item.get("params", {}).get("device_mode") or "auto"
+            effective_device = item.get("effective_device") or "pending"
+            base_model = item.get("base_model_display_name") or item.get("base_model") or "-"
+            version_label = item.get("dataset_version_display_label") or item.get("dataset_version_name") or item.get("dataset_version_id") or "-"
+            self.train_jobs.insert(
+                "end",
+                f"{item['id']} | {item['dataset_id']} | {version_label} | {item['status']} | {base_model} | {device_mode} -> {effective_device}",
+            )
+
+        if items:
+            self._ignore_next_training_job_selection_event = True
+            self.after_idle(self._clear_training_job_selection_guard)
+            if not self._select_training_job_in_listbox(self._active_training_job_id):
+                self._select_training_job_in_listbox(items[0].get("id"))
+            self._apply_training_selected()
+        else:
+            self._active_training_job_id = None
+            self.training_summary.reset()
+            self.training_detail.set_payload({})
 
     def create_augment_job(self):
         raw_transforms = self.augment_transforms.get().strip()
@@ -1874,37 +1949,6 @@ class EngineerScreen(ttk.Frame):
             if formatted != "-":
                 return f"{label} {formatted}"
         return "-"
-
-    def refresh_training_jobs(self):
-        try:
-            items = self.api.list_training_jobs()
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Training", str(exc))
-            return
-        self._training_jobs = items
-        self.train_jobs.delete(0, "end")
-        for item in items:
-            device_mode = item.get("requested_device_mode") or item.get("device_mode") or item.get("params", {}).get("device_mode") or "auto"
-            effective_device = item.get("effective_device") or "pending"
-            base_model = item.get("base_model_display_name") or item.get("base_model") or "-"
-            version_label = item.get("dataset_version_display_label") or item.get("dataset_version_name") or item.get("dataset_version_id") or "-"
-            self.train_jobs.insert(
-                "end",
-                f"{item['id']} | {item['dataset_id']} | {version_label} | {item['status']} | {base_model} | {device_mode} -> {effective_device}",
-            )
-
-        self.refresh_base_models()
-        self._refresh_train_dataset_version_info()
-        if items:
-            self._ignore_next_training_job_selection_event = True
-            self.after_idle(self._clear_training_job_selection_guard)
-            if not self._select_training_job_in_listbox(self._active_training_job_id):
-                self._select_training_job_in_listbox(items[0].get("id"))
-            self._apply_training_selected()
-        else:
-            self._active_training_job_id = None
-            self.training_summary.reset()
-            self.training_detail.set_payload({})
 
     def create_training_job(self):
         spec = self._selected_base_model_spec()

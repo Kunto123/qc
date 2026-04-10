@@ -291,6 +291,21 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(str(screen.annot_apply_class_button["state"]), "disabled")
         screen.destroy()
 
+    def test_engineer_layout_hysteresis_prevents_threshold_flapping(self) -> None:
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+
+        screen._layout_compact = False
+        self.assertFalse(screen._should_use_compact_layout(1350))
+        self.assertFalse(screen._should_use_compact_layout(1330))
+        self.assertTrue(screen._should_use_compact_layout(1310))
+
+        screen._layout_compact = True
+        self.assertTrue(screen._should_use_compact_layout(1380))
+        self.assertFalse(screen._should_use_compact_layout(1410))
+
+        screen.destroy()
+
     def test_engineer_training_summary_shows_key_metrics(self) -> None:
         jobs = [
             {
