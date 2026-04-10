@@ -23,6 +23,9 @@ from client_tk.app.services.session_state import SessionState
 
 
 class _StubApi:
+    def set_token(self, token: str | None):
+        return None
+
     def list_templates(self):
         return [{"id": 1, "name": "QC Line A", "version_id": 1, "version_number": 1}]
 
@@ -155,9 +158,14 @@ class UiSmokeTest(unittest.TestCase):
         self.state.user = {"id": 1, "username": "tester"}
         self._async_patchers = [
             mock.patch("client_tk.app.screens.admin.view.run_async", new=self._run_async_sync),
+            mock.patch("client_tk.app.screens.engineer.view.run_async", new=self._run_async_sync),
+            mock.patch("client_tk.app.screens.engineer.view.ApiClient", new=self._engineer_api_client),
         ]
         for patcher in self._async_patchers:
             patcher.start()
+
+    def _engineer_api_client(self, _base_url: str):
+        return self.api
 
     def _run_async_sync(self, widget, func, *, callback=None, args=(), kwargs=None):
         try:
@@ -169,6 +177,15 @@ class UiSmokeTest(unittest.TestCase):
         if callback is not None:
             callback(result, None)
         return None
+
+    def _wait_for_engineer_annotation_load(self, screen, *, attempts: int = 6) -> None:
+        for _ in range(attempts):
+            screen.update_idletasks()
+            screen.update()
+            if getattr(screen, "annotation_canvas", None) is None:
+                continue
+            if screen.annotation_canvas._source_frame is not None and screen.annotation_canvas._photo is not None:
+                return
 
     def tearDown(self) -> None:
         for patcher in getattr(self, "_async_patchers", []):
@@ -790,7 +807,7 @@ class UiSmokeTest(unittest.TestCase):
             return_value=[],
         ):
             screen = EngineerScreen(self.root, self.api, self.state)
-            screen.update_idletasks()
+            self._wait_for_engineer_annotation_load(screen)
 
             self.assertIsNotNone(screen.annotation_canvas._photo)
 
@@ -806,6 +823,108 @@ class UiSmokeTest(unittest.TestCase):
             self.assertIsNotNone(screen.annotation_canvas._photo)
 
         screen.destroy()
+
+    def test_engineer_annotation_image_cache_reuses_loaded_image(self) -> None:
+        frame = np.zeros((24, 24, 3), dtype=np.uint8)
+        ok, buffer = cv2.imencode(".png", frame)
+        self.assertTrue(ok)
+        image_bytes = buffer.tobytes()
+
+        download_calls: list[tuple[str, str]] = []
+
+        def download_dataset_image(dataset_id: str, image_name: str):
+            download_calls.append((dataset_id, image_name))
+            return image_bytes
+
+        with mock.patch.object(
+            self.api,
+            "list_datasets",
+            return_value=[{"id": "ds-cache", "name": "Dataset Cache"}],
+        ), mock.patch.object(
+            self.api,
+            "list_dataset_files",
+            return_value=[{"name": "sample.png", "path": "Z:/missing/sample.png", "size": 123}],
+        ), mock.patch.object(
+            self.api,
+            "download_dataset_image",
+            side_effect=download_dataset_image,
+        ), mock.patch.object(
+            self.api,
+            "get_annotation",
+            return_value={"labels": []},
+        ), mock.patch.object(
+            self.api,
+            "list_dataset_versions",
+            return_value=[],
+        ):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            self._wait_for_engineer_annotation_load(screen)
+
+            self.assertEqual(download_calls, [("ds-cache", "sample.png")])
+
+            screen._load_annotation_for_index(0, save_current=False)
+            screen.update_idletasks()
+
+            self.assertEqual(download_calls, [("ds-cache", "sample.png")])
+            self.assertEqual(len(screen._annotation_asset_cache), 1)
+
+            screen.destroy()
+
+    def test_engineer_annotation_image_cache_is_bounded(self) -> None:
+        frame = np.zeros((24, 24, 3), dtype=np.uint8)
+        ok, buffer = cv2.imencode(".png", frame)
+        self.assertTrue(ok)
+        image_bytes = buffer.tobytes()
+
+        download_calls: list[tuple[str, str]] = []
+
+        def list_dataset_files(dataset_id: str, target: str = "images"):
+            return [
+                {"name": f"sample-{index}.png", "path": f"Z:/missing/sample-{index}.png", "size": 123}
+                for index in range(3)
+            ]
+
+        def download_dataset_image(dataset_id: str, image_name: str):
+            download_calls.append((dataset_id, image_name))
+            return image_bytes
+
+        with mock.patch.object(
+            self.api,
+            "list_datasets",
+            return_value=[{"id": "ds-bound", "name": "Dataset Bound"}],
+        ), mock.patch.object(
+            self.api,
+            "list_dataset_files",
+            side_effect=list_dataset_files,
+        ), mock.patch.object(
+            self.api,
+            "download_dataset_image",
+            side_effect=download_dataset_image,
+        ), mock.patch.object(
+            self.api,
+            "get_annotation",
+            return_value={"labels": []},
+        ), mock.patch.object(
+            self.api,
+            "list_dataset_versions",
+            return_value=[],
+        ):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen._annotation_cache_max_items = 2
+            self._wait_for_engineer_annotation_load(screen)
+
+            screen._load_annotation_for_index(1, save_current=False)
+            screen.update_idletasks()
+            screen._load_annotation_for_index(2, save_current=False)
+            screen.update_idletasks()
+
+            self.assertLessEqual(len(screen._annotation_asset_cache), 2)
+            cached_keys = list(screen._annotation_asset_cache.keys())
+            self.assertNotIn(("ds-bound", "sample-0.png"), cached_keys)
+            self.assertIn(("ds-bound", "sample-2.png"), cached_keys)
+            self.assertGreaterEqual(len(download_calls), 3)
+
+            screen.destroy()
 
     def test_engineer_annotation_class_combines_sources_and_edits_selected_label(self) -> None:
         frame = np.zeros((24, 24, 3), dtype=np.uint8)

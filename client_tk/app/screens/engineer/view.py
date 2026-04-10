@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+from collections import OrderedDict
 import base64
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
@@ -11,6 +13,8 @@ import numpy as np
 
 from backend.app.services.calibration import CalibrationService
 from backend.app.core.model_catalog import list_base_models as catalog_list_base_models
+from client_tk.app.api_client import ApiClient
+from client_tk.app.components.async_bridge import run_async
 from client_tk.app.components.annotation_canvas import AnnotationCanvas
 from client_tk.app.components.live_view import LiveView
 from client_tk.app.components.roi_picker_canvas import RoiPickerCanvas
@@ -46,6 +50,11 @@ class EngineerScreen(ttk.Frame):
         self._annotation_manual_classes: list[str] = []
         self._annotation_selected_label_index: int | None = None
         self._active_dataset_version_id: str | None = None
+        self._annotation_asset_cache: OrderedDict[tuple[str, str], dict] = OrderedDict()
+        self._annotation_cache_bytes = 0
+        self._annotation_cache_max_items = 8
+        self._annotation_cache_max_bytes = 48 * 1024 * 1024
+        self._annotation_load_sequence = 0
         self._tab_scrollers: dict[str, ScrollableFrame] = {}
         self._layout_compact: bool | None = None
         self._ignore_next_dataset_list_selection_event: bool = False
@@ -75,7 +84,7 @@ class EngineerScreen(ttk.Frame):
         self.bind("<Configure>", self._on_resize)
         self.after_idle(self._apply_responsive_layout)
 
-        self.after_idle(lambda: self.refresh_datasets(defer_context_load=True))
+        self.after_idle(self.refresh_datasets)
         self.after_idle(self.refresh_base_models)
         self.after_idle(self.refresh_augment_jobs)
         self.after_idle(self.refresh_training_jobs)
@@ -876,7 +885,7 @@ class EngineerScreen(ttk.Frame):
         self.refresh_dataset_versions()
         self._sync_annotation_class_name()
 
-    def refresh_datasets(self, *, defer_context_load: bool = False):
+    def refresh_datasets(self):
         try:
             items = self.api.list_datasets()
         except Exception as exc:  # noqa: BLE001
@@ -906,10 +915,7 @@ class EngineerScreen(ttk.Frame):
         self.dataset_summary.reset()
         self._update_dataset_summary(selected_dataset)
         if selected_dataset is not None:
-            if defer_context_load:
-                self.after_idle(self.on_dataset_selected)
-            else:
-                self.on_dataset_selected()
+            self.on_dataset_selected()
         else:
             self._reset_dataset_context()
 
@@ -1171,6 +1177,7 @@ class EngineerScreen(ttk.Frame):
         self._load_annotation_for_index(index, save_current=False)
 
     def _reset_annotation_state(self) -> None:
+        self._annotation_load_sequence += 1
         self._annotation_files = []
         self._annotation_index = None
         self._annotation_dataset_id = None
@@ -1392,6 +1399,136 @@ class EngineerScreen(ttk.Frame):
             return self._annotation_index
         return 0
 
+    def _annotation_cache_key(self, dataset_id: str | None, image_name: str | None) -> tuple[str, str] | None:
+        dataset_key = str(dataset_id or "").strip()
+        image_key = str(image_name or "").strip()
+        if not dataset_key or not image_key:
+            return None
+        return dataset_key, image_key
+
+    def _annotation_cache_entry_size(self, asset: dict) -> int:
+        frame = asset.get("frame")
+        return int(getattr(frame, "nbytes", 0) or 0)
+
+    def _annotation_cache_get(self, key: tuple[str, str] | None) -> dict | None:
+        if key is None:
+            return None
+        asset = self._annotation_asset_cache.get(key)
+        if asset is None:
+            return None
+        self._annotation_asset_cache.move_to_end(key)
+        return asset
+
+    def _annotation_cache_store(self, key: tuple[str, str] | None, asset: dict) -> None:
+        if key is None:
+            return
+        frame = asset.get("frame")
+        if frame is None:
+            return
+        cache_size = self._annotation_cache_entry_size(asset)
+        if cache_size > self._annotation_cache_max_bytes:
+            return
+
+        stored = dict(asset)
+        stored["cache_size"] = cache_size
+
+        existing = self._annotation_asset_cache.pop(key, None)
+        if existing is not None:
+            self._annotation_cache_bytes -= int(existing.get("cache_size") or 0)
+
+        self._annotation_asset_cache[key] = stored
+        self._annotation_cache_bytes += cache_size
+        while (
+            len(self._annotation_asset_cache) > self._annotation_cache_max_items
+            or self._annotation_cache_bytes > self._annotation_cache_max_bytes
+        ):
+            evicted_key, evicted_asset = self._annotation_asset_cache.popitem(last=False)
+            self._annotation_cache_bytes -= int(evicted_asset.get("cache_size") or 0)
+
+    def _annotation_cache_update_labels(self, dataset_id: str | None, image_name: str | None, labels: list[dict]) -> None:
+        key = self._annotation_cache_key(dataset_id, image_name)
+        asset = self._annotation_asset_cache.get(key)
+        if asset is None:
+            return
+        updated = dict(asset)
+        updated["labels"] = [copy.deepcopy(item) for item in labels if isinstance(item, dict)]
+        self._annotation_asset_cache[key] = updated
+        self._annotation_asset_cache.move_to_end(key)
+
+    def _fetch_annotation_asset(self, dataset_id: str, image_name: str, image_path: str) -> dict:
+        base_url = str(getattr(self.state, "base_url", None) or getattr(self.api, "base_url", "") or "").strip()
+        worker_api = ApiClient(base_url)
+        worker_api.set_token(getattr(self.state, "token", None))
+
+        frame = None
+        loaded_source = ""
+
+        try:
+            image_bytes = worker_api.download_dataset_image(dataset_id, image_name)
+        except Exception:
+            image_bytes = b""
+        if image_bytes:
+            raw = np.frombuffer(image_bytes, np.uint8)
+            if raw.size > 0:
+                frame = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    loaded_source = "backend"
+
+        if frame is None and image_path:
+            path = Path(image_path)
+            if path.exists():
+                try:
+                    raw_bytes = path.read_bytes()
+                except OSError:
+                    raw_bytes = b""
+                if raw_bytes:
+                    raw = np.frombuffer(raw_bytes, np.uint8)
+                    if raw.size > 0:
+                        frame = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            loaded_source = "local"
+
+        if frame is None:
+            raise ValueError(f"{image_name or 'image'} could not be loaded")
+
+        labels_payload: list[dict] = []
+        try:
+            payload = worker_api.get_annotation(dataset_id, image_name)
+        except Exception:
+            payload = {"labels": []}
+        labels = payload.get("labels") if isinstance(payload, dict) else []
+        if isinstance(labels, list):
+            labels_payload = [copy.deepcopy(item) for item in labels if isinstance(item, dict)]
+
+        return {
+            "dataset_id": dataset_id,
+            "image_name": image_name,
+            "image_path": image_path,
+            "frame": frame,
+            "labels": labels_payload,
+            "loaded_source": loaded_source,
+        }
+
+    def _apply_annotation_asset(self, asset: dict, *, base_status: str, source_label: str) -> None:
+        frame = asset.get("frame")
+        if frame is None:
+            return
+        image_name = str(asset.get("image_name") or "").strip()
+        labels_payload = asset.get("labels") if isinstance(asset.get("labels"), list) else []
+
+        self.annotation_canvas.load_bgr(frame, image_name=image_name, redraw=False)
+        self.annotation_canvas.set_image_name(image_name)
+        self.annotation_canvas.set_class_name(self._annotation_class_name, redraw=False)
+        self.annotation_canvas.set_labels(labels_payload, redraw=False)
+        self._sync_annotation_class_name(labels=labels_payload, redraw=False)
+        self._sync_annotation_mode(redraw=False)
+        self.annotation_canvas.redraw()
+        if source_label:
+            self.annotation_status.set(f"{base_status} | loaded via {source_label}")
+        else:
+            self.annotation_status.set(base_status)
+        self._update_annotation_nav_state()
+
     def _load_annotation_for_index(self, index: int, *, save_current: bool = True) -> None:
         if index < 0 or index >= len(self._annotation_files):
             return
@@ -1405,43 +1542,45 @@ class EngineerScreen(ttk.Frame):
         self._annotation_index = index
         self.annot_image_var.set(image_name or "-")
         base_status = f"{index + 1} / {len(self._annotation_files)} images"
-        self.annotation_status.set(base_status)
-        loaded = False
-        loaded_source = ""
-        if dataset_id and image_name:
-            try:
-                image_bytes = self.api.download_dataset_image(dataset_id, image_name)
-            except Exception:
-                image_bytes = b""
-            if image_bytes:
-                loaded = self.annotation_canvas.load_image_bytes(image_bytes, image_name=image_name, redraw=False)
-                if loaded:
-                    loaded_source = "backend"
-        if not loaded and image_path:
-            loaded = self.annotation_canvas.load_image_path(image_path, redraw=False)
-            if loaded:
-                loaded_source = "local"
-        if not loaded:
-            self.annotation_canvas.clear()
+        cache_key = self._annotation_cache_key(dataset_id, image_name)
+        cached_asset = self._annotation_cache_get(cache_key)
+        self._annotation_load_sequence += 1
+        load_sequence = self._annotation_load_sequence
+
+        if cached_asset is not None:
+            self._apply_annotation_asset(cached_asset, base_status=base_status, source_label="cache")
+            return
+
+        self.annotation_canvas.clear()
+        self.annotation_status.set(f"{base_status} | loading...")
+
+        if not dataset_id or not image_name:
             self.annotation_status.set(f"{image_name or 'image'} could not be loaded")
-        elif loaded_source:
-            self.annotation_status.set(f"{base_status} | loaded via {loaded_source}")
-        self.annotation_canvas.set_image_name(image_name)
-        self.annotation_canvas.set_class_name(self._annotation_class_name, redraw=False)
-        labels_payload: list[dict] = []
-        if dataset_id and image_name:
-            try:
-                payload = self.api.get_annotation(dataset_id, image_name)
-            except Exception:
-                payload = {"labels": []}
-            labels = payload.get("labels") if isinstance(payload, dict) else []
-            if isinstance(labels, list):
-                labels_payload = labels
-        self.annotation_canvas.set_labels(labels_payload, redraw=False)
-        self._sync_annotation_class_name(labels=labels_payload, redraw=False)
-        self._sync_annotation_mode(redraw=False)
-        self.annotation_canvas.redraw()
-        self._update_annotation_nav_state()
+            return
+
+        def _load():
+            return self._fetch_annotation_asset(dataset_id, image_name, image_path)
+
+        def _done(result, error):
+            if load_sequence != self._annotation_load_sequence:
+                return
+            if self._resolve_annotation_dataset_id() != dataset_id:
+                return
+            if self.annot_image_var.get().strip() != image_name:
+                return
+            if self._annotation_index != index:
+                return
+            if error:
+                self.annotation_status.set(f"{image_name or 'image'} could not be loaded")
+                return
+            if not isinstance(result, dict):
+                self.annotation_status.set(f"{image_name or 'image'} could not be loaded")
+                return
+            self._annotation_cache_store(cache_key, result)
+            source_label = str(result.get("loaded_source") or "").strip() or "loaded"
+            self._apply_annotation_asset(result, base_status=base_status, source_label=source_label)
+
+        run_async(self, _load, callback=_done)
 
     def refresh_annotation_images(self) -> None:
         dataset_id = self._resolve_annotation_dataset_id()
@@ -1499,6 +1638,7 @@ class EngineerScreen(ttk.Frame):
             if not silent:
                 messagebox.showerror("Annotate", str(exc))
             return False
+        self._annotation_cache_update_labels(dataset_id, image_name, payload)
         self.annotation_status.set(f"Saved {image_name}")
         return True
 
