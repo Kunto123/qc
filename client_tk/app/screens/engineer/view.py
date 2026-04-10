@@ -60,7 +60,10 @@ class EngineerScreen(ttk.Frame):
         self._ignore_next_dataset_list_selection_event: bool = False
         self._ignore_next_training_job_selection_event: bool = False
         self._ignore_next_dataset_version_selection_events: int = 0
+        self._base_models_refresh_sequence = 0
         self._augment_jobs_refresh_sequence = 0
+        self._models_refresh_sequence = 0
+        self._profiles_refresh_sequence = 0
         self._training_jobs_refresh_sequence = 0
 
         notebook = ttk.Notebook(self)
@@ -162,11 +165,15 @@ class EngineerScreen(ttk.Frame):
             self.refresh_augment_jobs()
             self.refresh_training_jobs()
         if selected_tab_text == "Models":
-            self._ensure_models_tab_built()
-            self.refresh_models()
+            if not self._models_tab_built:
+                self._ensure_models_tab_built()
+            else:
+                self.refresh_models()
         elif selected_tab_text == "Calibration":
-            self._ensure_calibration_tab_built()
-            self.refresh_profiles()
+            if not self._calibration_tab_built:
+                self._ensure_calibration_tab_built()
+            else:
+                self.refresh_profiles()
         self.after_idle(self._apply_responsive_layout)
 
     def _layout_data_annotation(self, *, compact: bool) -> None:
@@ -387,7 +394,6 @@ class EngineerScreen(ttk.Frame):
         data_scroller = self._tab_scrollers.get("data")
         if data_scroller is not None:
             data_scroller.bind("<<ScrollableFrameScrolled>>", self._on_data_tab_scrolled, add="+")
-            data_scroller.canvas.bind("<Configure>", self._on_data_tab_scrolled, add="+")
         self._layout_split_shell(self.data_top_container, self.dataset_panel, self.upload_panel, compact=False, left_weight=2, right_weight=2)
 
     def _build_training_tab(self) -> None:
@@ -2060,13 +2066,33 @@ class EngineerScreen(ttk.Frame):
         )
 
     def refresh_base_models(self) -> None:
-        try:
-            items = self.api.list_base_models()
-        except Exception:
+        self._base_models_refresh_sequence += 1
+        refresh_sequence = self._base_models_refresh_sequence
+
+        def _load():
             try:
-                items = catalog_list_base_models()
+                return self.api.list_base_models()
             except Exception:
-                items = []
+                try:
+                    return catalog_list_base_models()
+                except Exception:
+                    return []
+
+        def _done(result, error):
+            if refresh_sequence != self._base_models_refresh_sequence:
+                return
+            if not self.winfo_exists():
+                return
+            if error:
+                messagebox.showerror("Training", str(error))
+                return
+            if not isinstance(result, list):
+                return
+            self._apply_base_models(result)
+
+        run_async(self, _load, callback=_done)
+
+    def _apply_base_models(self, items: list[dict]) -> None:
         self._base_model_cache = list(items)
         self._base_model_lookup = {}
         values: list[str] = []
@@ -2089,11 +2115,27 @@ class EngineerScreen(ttk.Frame):
         self._refresh_base_model_info()
 
     def refresh_models(self):
-        try:
-            items = self.api.list_models()
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Models", str(exc))
-            return
+        self._models_refresh_sequence += 1
+        refresh_sequence = self._models_refresh_sequence
+
+        def _load():
+            return self.api.list_models()
+
+        def _done(result, error):
+            if refresh_sequence != self._models_refresh_sequence:
+                return
+            if not self.winfo_exists():
+                return
+            if error:
+                messagebox.showerror("Models", str(error))
+                return
+            if not isinstance(result, list):
+                return
+            self._apply_models(result)
+
+        run_async(self, _load, callback=_done)
+
+    def _apply_models(self, items: list[dict]) -> None:
         self._model_cache = items
         if not hasattr(self, "models_list"):
             return
@@ -2353,11 +2395,27 @@ class EngineerScreen(ttk.Frame):
         messagebox.showinfo("Calibrate", "Profile saved.")
 
     def refresh_profiles(self):
-        try:
-            items = self.api.list_profiles()
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Profiles", str(exc))
-            return
+        self._profiles_refresh_sequence += 1
+        refresh_sequence = self._profiles_refresh_sequence
+
+        def _load():
+            return self.api.list_profiles()
+
+        def _done(result, error):
+            if refresh_sequence != self._profiles_refresh_sequence:
+                return
+            if not self.winfo_exists():
+                return
+            if error:
+                messagebox.showerror("Profiles", str(error))
+                return
+            if not isinstance(result, list):
+                return
+            self._apply_profiles(result)
+
+        run_async(self, _load, callback=_done)
+
+    def _apply_profiles(self, items: list[dict]) -> None:
         self._profile_cache = items
         if not hasattr(self, "profiles_list"):
             return

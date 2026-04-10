@@ -306,6 +306,82 @@ class UiSmokeTest(unittest.TestCase):
 
         screen.destroy()
 
+    def test_engineer_training_tab_refreshes_base_models_once_on_empty_cache(self) -> None:
+        base_model_calls = 0
+
+        def list_base_models(*_args, **_kwargs):
+            nonlocal base_model_calls
+            base_model_calls += 1
+            return [
+                {
+                    "id": "yolov5s",
+                    "display_label": "YOLOv5 Small (yolov5s)",
+                    "display_name": "YOLOv5 Small",
+                    "family": "yolov5",
+                    "family_label": "YOLOv5",
+                    "variant": "s",
+                    "variant_label": "Small",
+                    "runtime": "ultralytics",
+                    "weights_name": "yolov5s.pt",
+                }
+            ]
+
+        with mock.patch.object(self.api, "list_base_models", side_effect=list_base_models):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            base_model_calls = 0
+            screen._base_model_cache = []
+            screen.train_base_model.configure(values=())
+            screen.train_base_model.set("")
+
+            screen._notebook.select(screen._notebook.tabs()[1])
+            screen._on_notebook_tab_changed()
+
+            self.assertEqual(base_model_calls, 1)
+            self.assertTrue(screen.train_base_model.get())
+
+        screen.destroy()
+
+    def test_engineer_models_tab_refreshes_once_on_first_open(self) -> None:
+        model_calls = 0
+
+        def list_models(*_args, **_kwargs):
+            nonlocal model_calls
+            model_calls += 1
+            return [{"id": "m1", "name": "Model 1", "path": "models/m1.pt"}]
+
+        with mock.patch.object(self.api, "list_models", side_effect=list_models):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+
+            screen._notebook.select(screen._notebook.tabs()[2])
+            screen._on_notebook_tab_changed()
+
+            self.assertEqual(model_calls, 1)
+            self.assertEqual(len(screen._model_cache), 1)
+
+        screen.destroy()
+
+    def test_engineer_calibration_tab_refreshes_once_on_first_open(self) -> None:
+        profile_calls = 0
+
+        def list_profiles(*_args, **_kwargs):
+            nonlocal profile_calls
+            profile_calls += 1
+            return [{"id": "p1", "name": "Profile 1", "profile": {"colorspace": "LAB"}}]
+
+        with mock.patch.object(self.api, "list_profiles", side_effect=list_profiles):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+
+            screen._notebook.select(screen._notebook.tabs()[3])
+            screen._on_notebook_tab_changed()
+
+            self.assertEqual(profile_calls, 1)
+            self.assertEqual(len(screen._profile_cache), 1)
+
+        screen.destroy()
+
     def test_engineer_training_summary_shows_key_metrics(self) -> None:
         jobs = [
             {
