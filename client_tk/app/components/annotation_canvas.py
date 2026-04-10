@@ -79,7 +79,7 @@ class AnnotationCanvas(ttk.LabelFrame):
         self.on_labels_changed: Callable[[list[dict]], None] | None = None
         self.on_selection_changed: Callable[[dict | None, int | None], None] | None = None
 
-    def set_mode(self, mode: str) -> None:
+    def set_mode(self, mode: str, *, redraw: bool = True) -> None:
         mode_name = str(mode or "bbox").strip().lower()
         if mode_name not in {"bbox", "polygon"}:
             mode_name = "bbox"
@@ -88,48 +88,54 @@ class AnnotationCanvas(ttk.LabelFrame):
         self._mode = mode_name
         self._clear_draft()
         self._clear_resize_state()
-        self.redraw()
+        if redraw:
+            self.redraw()
 
-    def set_class_name(self, class_name: str) -> None:
+    def set_class_name(self, class_name: str, *, redraw: bool = True) -> None:
         self._class_name = str(class_name or "").strip() or "object"
         if self._source_frame is not None:
-            self.redraw()
+            if redraw:
+                self.redraw()
 
     def set_image_name(self, image_name: str) -> None:
         self._image_name = str(image_name or "").strip()
 
-    def load_bgr(self, frame: np.ndarray | None, *, image_name: str | None = None) -> None:
+    def load_bgr(self, frame: np.ndarray | None, *, image_name: str | None = None, redraw: bool = True) -> None:
         self._source_frame = frame.copy() if frame is not None else None
         if image_name is not None:
             self.set_image_name(image_name)
         self._clear_draft()
-        self.redraw()
+        if redraw:
+            self.redraw()
 
-    def load_image_path(self, image_path: str | Path) -> bool:
+    def load_image_path(self, image_path: str | Path, *, redraw: bool = True) -> bool:
         path = Path(image_path)
         frame = self._read_image(path)
         self._image_name = path.name
         self._source_frame = frame
         self._clear_draft()
-        self.redraw()
+        if redraw:
+            self.redraw()
         return frame is not None
 
-    def load_image_bytes(self, content: bytes, *, image_name: str | None = None) -> bool:
+    def load_image_bytes(self, content: bytes, *, image_name: str | None = None, redraw: bool = True) -> bool:
         if image_name is not None:
             self.set_image_name(image_name)
         frame = self._read_image_bytes(content)
         self._source_frame = frame
         self._clear_draft()
-        self.redraw()
+        if redraw:
+            self.redraw()
         return frame is not None
 
-    def set_labels(self, labels: list[dict] | None) -> None:
+    def set_labels(self, labels: list[dict] | None, *, redraw: bool = True) -> None:
         self._labels = [copy.deepcopy(item) for item in labels or [] if isinstance(item, dict)]
         self._selected_label_index = None
         self._clear_draft()
         self._clear_resize_state()
         self._notify_selection_changed()
-        self.redraw()
+        if redraw:
+            self.redraw()
 
     def get_labels(self) -> list[dict]:
         return [copy.deepcopy(item) for item in self._labels]

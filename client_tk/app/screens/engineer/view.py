@@ -75,12 +75,12 @@ class EngineerScreen(ttk.Frame):
         self.bind("<Configure>", self._on_resize)
         self.after_idle(self._apply_responsive_layout)
 
-        self.refresh_datasets()
-        self.refresh_base_models()
-        self.refresh_augment_jobs()
-        self.refresh_training_jobs()
-        self.refresh_models()
-        self.refresh_profiles()
+        self.after_idle(lambda: self.refresh_datasets(defer_context_load=True))
+        self.after_idle(self.refresh_base_models)
+        self.after_idle(self.refresh_augment_jobs)
+        self.after_idle(self.refresh_training_jobs)
+        self.after_idle(self.refresh_models)
+        self.after_idle(self.refresh_profiles)
 
     def _make_scrollable_page(self, tab: ttk.Frame, key: str) -> ttk.Frame:
         scroller = ScrollableFrame(tab)
@@ -876,7 +876,7 @@ class EngineerScreen(ttk.Frame):
         self.refresh_dataset_versions()
         self._sync_annotation_class_name()
 
-    def refresh_datasets(self):
+    def refresh_datasets(self, *, defer_context_load: bool = False):
         try:
             items = self.api.list_datasets()
         except Exception as exc:  # noqa: BLE001
@@ -906,7 +906,10 @@ class EngineerScreen(ttk.Frame):
         self.dataset_summary.reset()
         self._update_dataset_summary(selected_dataset)
         if selected_dataset is not None:
-            self.on_dataset_selected()
+            if defer_context_load:
+                self.after_idle(self.on_dataset_selected)
+            else:
+                self.on_dataset_selected()
         else:
             self._reset_dataset_context()
 
@@ -1205,16 +1208,20 @@ class EngineerScreen(ttk.Frame):
                 return candidate
         return None
 
-    def _sync_annotation_mode(self) -> None:
+    def _sync_annotation_mode(self, *, redraw: bool = True) -> None:
         if not hasattr(self, "annotation_canvas"):
             return
         mode = (self.annot_shape.get().strip() or "bbox").lower()
         if mode not in {"bbox", "polygon"}:
             mode = "bbox"
-        self.annotation_canvas.set_mode(mode)
+        self.annotation_canvas.set_mode(mode, redraw=redraw)
 
     def _on_data_tab_scrolled(self, _event=None) -> None:
-        if hasattr(self, "annotation_canvas"):
+        if not hasattr(self, "annotation_canvas"):
+            return
+        if self.annotation_canvas._source_frame is None:
+            return
+        if self.annotation_canvas._photo is None or self.annotation_canvas._needs_redraw_on_map:
             self.annotation_canvas.request_redraw()
 
     def _reset_annotation_class_state(self) -> None:
@@ -1271,7 +1278,13 @@ class EngineerScreen(ttk.Frame):
                     names.append(class_name)
         return names
 
-    def _sync_annotation_class_name(self, *, preferred_class: str | None = None, labels: list[dict] | None = None) -> None:
+    def _sync_annotation_class_name(
+        self,
+        *,
+        preferred_class: str | None = None,
+        labels: list[dict] | None = None,
+        redraw: bool = True,
+    ) -> None:
         if preferred_class:
             self._ensure_manual_annotation_class(preferred_class)
 
@@ -1312,7 +1325,7 @@ class EngineerScreen(ttk.Frame):
         if hasattr(self, "annot_class_var"):
             self.annot_class_var.set(active_class)
         if hasattr(self, "annotation_canvas"):
-            self.annotation_canvas.set_class_name(active_class)
+            self.annotation_canvas.set_class_name(active_class, redraw=redraw)
 
     def _apply_class_to_active_annotation(self, class_name: str) -> bool:
         canvas_selected = self.annotation_canvas.get_selected_label_index() if hasattr(self, "annotation_canvas") else None
@@ -1401,11 +1414,11 @@ class EngineerScreen(ttk.Frame):
             except Exception:
                 image_bytes = b""
             if image_bytes:
-                loaded = self.annotation_canvas.load_image_bytes(image_bytes, image_name=image_name)
+                loaded = self.annotation_canvas.load_image_bytes(image_bytes, image_name=image_name, redraw=False)
                 if loaded:
                     loaded_source = "backend"
         if not loaded and image_path:
-            loaded = self.annotation_canvas.load_image_path(image_path)
+            loaded = self.annotation_canvas.load_image_path(image_path, redraw=False)
             if loaded:
                 loaded_source = "local"
         if not loaded:
@@ -1414,7 +1427,7 @@ class EngineerScreen(ttk.Frame):
         elif loaded_source:
             self.annotation_status.set(f"{base_status} | loaded via {loaded_source}")
         self.annotation_canvas.set_image_name(image_name)
-        self.annotation_canvas.set_class_name(self._annotation_class_name)
+        self.annotation_canvas.set_class_name(self._annotation_class_name, redraw=False)
         labels_payload: list[dict] = []
         if dataset_id and image_name:
             try:
@@ -1424,10 +1437,10 @@ class EngineerScreen(ttk.Frame):
             labels = payload.get("labels") if isinstance(payload, dict) else []
             if isinstance(labels, list):
                 labels_payload = labels
-        self.annotation_canvas.set_labels(labels_payload)
-        self._sync_annotation_class_name(labels=labels_payload)
-        self._sync_annotation_mode()
-        self.annotation_canvas.request_redraw()
+        self.annotation_canvas.set_labels(labels_payload, redraw=False)
+        self._sync_annotation_class_name(labels=labels_payload, redraw=False)
+        self._sync_annotation_mode(redraw=False)
+        self.annotation_canvas.redraw()
         self._update_annotation_nav_state()
 
     def refresh_annotation_images(self) -> None:
