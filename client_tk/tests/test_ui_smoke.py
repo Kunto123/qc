@@ -382,6 +382,21 @@ class UiSmokeTest(unittest.TestCase):
 
         screen.destroy()
 
+    def test_engineer_layout_split_shell_clears_old_weights_on_compact_switch(self) -> None:
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+
+        screen._layout_split_shell(screen.training_lower, screen.training_jobs_panel, screen.training_detail_panel, compact=False, left_weight=2, right_weight=3)
+        self.assertEqual(int(screen.training_lower.columnconfigure(1)["weight"]), 3)
+
+        screen._layout_split_shell(screen.training_lower, screen.training_jobs_panel, screen.training_detail_panel, compact=True, left_weight=2, right_weight=3)
+        self.assertEqual(int(screen.training_lower.columnconfigure(0)["weight"]), 1)
+        self.assertEqual(int(screen.training_lower.columnconfigure(1)["weight"]), 0)
+        self.assertEqual(int(screen.training_lower.rowconfigure(0)["weight"]), 1)
+        self.assertEqual(int(screen.training_lower.rowconfigure(1)["weight"]), 1)
+
+        screen.destroy()
+
     def test_engineer_training_summary_shows_key_metrics(self) -> None:
         jobs = [
             {
@@ -405,6 +420,7 @@ class UiSmokeTest(unittest.TestCase):
         with mock.patch.object(self.api, "list_training_jobs", return_value=jobs):
             screen = EngineerScreen(self.root, self.api, self.state)
             screen.update_idletasks()
+            screen.refresh_training_jobs()
 
             screen.train_jobs.selection_clear(0, "end")
             screen.train_jobs.selection_set(0)
@@ -418,6 +434,20 @@ class UiSmokeTest(unittest.TestCase):
             self.assertEqual(screen.training_summary._labels["error"].cget("text"), "RMSE 0.0456")
 
             screen.destroy()
+
+    def test_engineer_training_refresh_error_dialog_is_not_reentrant(self) -> None:
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+
+        with mock.patch("client_tk.app.screens.engineer.view.messagebox.showerror") as showerror:
+            def _nested_showerror(_title, _message):
+                screen._show_training_refresh_error("Training", RuntimeError("second"))
+
+            showerror.side_effect = _nested_showerror
+            screen._show_training_refresh_error("Training", RuntimeError("first"))
+
+        self.assertEqual(showerror.call_count, 1)
+        screen.destroy()
 
     def test_engineer_training_job_uses_active_dataset_version_when_combo_is_blank(self) -> None:
         frame = np.zeros((24, 24, 3), dtype=np.uint8)
@@ -481,6 +511,20 @@ class UiSmokeTest(unittest.TestCase):
             self.assertEqual(captured_payloads[-1].get("dataset_version_id"), "ver-1")
 
             screen.destroy()
+
+    def test_engineer_training_tab_prefills_dataset_from_current_context(self) -> None:
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+
+        screen._annotation_dataset_id = "ds-context"
+        screen.train_dataset.delete(0, "end")
+
+        screen._notebook.select(screen._notebook.tabs()[1])
+        screen._on_notebook_tab_changed()
+
+        self.assertEqual(screen.train_dataset.get().strip(), "ds-context")
+
+        screen.destroy()
 
     def test_engineer_training_job_uses_selected_dataset_version(self) -> None:
         frame = np.zeros((24, 24, 3), dtype=np.uint8)
@@ -584,6 +628,17 @@ class UiSmokeTest(unittest.TestCase):
 
             screen.destroy()
 
+    def test_engineer_dataset_version_selection_guard_decrements_by_two_on_clear(self) -> None:
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+
+        screen._ignore_next_dataset_version_selection_events = 4
+        screen._clear_dataset_version_selection_guard()
+
+        self.assertEqual(screen._ignore_next_dataset_version_selection_events, 2)
+
+        screen.destroy()
+
     def test_engineer_annotation_dataset_follows_selected_dataset(self) -> None:
         screen = EngineerScreen(self.root, self.api, self.state)
         screen.update_idletasks()
@@ -594,10 +649,11 @@ class UiSmokeTest(unittest.TestCase):
         screen.dataset_list.selection_clear(0, "end")
         screen.dataset_list.selection_set(0)
         screen.on_dataset_selected()
-        self.assertEqual(screen.annot_dataset_var.get(), "ds-123")
+        self.assertEqual(screen.annot_dataset_var.get(), "Sample Dataset")
         self.assertEqual(screen._annotation_dataset_id, "ds-123")
         self.assertEqual(str(screen.annot_dataset["state"]), "readonly")
-        self.assertEqual(tuple(screen.annot_dataset["values"]), ("ds-123",))
+        self.assertEqual(tuple(screen.annot_dataset["values"]), ("Sample Dataset",))
+        self.assertEqual(screen._resolve_annotation_dataset_id(), "ds-123")
         screen.destroy()
 
     def test_engineer_annotation_dataset_dropdown_selects_dataset(self) -> None:
@@ -612,15 +668,16 @@ class UiSmokeTest(unittest.TestCase):
         screen.dataset_list.insert("end", "ds-2 | Dataset Two | 0 imgs / 0 ann / 0 aug")
         screen._sync_annotation_dataset_selector()
 
-        self.assertEqual(tuple(screen.annot_dataset["values"]), ("ds-1", "ds-2"))
+        self.assertEqual(tuple(screen.annot_dataset["values"]), ("Dataset One", "Dataset Two"))
 
-        screen.annot_dataset_var.set("ds-2")
+        screen.annot_dataset_var.set("Dataset Two")
         screen._on_annotation_dataset_selected()
 
         self.assertEqual(screen._annotation_dataset_id, "ds-2")
-        self.assertEqual(screen.annot_dataset_var.get(), "ds-2")
+        self.assertEqual(screen.annot_dataset_var.get(), "Dataset Two")
         self.assertEqual(screen.upload_dataset_id.get().strip(), "ds-2")
         self.assertEqual(screen._selected_dataset_id(), "ds-2")
+        self.assertEqual(screen._resolve_annotation_dataset_id(), "ds-2")
         screen.destroy()
 
     def test_engineer_annotation_dataset_resolution_handles_destroyed_listbox(self) -> None:
@@ -666,14 +723,14 @@ class UiSmokeTest(unittest.TestCase):
             screen.update_idletasks()
 
             self.assertEqual(screen._annotation_dataset_id, "ds-safe")
-            self.assertEqual(screen.annot_dataset_var.get(), "ds-safe")
+            self.assertEqual(screen.annot_dataset_var.get(), "Dataset Safe")
 
             screen.dataset_list.selection_clear(0, "end")
             screen.on_dataset_selected()
             screen.update_idletasks()
 
             self.assertEqual(screen._annotation_dataset_id, "ds-safe")
-            self.assertEqual(screen.annot_dataset_var.get(), "ds-safe")
+            self.assertEqual(screen.annot_dataset_var.get(), "Dataset Safe")
             self.assertEqual(screen.annot_image_var.get(), "sample.png")
             self.assertIsNotNone(screen.annotation_canvas._source_frame)
             self.assertIsNotNone(screen.annotation_canvas._photo)
@@ -711,7 +768,7 @@ class UiSmokeTest(unittest.TestCase):
             screen = EngineerScreen(self.root, self.api, self.state)
             screen.update_idletasks()
 
-            self.assertEqual(screen.annot_dataset_var.get(), "ds-keep")
+            self.assertEqual(screen.annot_dataset_var.get(), "Dataset Keep")
             self.assertEqual(screen._selected_dataset_id(), "ds-keep")
             self.assertEqual(screen.annot_image_var.get(), "sample.png")
             self.assertIsNotNone(screen.annotation_canvas._photo)
@@ -719,14 +776,14 @@ class UiSmokeTest(unittest.TestCase):
             screen.annot_shape.set("polygon")
             screen._sync_annotation_mode()
             screen.update_idletasks()
-            self.assertEqual(screen.annot_dataset_var.get(), "ds-keep")
+            self.assertEqual(screen.annot_dataset_var.get(), "Dataset Keep")
             self.assertEqual(screen._selected_dataset_id(), "ds-keep")
             self.assertIsNotNone(screen.annotation_canvas._photo)
 
             screen.annot_class_var.set("manual-class")
             screen._on_annotation_class_input()
             screen.update_idletasks()
-            self.assertEqual(screen.annot_dataset_var.get(), "ds-keep")
+            self.assertEqual(screen.annot_dataset_var.get(), "Dataset Keep")
             self.assertEqual(screen._selected_dataset_id(), "ds-keep")
             self.assertIsNotNone(screen.annotation_canvas._photo)
 
@@ -873,7 +930,7 @@ class UiSmokeTest(unittest.TestCase):
             wraps=self.api.download_dataset_image,
         ) as download_mock:
             screen.refresh_datasets()
-        self.assertEqual(screen.annot_dataset_var.get(), "ds-abc")
+        self.assertEqual(screen.annot_dataset_var.get(), "Dataset A")
         self.assertEqual(screen.annot_image_var.get(), "sample.png")
         self.assertEqual(screen._annotation_dataset_id, "ds-abc")
         self.assertIsNotNone(screen.annotation_canvas._source_frame)
@@ -1214,7 +1271,7 @@ class UiSmokeTest(unittest.TestCase):
             self.assertIsNotNone(selected)
             self.assertEqual(selected.get("id"), "ver-2")
             self.assertEqual(screen.train_dataset_version.get(), "v2 | Snapshot v2 | ready | 1/1 ann")
-            self.assertEqual(screen.annot_dataset_var.get(), "ds-1")
+            self.assertEqual(screen.annot_dataset_var.get(), "Dataset One")
             self.assertEqual(screen.annot_image_var.get(), "sample.png")
             self.assertIsNotNone(screen.annotation_canvas._source_frame)
             self.assertIsNotNone(screen.annotation_canvas._photo)
@@ -1301,7 +1358,7 @@ class UiSmokeTest(unittest.TestCase):
             screen = EngineerScreen(self.root, self.api, self.state)
             screen.update_idletasks()
             self.assertEqual(screen._selected_dataset_id(), "ds-1")
-            self.assertEqual(screen.annot_dataset_var.get(), "ds-1")
+            self.assertEqual(screen.annot_dataset_var.get(), "Dataset One")
             self.assertEqual(screen.annot_image_var.get(), "first.png")
             self.assertIsNotNone(screen.annotation_canvas._source_frame)
 
@@ -1312,7 +1369,7 @@ class UiSmokeTest(unittest.TestCase):
 
         delete_mock.assert_called_once_with("ds-1")
         self.assertEqual(screen._selected_dataset_id(), "ds-2")
-        self.assertEqual(screen.annot_dataset_var.get(), "ds-2")
+        self.assertEqual(screen.annot_dataset_var.get(), "Dataset Two")
         self.assertEqual(screen.annot_image_var.get(), "second.png")
         self.assertIsNotNone(screen.annotation_canvas._source_frame)
         self.assertEqual(screen.dataset_files.size(), 1)

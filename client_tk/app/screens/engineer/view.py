@@ -55,11 +55,18 @@ class EngineerScreen(ttk.Frame):
         self._annotation_cache_max_items = 8
         self._annotation_cache_max_bytes = 48 * 1024 * 1024
         self._annotation_load_sequence = 0
+        self._datasets_refresh_sequence = 0
+        self._dataset_files_refresh_sequence = 0
+        self._dataset_versions_refresh_sequence = 0
+        self._annotation_files_refresh_sequence = 0
+        self._dataset_display_to_id: dict[str, str] = {}
+        self._dataset_id_to_display: dict[str, str] = {}
         self._tab_scrollers: dict[str, ScrollableFrame] = {}
         self._layout_compact: bool | None = None
         self._ignore_next_dataset_list_selection_event: bool = False
         self._ignore_next_training_job_selection_event: bool = False
         self._ignore_next_dataset_version_selection_events: int = 0
+        self._training_refresh_error_dialog_active = False
         self._base_models_refresh_sequence = 0
         self._augment_jobs_refresh_sequence = 0
         self._models_refresh_sequence = 0
@@ -116,6 +123,11 @@ class EngineerScreen(ttk.Frame):
         for widget in shell.grid_slaves():
             widget.grid_forget()
 
+        for col in (0, 1):
+            shell.columnconfigure(col, weight=0)
+        for row in (0, 1):
+            shell.rowconfigure(row, weight=0)
+
         if compact:
             shell.columnconfigure(0, weight=1)
             shell.rowconfigure(0, weight=1)
@@ -160,6 +172,10 @@ class EngineerScreen(ttk.Frame):
             return
         selected_tab_text = self._notebook.tab(self._notebook.select(), "text")
         if selected_tab_text == "Training":
+            current_dataset_id = self._current_dataset_id()
+            if current_dataset_id and not self.train_dataset.get().strip():
+                self.train_dataset.delete(0, "end")
+                self.train_dataset.insert(0, current_dataset_id)
             if not self._base_model_cache or not self.train_base_model["values"]:
                 self.refresh_base_models()
             self.refresh_augment_jobs()
@@ -344,7 +360,7 @@ class EngineerScreen(ttk.Frame):
         self.annot_shape = ttk.Combobox(annotation_toolbar, values=["bbox", "polygon"], state="readonly")
         self.annot_class = ttk.Combobox(annotation_toolbar, textvariable=self.annot_class_var, values=["object"], state="normal")
         self.annot_shape.set("bbox")
-        self._grid_entry(annotation_toolbar, 0, 0, "Dataset ID", self.annot_dataset)
+        self._grid_entry(annotation_toolbar, 0, 0, "Dataset", self.annot_dataset)
         self._grid_entry(annotation_toolbar, 0, 2, "Image", self.annot_image)
         self._grid_entry(annotation_toolbar, 0, 4, "Type", self.annot_shape)
         self._grid_entry(annotation_toolbar, 0, 6, "Class", self.annot_class)
@@ -781,14 +797,27 @@ class EngineerScreen(ttk.Frame):
         self._ignore_next_training_job_selection_event = False
 
     def _clear_dataset_version_selection_guard(self) -> None:
-        self._ignore_next_dataset_version_selection_events = 0
+        self._ignore_next_dataset_version_selection_events = max(0, self._ignore_next_dataset_version_selection_events - 2)
 
     def _dataset_id_options(self) -> list[str]:
         options: list[str] = []
+        self._dataset_display_to_id = {}
+        self._dataset_id_to_display = {}
+        seen_labels: set[str] = set()
         for item in self._dataset_cache:
             dataset_id = str(item.get("id") or "").strip()
-            if dataset_id and dataset_id not in options:
-                options.append(dataset_id)
+            if not dataset_id:
+                continue
+            display_label = str(item.get("display_name") or item.get("name") or "").strip()
+            if not display_label or display_label == dataset_id:
+                display_label = dataset_id
+            if display_label in seen_labels and self._dataset_display_to_id.get(display_label) != dataset_id:
+                display_label = f"{display_label} | {dataset_id}"
+            seen_labels.add(display_label)
+            self._dataset_display_to_id[display_label] = dataset_id
+            self._dataset_id_to_display[dataset_id] = display_label
+            if display_label not in options:
+                options.append(display_label)
         return options
 
     def _sync_annotation_dataset_selector(self, *, preferred_dataset_id: str | None = None) -> None:
@@ -797,14 +826,29 @@ class EngineerScreen(ttk.Frame):
         values = self._dataset_id_options()
         self.annot_dataset.configure(values=values)
         preferred = str(preferred_dataset_id or "").strip()
+        if preferred:
+            preferred_display = self._dataset_id_to_display.get(preferred)
+            if preferred_display:
+                self.annot_dataset_var.set(preferred_display)
+                return
         current = self.annot_dataset_var.get().strip()
-        if preferred and preferred in values:
-            self.annot_dataset_var.set(preferred)
-            return
-        if current and current in values:
-            return
+        if current:
+            current_dataset_id = self._dataset_display_to_id.get(current, current)
+            current_display = self._dataset_id_to_display.get(current_dataset_id)
+            if current_display:
+                self.annot_dataset_var.set(current_display)
+                return
         if not values:
             self.annot_dataset_var.set("")
+
+    def _show_training_refresh_error(self, title: str, error: Exception) -> None:
+        if self._training_refresh_error_dialog_active:
+            return
+        self._training_refresh_error_dialog_active = True
+        try:
+            messagebox.showerror(title, str(error))
+        finally:
+            self._training_refresh_error_dialog_active = False
 
     def _current_dataset_id(self) -> str | None:
         for candidate in (
@@ -940,7 +984,6 @@ class EngineerScreen(ttk.Frame):
             self._active_dataset_version_id = None
         self._annotation_dataset_id = dataset_id
         self._annotation_dataset_name = str(dataset.get("name") or dataset_id).strip()
-        self.annot_dataset_var.set(dataset_id)
         self._sync_annotation_dataset_selector(preferred_dataset_id=dataset_id)
         self._select_dataset_in_listbox(dataset_id)
         for widget in (self.upload_dataset_id, self.augment_dataset, self.train_dataset):
@@ -953,12 +996,28 @@ class EngineerScreen(ttk.Frame):
         self._sync_annotation_class_name()
 
     def refresh_datasets(self):
-        try:
-            items = self.api.list_datasets()
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Dataset", str(exc))
-            return
         previous_selected_id = self._selected_dataset_id()
+        self._datasets_refresh_sequence += 1
+        refresh_sequence = self._datasets_refresh_sequence
+
+        def _load():
+            return self.api.list_datasets()
+
+        def _done(result, error):
+            if refresh_sequence != self._datasets_refresh_sequence:
+                return
+            if not self.winfo_exists():
+                return
+            if error:
+                messagebox.showerror("Dataset", str(error))
+                return
+            if not isinstance(result, list):
+                return
+            self._apply_datasets(result, previous_selected_id=previous_selected_id)
+
+        run_async(self, _load, callback=_done)
+
+    def _apply_datasets(self, items: list[dict], *, previous_selected_id: str | None) -> None:
         self._dataset_cache = items
         self._sync_annotation_dataset_selector(preferred_dataset_id=previous_selected_id)
         self.dataset_list.delete(0, "end")
@@ -989,7 +1048,8 @@ class EngineerScreen(ttk.Frame):
             self._reset_dataset_context()
 
     def _on_annotation_dataset_selected(self, _event=None) -> None:
-        dataset_id = self.annot_dataset_var.get().strip()
+        dataset_value = self.annot_dataset_var.get().strip()
+        dataset_id = self._dataset_display_to_id.get(dataset_value, dataset_value)
         if not dataset_id:
             return
         for index, item in enumerate(self._dataset_cache):
@@ -1106,14 +1166,32 @@ class EngineerScreen(ttk.Frame):
         self.dataset_files.delete(0, "end")
         if not dataset_id:
             return
-        try:
-            items = self.api.list_dataset_files(dataset_id, self.browser_target.get().strip() or "images")
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Dataset Files", str(exc))
-            return
-        for item in items:
-            marker = "✓" if item.get("annotation_exists") else "•"
-            self.dataset_files.insert("end", f"{marker} {item['name']} | {item.get('size', 0)} bytes")
+        target = self.browser_target.get().strip() or "images"
+        self._dataset_files_refresh_sequence += 1
+        refresh_sequence = self._dataset_files_refresh_sequence
+
+        def _load():
+            return self.api.list_dataset_files(dataset_id, target)
+
+        def _done(result, error):
+            if refresh_sequence != self._dataset_files_refresh_sequence:
+                return
+            if not self.winfo_exists():
+                return
+            current_dataset_id = self.upload_dataset_id.get().strip() or self._selected_dataset_id()
+            if current_dataset_id != dataset_id:
+                return
+            if error:
+                messagebox.showerror("Dataset Files", str(error))
+                return
+            if not isinstance(result, list):
+                return
+            self.dataset_files.delete(0, "end")
+            for item in result:
+                marker = "✓" if item.get("annotation_exists") else "•"
+                self.dataset_files.insert("end", f"{marker} {item['name']} | {item.get('size', 0)} bytes")
+
+        run_async(self, _load, callback=_done)
 
     def refresh_dataset_versions(self, *, preferred_version_id: str | None = None, preserve_selection: bool = True):
         previous_selected = self._selected_dataset_version_record()
@@ -1135,12 +1213,41 @@ class EngineerScreen(ttk.Frame):
             self._sync_annotation_class_name()
             return
 
-        try:
-            items = self.api.list_dataset_versions(dataset_id)
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Dataset Versions", str(exc))
-            return
+        self._dataset_versions_refresh_sequence += 1
+        refresh_sequence = self._dataset_versions_refresh_sequence
 
+        def _load():
+            return self.api.list_dataset_versions(dataset_id)
+
+        def _done(result, error):
+            if refresh_sequence != self._dataset_versions_refresh_sequence:
+                return
+            if not self.winfo_exists():
+                return
+            if self._current_dataset_id() != dataset_id:
+                return
+            if error:
+                messagebox.showerror("Dataset Versions", str(error))
+                return
+            if not isinstance(result, list):
+                return
+            self._apply_dataset_versions(
+                result,
+                dataset_id=dataset_id,
+                previous_selected_id=previous_selected_id,
+                preferred_id=preferred_id,
+            )
+
+        run_async(self, _load, callback=_done)
+
+    def _apply_dataset_versions(
+        self,
+        items: list[dict],
+        *,
+        dataset_id: str,
+        previous_selected_id: str | None,
+        preferred_id: str | None,
+    ) -> None:
         visible_versions: list[dict] = []
         values: list[str] = []
         for item in items:
@@ -1296,8 +1403,9 @@ class EngineerScreen(ttk.Frame):
             self._annotation_dataset_id,
             selected_dataset_id,
         ):
-            if candidate:
-                return candidate
+            resolved = self._dataset_display_to_id.get(candidate, candidate)
+            if resolved:
+                return resolved
         return None
 
     def _sync_annotation_mode(self, *, redraw: bool = True) -> None:
@@ -1689,24 +1797,40 @@ class EngineerScreen(ttk.Frame):
             self._reset_annotation_state()
             return
         self._annotation_dataset_id = dataset_id
-        self.annot_dataset_var.set(dataset_id)
-        try:
-            items = self.api.list_dataset_files(dataset_id, "images")
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Annotate", str(exc))
-            self._reset_annotation_state()
-            return
-        self._annotation_files = items
-        if not items:
-            self.annot_image_var.set("-")
-            self.annotation_canvas.clear()
-            self.annotation_status.set("Dataset has no images to annotate.")
-            self._update_annotation_nav_state()
-            return
-        preferred = self._annotation_image_index()
-        if preferred is None:
-            preferred = 0
-        self._load_annotation_for_index(preferred, save_current=False)
+        self._sync_annotation_dataset_selector(preferred_dataset_id=dataset_id)
+        self._annotation_files_refresh_sequence += 1
+        refresh_sequence = self._annotation_files_refresh_sequence
+
+        def _load():
+            return self.api.list_dataset_files(dataset_id, "images")
+
+        def _done(result, error):
+            if refresh_sequence != self._annotation_files_refresh_sequence:
+                return
+            if not self.winfo_exists():
+                return
+            if self._resolve_annotation_dataset_id() != dataset_id:
+                return
+            if error:
+                messagebox.showerror("Annotate", str(error))
+                self._reset_annotation_state()
+                return
+            if not isinstance(result, list):
+                self._reset_annotation_state()
+                return
+            self._annotation_files = result
+            if not result:
+                self.annot_image_var.set("-")
+                self.annotation_canvas.clear()
+                self.annotation_status.set("Dataset has no images to annotate.")
+                self._update_annotation_nav_state()
+                return
+            preferred = self._annotation_image_index()
+            if preferred is None:
+                preferred = 0
+            self._load_annotation_for_index(preferred, save_current=False)
+
+        run_async(self, _load, callback=_done)
 
     def on_annotation_image_selected(self):
         index = self._annotation_image_index()
@@ -1799,7 +1923,7 @@ class EngineerScreen(ttk.Frame):
             if not self.winfo_exists():
                 return
             if error:
-                messagebox.showerror("Augment", str(error))
+                self._show_training_refresh_error("Augment", error)
                 return
             if not isinstance(result, list):
                 return
@@ -1828,7 +1952,7 @@ class EngineerScreen(ttk.Frame):
             if not self.winfo_exists():
                 return
             if error:
-                messagebox.showerror("Training", str(error))
+                self._show_training_refresh_error("Training", error)
                 return
             if not isinstance(result, list):
                 return
@@ -2084,7 +2208,7 @@ class EngineerScreen(ttk.Frame):
             if not self.winfo_exists():
                 return
             if error:
-                messagebox.showerror("Training", str(error))
+                self._show_training_refresh_error("Training", error)
                 return
             if not isinstance(result, list):
                 return

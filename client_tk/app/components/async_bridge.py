@@ -12,15 +12,17 @@ Usage
 
     run_async(root_widget, api_client.list_templates, callback=on_done)
 
-``run_async`` submits *fn* to a background daemon thread. When it finishes,
-the result (or exception) is delivered to *callback* via ``widget.after(0,
-...)`` so it runs safely on the Tk main thread.  The Tkinter widget is only
-used for scheduling and is never accessed from the worker thread.
+``run_async`` submits *fn* to a background daemon thread. The worker never
+touches Tk directly. Instead, the owning widget polls for completion on the Tk
+main thread and then delivers the result to *callback*.
 """
 from __future__ import annotations
 
 import threading
 from typing import Any, Callable
+
+
+_POLL_INTERVAL_MS = 16
 
 
 def run_async(
@@ -48,21 +50,47 @@ def run_async(
         Forwarded to *fn*.
     """
     _kwargs = kwargs or {}
+    result_box: dict[str, Any] = {"result": None, "error": None}
+    completed = threading.Event()
+
+    def _poll_completion() -> None:
+        try:
+            if not widget.winfo_exists():
+                return
+        except Exception:
+            return
+
+        if not completed.is_set():
+            try:
+                widget.after(_POLL_INTERVAL_MS, _poll_completion)
+            except Exception:
+                return
+            return
+
+        if callback is None:
+            return
+
+        try:
+            callback(result_box["result"], result_box["error"])
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+            return
 
     def _worker():
         try:
-            result = fn(*args, **_kwargs)
-            if callback is not None:
-                try:
-                    widget.after(0, lambda: callback(result, None))
-                except Exception:
-                    return
+            result_box["result"] = fn(*args, **_kwargs)
         except Exception as exc:  # noqa: BLE001
-            if callback is not None:
-                try:
-                    widget.after(0, lambda e=exc: callback(None, e))
-                except Exception:
-                    return
+            result_box["error"] = exc
+        finally:
+            completed.set()
+
+    if callback is not None:
+        try:
+            widget.after(_POLL_INTERVAL_MS, _poll_completion)
+        except Exception:
+            pass
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
