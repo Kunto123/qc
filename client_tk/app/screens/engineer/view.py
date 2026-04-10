@@ -374,6 +374,7 @@ class EngineerScreen(ctk.CTkFrame):
         self.dataset_versions = tk.Listbox(version_frame, height=5)
         self.dataset_versions.pack(fill="both", expand=True, pady=(8, 0))
         self.dataset_versions.bind("<<ListboxSelect>>", self.on_dataset_version_selected)
+        self.dataset_versions.bind("<ButtonRelease-1>", self.on_dataset_version_selected, add="+")
         self.dataset_version_summary = LabeledValuePanel(
             version_frame,
             "Version Summary",
@@ -1036,6 +1037,7 @@ class EngineerScreen(ctk.CTkFrame):
                 self._ignore_next_dataset_list_selection_event = True
                 self.after_idle(lambda dataset_id=dataset_id: self._select_dataset_in_listbox(dataset_id))
         previous_dataset_id = self._annotation_dataset_id
+        dataset_changed = dataset_id != previous_dataset_id
         if previous_dataset_id and previous_dataset_id != dataset_id:
             self._annotation_manual_classes = []
             self._active_dataset_version_id = None
@@ -1047,6 +1049,9 @@ class EngineerScreen(ctk.CTkFrame):
             widget.delete(0, "end")
             widget.insert(0, dataset_id)
         self._update_dataset_summary(dataset)
+        if not dataset_changed:
+            self._sync_annotation_class_name()
+            return
         self.refresh_dataset_files()
         self.refresh_annotation_images()
         self.refresh_dataset_versions()
@@ -1935,9 +1940,6 @@ class EngineerScreen(ctk.CTkFrame):
         self._save_current_annotation(silent=True)
 
     def on_dataset_version_selected(self, event=None) -> None:
-        if self._ignore_next_dataset_version_selection_events > 0:
-            self._ignore_next_dataset_version_selection_events -= 1
-            return
         source_widget = getattr(event, "widget", None)
         if source_widget is self.train_dataset_version:
             version = self._selected_dataset_version_spec() or self._selected_dataset_version_record()
@@ -1946,11 +1948,21 @@ class EngineerScreen(ctk.CTkFrame):
         else:
             version = self._selected_dataset_version_spec() or self._selected_dataset_version_record()
         if not version:
+            if self._ignore_next_dataset_version_selection_events > 0:
+                self._ignore_next_dataset_version_selection_events -= 1
+                return
             self._active_dataset_version_id = None
             self._update_dataset_version_summary(None)
             self._sync_annotation_class_name()
             return
         selected_id = str(version.get("id") or "").strip() or None
+        if self._ignore_next_dataset_version_selection_events > 0:
+            if selected_id and selected_id == self._active_dataset_version_id:
+                self._ignore_next_dataset_version_selection_events -= 1
+                return
+            self._ignore_next_dataset_version_selection_events = 0
+        if selected_id and selected_id == self._active_dataset_version_id:
+            return
         self._active_dataset_version_id = selected_id
         if selected_id:
             for index, item in enumerate(self._dataset_version_cache):

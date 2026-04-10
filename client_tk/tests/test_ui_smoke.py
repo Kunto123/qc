@@ -187,6 +187,22 @@ class UiSmokeTest(unittest.TestCase):
             if screen.annotation_canvas._source_frame is not None and screen.annotation_canvas._photo is not None:
                 return
 
+    def _wait_for_admin_template_load(self, screen, template_id: int, *, attempts: int = 20) -> None:
+        for _ in range(attempts):
+            screen.update_idletasks()
+            screen.update()
+            if getattr(screen, "current_template_id", None) != template_id:
+                continue
+            if screen.template_form.name_var.get().strip() != "QC Line A":
+                continue
+            try:
+                raw_payload = screen.template_raw_editor.get_payload()
+            except Exception:  # noqa: BLE001
+                continue
+            if int(raw_payload.get("id") or 0) == template_id:
+                return
+        self.fail("Timed out waiting for admin template detail to load")
+
     def tearDown(self) -> None:
         for patcher in getattr(self, "_async_patchers", []):
             patcher.stop()
@@ -242,6 +258,27 @@ class UiSmokeTest(unittest.TestCase):
         screen.update_idletasks()
         self.assertTrue(screen.winfo_exists())
         self.assertIsNotNone(screen.template_form)
+        screen.destroy()
+
+    def test_admin_template_selection_auto_loads_detail(self) -> None:
+        screen = AdminScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        for _ in range(10):
+            screen.update_idletasks()
+            screen.update()
+            if screen.template_table.get_children():
+                break
+
+        template_iid = screen.template_table.get_children()[0]
+        screen.template_table.selection_set(template_iid)
+        screen.template_table.focus(template_iid)
+        screen.template_table.event_generate("<<TreeviewSelect>>")
+
+        self._wait_for_admin_template_load(screen, int(template_iid))
+
+        self.assertEqual(screen.current_template_id, int(template_iid))
+        self.assertEqual(screen.template_form.name_var.get(), "QC Line A")
+        self.assertEqual(screen.template_raw_editor.get_payload()["name"], "QC Line A")
         screen.destroy()
 
     def test_admin_layout_switches_to_compact(self) -> None:
@@ -509,6 +546,86 @@ class UiSmokeTest(unittest.TestCase):
 
             screen.destroy()
 
+    def test_engineer_dataset_version_selection_auto_updates_detail(self) -> None:
+        versions = [
+            {
+                "id": "ver-1",
+                "display_label": "v1 | Snapshot v1 | ready | 1/1 ann",
+                "version_number": 1,
+                "name": "Snapshot v1",
+                "status": "ready",
+                "export_format": "yolo",
+                "export_root": "data/export/ver-1",
+                "image_count": 1,
+                "annotated_image_count": 1,
+                "coverage_percent": 100.0,
+                "class_names": ["K0W-HB0"],
+            },
+            {
+                "id": "ver-2",
+                "display_label": "v2 | Snapshot v2 | ready | 2/2 ann",
+                "version_number": 2,
+                "name": "Snapshot v2",
+                "status": "ready",
+                "export_format": "yolo",
+                "export_root": "data/export/ver-2",
+                "image_count": 2,
+                "annotated_image_count": 2,
+                "coverage_percent": 100.0,
+                "class_names": ["K0W-HB0", "K1Z-FA0"],
+            },
+        ]
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+
+        screen._dataset_version_cache = [dict(item) for item in versions]
+        screen._dataset_version_lookup = {
+            versions[0]["display_label"]: versions[0],
+            versions[0]["id"]: versions[0],
+            versions[1]["display_label"]: versions[1],
+            versions[1]["id"]: versions[1],
+        }
+        screen.dataset_versions.delete(0, "end")
+        screen.dataset_versions.insert("end", f"{versions[0]['display_label']} | yolo | data/export/ver-1")
+        screen.dataset_versions.insert("end", f"{versions[1]['display_label']} | yolo | data/export/ver-2")
+        screen.train_dataset_version.configure(values=[versions[0]["display_label"], versions[1]["display_label"]])
+        screen.train_dataset_version.set(versions[0]["display_label"])
+        screen._active_dataset_version_id = "ver-1"
+        screen.dataset_version_detail.set_payload(versions[0])
+
+        screen._ignore_next_dataset_version_selection_events = 1
+        screen.dataset_versions.selection_clear(0, "end")
+        screen.dataset_versions.selection_set(1)
+        screen.on_dataset_version_selected(SimpleNamespace(widget=screen.dataset_versions))
+
+        self.assertEqual(screen.train_dataset_version.get(), versions[1]["display_label"])
+        self.assertEqual(screen._active_dataset_version_id, "ver-2")
+        self.assertEqual(screen.dataset_version_detail.get_payload()["id"], "ver-2")
+
+        screen.destroy()
+
+    def test_engineer_dataset_selection_does_not_refetch_same_dataset(self) -> None:
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+
+        screen._dataset_cache = [{"id": "ds-1", "name": "Dataset One"}]
+        screen.dataset_list.delete(0, "end")
+        screen.dataset_list.insert("end", "ds-1 | Dataset One | 0 imgs / 0 ann / 0 aug")
+        screen.dataset_list.selection_set(0)
+
+        with mock.patch.object(screen, "refresh_dataset_files") as refresh_files, mock.patch.object(
+            screen,
+            "refresh_annotation_images",
+        ) as refresh_images, mock.patch.object(screen, "refresh_dataset_versions") as refresh_versions:
+            screen.on_dataset_selected()
+            screen.on_dataset_selected()
+
+        self.assertEqual(refresh_files.call_count, 1)
+        self.assertEqual(refresh_images.call_count, 1)
+        self.assertEqual(refresh_versions.call_count, 1)
+
+        screen.destroy()
+
     def test_engineer_training_tab_prefills_dataset_from_current_context(self) -> None:
         screen = EngineerScreen(self.root, self.api, self.state)
         screen.update_idletasks()
@@ -674,6 +791,66 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(screen.upload_dataset_id.get().strip(), "ds-2")
         self.assertEqual(screen._selected_dataset_id(), "ds-2")
         self.assertEqual(screen._resolve_annotation_dataset_id(), "ds-2")
+        screen.destroy()
+
+    def test_engineer_dataset_version_selection_ignores_duplicate_click(self) -> None:
+        versions = [
+            {
+                "id": "ver-1",
+                "display_label": "v1 | Snapshot v1 | ready | 1/1 ann",
+                "version_number": 1,
+                "name": "Snapshot v1",
+                "status": "ready",
+                "export_format": "yolo",
+                "export_root": "data/export/ver-1",
+                "image_count": 1,
+                "annotated_image_count": 1,
+                "coverage_percent": 100.0,
+                "class_names": ["K0W-HB0"],
+            },
+            {
+                "id": "ver-2",
+                "display_label": "v2 | Snapshot v2 | ready | 2/2 ann",
+                "version_number": 2,
+                "name": "Snapshot v2",
+                "status": "ready",
+                "export_format": "yolo",
+                "export_root": "data/export/ver-2",
+                "image_count": 2,
+                "annotated_image_count": 2,
+                "coverage_percent": 100.0,
+                "class_names": ["K0W-HB0", "K1Z-FA0"],
+            },
+        ]
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+
+        screen._dataset_version_cache = [dict(item) for item in versions]
+        screen._dataset_version_lookup = {
+            versions[0]["display_label"]: versions[0],
+            versions[0]["id"]: versions[0],
+            versions[1]["display_label"]: versions[1],
+            versions[1]["id"]: versions[1],
+        }
+        screen.dataset_versions.delete(0, "end")
+        screen.dataset_versions.insert("end", f"{versions[0]['display_label']} | yolo | data/export/ver-1")
+        screen.dataset_versions.insert("end", f"{versions[1]['display_label']} | yolo | data/export/ver-2")
+        screen.train_dataset_version.configure(values=[versions[0]["display_label"], versions[1]["display_label"]])
+        screen.train_dataset_version.set(versions[0]["display_label"])
+        screen._active_dataset_version_id = "ver-1"
+        screen.dataset_version_detail.set_payload(versions[0])
+
+        with mock.patch.object(screen, "_reload_active_annotation_image") as reload_image:
+            screen.dataset_versions.selection_clear(0, "end")
+            screen.dataset_versions.selection_set(1)
+            screen.on_dataset_version_selected(SimpleNamespace(widget=screen.dataset_versions))
+            screen.on_dataset_version_selected(SimpleNamespace(widget=screen.dataset_versions))
+
+        self.assertEqual(screen.train_dataset_version.get(), versions[1]["display_label"])
+        self.assertEqual(screen._active_dataset_version_id, "ver-2")
+        self.assertEqual(screen.dataset_version_detail.get_payload()["id"], "ver-2")
+        self.assertEqual(reload_image.call_count, 1)
+
         screen.destroy()
 
     def test_engineer_annotation_dataset_resolution_handles_destroyed_listbox(self) -> None:

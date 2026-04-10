@@ -55,6 +55,8 @@ class AdminScreen(ctk.CTkFrame):
         self.api = api_client
         self.state = session_state
         self.current_template_id: int | None = None
+        self._template_detail_load_sequence = 0
+        self._loaded_template_id: int | None = None
         self._tab_scrollers: dict[str, ScrollableFrame] = {}
         self._layout_compact: bool | None = None
 
@@ -321,13 +323,13 @@ class AdminScreen(ctk.CTkFrame):
             height=16,
         )
         self.template_table.bind("<<TreeviewSelect>>", self._on_template_selected)
-        self.template_table.bind("<Double-1>", lambda _event: self.load_selected_template())
+        self.template_table.bind("<Double-1>", lambda _event: self.load_selected_template(force=True))
 
         actions = ttk.Frame(library)
         actions.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         ttk.Button(actions, text="Refresh", command=self.refresh_templates).pack(side="left")
         ttk.Button(actions, text="New Draft", command=self.new_template).pack(side="left", padx=6)
-        ttk.Button(actions, text="Load Selected", command=self.load_selected_template).pack(side="left")
+        ttk.Button(actions, text="Load Selected", command=lambda: self.load_selected_template(force=True)).pack(side="left")
         ttk.Button(actions, text="Delete Selected", command=self.delete_selected_template).pack(side="right")
 
         editor = ttk.LabelFrame(self.templates_right, text="Template Editor", padding=12)
@@ -881,6 +883,7 @@ class AdminScreen(ctk.CTkFrame):
             self.template_context_var.set(
                 f"Selected template #{item['id']} | v{item.get('version_number') or '-'} | {_safe_text(item.get('name'))}"
             )
+        self.load_selected_template()
 
     def refresh_templates(self) -> None:
         self._set_status("Loading templates…")
@@ -905,6 +908,7 @@ class AdminScreen(ctk.CTkFrame):
         run_async(self, self.api.list_templates, callback=_done)
 
     def new_template(self) -> None:
+        self._invalidate_template_detail_loads()
         self.current_template_id = None
         self.template_form.reset()
         self.preview_template_json()
@@ -912,18 +916,35 @@ class AdminScreen(ctk.CTkFrame):
         self.template_table.selection_remove(self.template_table.selection())
         self._set_status("Template editor direset ke draft baru.")
 
-    def load_selected_template(self) -> None:
+    def _invalidate_template_detail_loads(self) -> None:
+        self._template_detail_load_sequence += 1
+        self._loaded_template_id = None
+
+    def load_selected_template(self, *, force: bool = False) -> None:
         template_id = self._selected_treeview_id(self.template_table)
         if template_id is None:
             return
+        if not force and self._loaded_template_id == template_id and self.current_template_id == template_id:
+            return
+        self.current_template_id = template_id
+        self._template_detail_load_sequence += 1
+        load_sequence = self._template_detail_load_sequence
         self._set_status(f"Loading template #{template_id}…")
+        self.template_context_var.set(f"Loading template #{template_id}…")
 
         def _done(detail, error):
+            if load_sequence != self._template_detail_load_sequence:
+                return
+            if not self.winfo_exists():
+                return
+            if self._selected_treeview_id(self.template_table) != template_id:
+                return
             if error:
                 self._set_status(f"Template load error: {error}")
                 messagebox.showerror("Templates", str(error))
                 return
             self.current_template_id = template_id
+            self._loaded_template_id = template_id
             self.template_form.set_payload(detail)
             self.template_raw_editor.set_payload(detail)
             self.template_context_var.set(
@@ -969,6 +990,7 @@ class AdminScreen(ctk.CTkFrame):
             return
         self.template_form.set_payload(saved)
         self.template_raw_editor.set_payload(saved)
+        self._loaded_template_id = int(saved["id"])
         self.refresh_templates()
         self._select_tree_item(self.template_table, self.current_template_id)
         self.template_context_var.set(
@@ -988,6 +1010,7 @@ class AdminScreen(ctk.CTkFrame):
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Templates", str(exc))
             return
+        self._invalidate_template_detail_loads()
         self.current_template_id = None
         self.template_form.reset()
         self.template_raw_editor.set_payload({})
