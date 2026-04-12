@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import platform
 import threading
 import tkinter as tk
+import uuid
 from tkinter import messagebox, ttk
 
 import customtkinter as ctk
 import cv2
 
+from client_tk.app.components.async_bridge import run_async
 from client_tk.app.components.counter_panel import CounterPanel
 from client_tk.app.components.live_view import LiveView
 from client_tk.app.components.result_panel import ResultPanel
@@ -25,6 +28,7 @@ BADGE_COLORS = {
     "info": ("#1d4ed8", "#eff6ff"),
 }
 RESPONSIVE_BREAKPOINT = 1240
+HEARTBEAT_INTERVAL_MS = 20_000
 
 
 class OperatorScreen(ctk.CTkFrame):
@@ -38,7 +42,9 @@ class OperatorScreen(ctk.CTkFrame):
         self._latest_error: str | None = None
         self._lock = threading.Lock()
         self._after_id: str | None = None
+        self._heartbeat_after_id: str | None = None
         self._closed = False
+        self._machine_id = f"{platform.node() or 'workstation'}-{uuid.getnode():012x}"
         self._settings_window: tk.Toplevel | None = None
         self._template_lookup: dict[str, dict] = {}
         self._template_detail_lookup: dict[int, dict] = {}
@@ -79,6 +85,7 @@ class OperatorScreen(ctk.CTkFrame):
         self.bind("<Configure>", self._on_resize)
         self.after_idle(self._apply_responsive_layout)
         self._schedule_poll()
+        self._schedule_heartbeat(delay_ms=1_000)
 
     def _build_top_bar(self) -> None:
         self.top_bar = ctk.CTkFrame(self, fg_color=APP_BG, corner_radius=0)
@@ -854,6 +861,39 @@ class OperatorScreen(ctk.CTkFrame):
             return
         self._after_id = self.after(100, self._poll_ui)
 
+    def _schedule_heartbeat(self, *, delay_ms: int | None = None) -> None:
+        if self._closed:
+            return
+        if self._heartbeat_after_id:
+            try:
+                self.after_cancel(self._heartbeat_after_id)
+            except tk.TclError:
+                pass
+        wait = HEARTBEAT_INTERVAL_MS if delay_ms is None else max(500, int(delay_ms))
+        self._heartbeat_after_id = self.after(wait, self._send_heartbeat)
+
+    def _send_heartbeat(self) -> None:
+        self._heartbeat_after_id = None
+        if self._closed:
+            return
+        if not getattr(self.state, "token", None):
+            self._schedule_heartbeat()
+            return
+
+        line_id = self.line_value.get().strip() or None
+        station_id = self.station_value.get().strip() or None
+
+        def _load():
+            return self.api.heartbeat(
+                self._machine_id,
+                client_version="client_tk",
+                line_id=line_id,
+                station_id=station_id,
+            )
+
+        run_async(self, _load, callback=lambda _result, _error: None)
+        self._schedule_heartbeat()
+
     def _poll_ui(self) -> None:
         if self._closed:
             return
@@ -930,6 +970,12 @@ class OperatorScreen(ctk.CTkFrame):
             except tk.TclError:
                 pass
             self._after_id = None
+        if self._heartbeat_after_id:
+            try:
+                self.after_cancel(self._heartbeat_after_id)
+            except tk.TclError:
+                pass
+            self._heartbeat_after_id = None
         if hasattr(self, "sidebar_canvas"):
             self.sidebar_canvas.unbind_all("<MouseWheel>")
         self._close_settings()

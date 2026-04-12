@@ -11,6 +11,18 @@ from shared.contracts.enums import UserRole
 
 auth_blueprint = Blueprint("auth", __name__, url_prefix="/auth")
 
+ALLOWED_MANAGED_ROLES = {UserRole.ADMIN.value, UserRole.OPERATOR.value}
+
+
+def _normalize_managed_role(raw_role: object, *, field_name: str = "role") -> str:
+    role = str(raw_role or "").strip().lower()
+    if not role:
+        raise ValueError(f"{field_name} is required")
+    if role not in ALLOWED_MANAGED_ROLES:
+        allowed = ", ".join(sorted(ALLOWED_MANAGED_ROLES))
+        raise ValueError(f"{field_name} must be one of: {allowed}")
+    return role
+
 
 def _client_ip() -> str:
     forwarded_for = str(request.headers.get("X-Forwarded-For") or "").strip()
@@ -136,10 +148,11 @@ def list_users():
 def create_user():
     payload = request.get_json(force=True) or {}
     try:
+        role = _normalize_managed_role(payload.get("role") or UserRole.OPERATOR.value)
         record = users_repo.create_user(
             username=str(payload.get("username") or "").strip(),
             password=str(payload.get("password") or "").strip(),
-            role=str(payload.get("role") or UserRole.OPERATOR.value).strip(),
+            role=role,
         )
     except (ValueError, KeyError) as exc:
         return jsonify({"error": str(exc)}), 400
@@ -181,9 +194,10 @@ def update_user(user_id: int):
 @require_roles(UserRole.ADMIN)
 def change_user_role(user_id: int):
     payload = request.get_json(force=True) or {}
-    new_role = str(payload.get("role") or "").strip()
-    if not new_role:
-        return jsonify({"error": "role is required"}), 400
+    try:
+        new_role = _normalize_managed_role(payload.get("role"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     try:
         record = users_repo.set_role(user_id, new_role)
     except ValueError as exc:

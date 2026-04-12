@@ -37,7 +37,7 @@ def deploy_template():
 
 
 @deployment_blueprint.get("")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def list_deployments():
     return jsonify(deployments_repo.list_deployments())
 

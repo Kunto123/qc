@@ -40,7 +40,8 @@ def _seed_users() -> list[dict[str, Any]]:
             "id": 3,
             "username": "engineer",
             "password_hash": hash_password("engineer123"),
-            "role": UserRole.ENGINEER.value,
+            # Transitional account: keep legacy username but migrate role into supported 2-role policy.
+            "role": UserRole.ADMIN.value,
             "is_active": True,
             "created_at": now,
             "updated_at": now,
@@ -54,6 +55,25 @@ class SqlServerUsersRepository:
         self._config = config
         self._ensure_schema()
         self._seed_defaults_if_empty()
+        self.migrate_legacy_roles()
+
+    def migrate_legacy_roles(self) -> int:
+        now = _utcnow_iso()
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE dbo.qc_user_accounts
+                SET role = ?, updated_at = ?
+                WHERE LOWER(role) = ?
+                """,
+                UserRole.ADMIN.value,
+                now,
+                UserRole.ENGINEER.value,
+            )
+            updated = int(cursor.rowcount or 0)
+            conn.commit()
+        return max(0, updated)
 
     def _connect(self):
         import pyodbc

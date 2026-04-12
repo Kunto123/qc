@@ -13,7 +13,8 @@ def _seed_users() -> list[dict[str, Any]]:
     users = [
         (1, "admin", "admin123", UserRole.ADMIN),
         (2, "operator", "operator123", UserRole.OPERATOR),
-        (3, "engineer", "engineer123", UserRole.ENGINEER),
+        # Transitional account: keep legacy username but migrate role into supported 2-role policy.
+        (3, "engineer", "engineer123", UserRole.ADMIN),
     ]
     now = datetime.now(UTC).isoformat()
     return [
@@ -34,6 +35,22 @@ def _seed_users() -> list[dict[str, Any]]:
 class UsersRepository(JsonRepository):
     def __init__(self) -> None:
         super().__init__("users.json", _seed_users())
+        self.migrate_legacy_roles()
+
+    def migrate_legacy_roles(self) -> int:
+        users = self.load()
+        updated = 0
+        now = datetime.now(UTC).isoformat()
+        for item in users:
+            role = str(item.get("role") or "").strip().lower()
+            if role != UserRole.ENGINEER.value:
+                continue
+            item["role"] = UserRole.ADMIN.value
+            item["updated_at"] = now
+            updated += 1
+        if updated:
+            self.save(users)
+        return updated
 
     def _public_record(self, record: dict[str, Any] | None) -> dict[str, Any] | None:
         if not record:

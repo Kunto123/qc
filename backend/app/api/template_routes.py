@@ -26,7 +26,7 @@ def get_template(template_id: int):
 
 
 @template_blueprint.post("")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def create_template():
     payload = request.get_json(force=True) or {}
     try:
@@ -37,7 +37,7 @@ def create_template():
 
 
 @template_blueprint.put("/<int:template_id>")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def update_template(template_id: int):
     payload = request.get_json(force=True) or {}
     try:
@@ -50,7 +50,7 @@ def update_template(template_id: int):
 
 
 @template_blueprint.delete("/<int:template_id>")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def delete_template(template_id: int):
     ok = templates_repo.delete_template(template_id)
     if not ok:
@@ -69,7 +69,7 @@ def list_template_versions(template_id: int):
 
 
 @template_blueprint.post("/<int:template_id>/transition")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def transition_template_lifecycle(template_id: int):
     payload = request.get_json(force=True) or {}
     new_status = str(payload.get("status") or "").strip().lower()

@@ -7,6 +7,7 @@ import customtkinter as ctk
 
 from client_tk.app.components.async_bridge import run_async
 from client_tk.app.components.scrollable_frame import AutoHideScrollbar, ScrollableFrame
+from client_tk.app.screens.engineer.view import EngineerScreen
 from client_tk.app.components.template_forms import JsonEditor, LabeledValuePanel, TemplateEditorForm
 from client_tk.app.theme import APP_BG, ACCENT, ACCENT_HOVER, BORDER, SHELL_BG, TEXT_ON_ACCENT, TEXT_PRIMARY, TEXT_SECONDARY
 
@@ -66,6 +67,7 @@ class AdminScreen(ctk.CTkFrame):
         self._users_cache: list[dict] = []
         self._results_cache: list[dict] = []
         self._overview_cards_visible = True
+        self.workstation_tools_screen: EngineerScreen | None = None
 
         self.status_var = tk.StringVar(value="Admin workspace ready.")
         self.template_search_var = tk.StringVar()
@@ -111,7 +113,7 @@ class AdminScreen(ctk.CTkFrame):
         ctk.CTkLabel(self.header_top, text="Admin Workspace", font=("Segoe UI", 13, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w")
         self.header_identity = ctk.CTkLabel(
             self.header_top,
-            text=f"{identity}  |  {_safe_text(self.state.base_url)}  |  Kelola template, deployment, user, hasil inspeksi, dan dashboard.",
+            text=f"{identity}  |  {_safe_text(self.state.base_url)}  |  Kelola template, deployment, user, hasil inspeksi, dashboard, dan workstation tools.",
             text_color=MUTED_TEXT,
             wraplength=860,
             justify="left",
@@ -145,7 +147,7 @@ class AdminScreen(ctk.CTkFrame):
         notebook = ctk.CTkTabview(self, fg_color=APP_BG, corner_radius=0)
         notebook.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
 
-        tab_names = ["Templates", "Deployments", "Users", "Results", "Dashboard"]
+        tab_names = ["Templates", "Deployments", "Users", "Results", "Dashboard", "Workstation Tools"]
         for tab_name in tab_names:
             notebook.add(tab_name)
 
@@ -154,12 +156,14 @@ class AdminScreen(ctk.CTkFrame):
         users_tab = notebook.tab("Users")
         results_tab = notebook.tab("Results")
         dashboard_tab = notebook.tab("Dashboard")
+        workstation_tools_tab = notebook.tab("Workstation Tools")
 
         self.templates_tab = self._make_scrollable_page(templates_tab, "templates")
         self.deployments_tab = self._make_scrollable_page(deployments_tab, "deployments")
         self.users_tab = self._make_scrollable_page(users_tab, "users")
         self.results_tab = self._make_scrollable_page(results_tab, "results")
         self.dashboard_tab = self._make_scrollable_page(dashboard_tab, "dashboard")
+        self.workstation_tools_tab = workstation_tools_tab
 
         original_tab = notebook.tab
 
@@ -186,8 +190,15 @@ class AdminScreen(ctk.CTkFrame):
         self._build_users_tab()
         self._build_results_tab()
         self._build_dashboard_tab()
+        self._build_workstation_tools_tab()
 
         self._notebook = notebook
+
+    def _build_workstation_tools_tab(self) -> None:
+        host = ctk.CTkFrame(self.workstation_tools_tab, fg_color=APP_BG, corner_radius=0)
+        host.pack(fill="both", expand=True, padx=4, pady=4)
+        self.workstation_tools_screen = EngineerScreen(host, self.api, self.state)
+        self.workstation_tools_screen.pack(fill="both", expand=True)
 
     def _build_status_bar(self) -> None:
         status_bar = ctk.CTkFrame(self, fg_color=APP_BG, corner_radius=0)
@@ -486,7 +497,7 @@ class AdminScreen(ctk.CTkFrame):
         ttk.Combobox(
             filters,
             textvariable=self.user_role_filter_var,
-            values=["all", "admin", "operator", "engineer", "inactive"],
+            values=["all", "admin", "operator", "inactive"],
             state="readonly",
         ).grid(row=0, column=2, sticky="w")
 
@@ -515,7 +526,7 @@ class AdminScreen(ctk.CTkFrame):
         form.columnconfigure(1, weight=1)
         ttk.Label(
             form,
-            text="Tambahkan akun baru untuk admin, operator, atau engineer. Password wajib diisi saat create.",
+            text="Tambahkan akun baru untuk admin atau operator. Password wajib diisi saat create.",
             foreground=MUTED_TEXT,
             wraplength=380,
             justify="left",
@@ -523,13 +534,28 @@ class AdminScreen(ctk.CTkFrame):
 
         self.user_name = ttk.Entry(form)
         self.user_pass = ttk.Entry(form, show="*")
-        self.user_role = ttk.Combobox(form, values=["admin", "operator", "engineer"], state="readonly")
+        self.user_role = ttk.Combobox(form, values=["admin", "operator"], state="readonly")
         self.user_role.set("operator")
         self._grid_entry(form, 1, 0, "Username", self.user_name)
         self._grid_entry(form, 2, 0, "Password", self.user_pass)
         ttk.Label(form, text="Role").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
         self.user_role.grid(row=3, column=1, sticky="ew", pady=4)
         ttk.Button(form, text="Create User", command=self.create_user).grid(row=4, column=0, columnspan=2, sticky="e", pady=(10, 0))
+
+        role_change = ttk.LabelFrame(self.users_right, text="Change Selected Role", padding=12)
+        role_change.pack(fill="x", pady=(10, 0))
+        role_change.columnconfigure(1, weight=1)
+        ttk.Label(role_change, text="Target Role").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.user_role_change = ttk.Combobox(role_change, values=["admin", "operator"], state="readonly")
+        self.user_role_change.set("operator")
+        self.user_role_change.grid(row=0, column=1, sticky="ew", pady=4)
+        ttk.Button(role_change, text="Apply to Selected User", command=self.change_selected_user_role).grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="e",
+            pady=(8, 0),
+        )
 
     def _build_results_tab(self) -> None:
         self.results_tab.columnconfigure(0, weight=1)
@@ -1140,6 +1166,9 @@ class AdminScreen(ctk.CTkFrame):
             return
         item = next((entry for entry in self._users_cache if int(entry["id"]) == user_id), None)
         if item:
+            role_value = str(item.get("role") or "").strip().lower()
+            if hasattr(self, "user_role_change") and role_value in {"admin", "operator"}:
+                self.user_role_change.set(role_value)
             self.user_context_var.set(
                 f"Selected user #{item['id']} | {_safe_text(item.get('username'))} | {_safe_text(item.get('role'))} | "
                 f"{_format_status(item.get('is_active', True))}"
@@ -1175,6 +1204,25 @@ class AdminScreen(ctk.CTkFrame):
         self.user_pass.delete(0, "end")
         self.refresh_users()
         self._set_status(f"User `{username}` berhasil dibuat.")
+
+    def change_selected_user_role(self) -> None:
+        user_id = self._selected_treeview_id(self.users_table)
+        if user_id is None:
+            messagebox.showwarning("Users", "Pilih user dulu.")
+            return
+        new_role = self.user_role_change.get().strip().lower()
+        if new_role not in {"admin", "operator"}:
+            messagebox.showerror("Users", "Role harus admin atau operator.")
+            return
+        if not messagebox.askyesno("Users", f"Ubah role user #{user_id} menjadi '{new_role}'?"):
+            return
+        try:
+            self.api.change_user_role(user_id, new_role)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Users", str(exc))
+            return
+        self.refresh_users()
+        self._set_status(f"Role user #{user_id} diubah menjadi {new_role}.")
 
     def set_selected_user_active(self, is_active: bool) -> None:
         user_id = self._selected_treeview_id(self.users_table)
@@ -1448,3 +1496,16 @@ class AdminScreen(ctk.CTkFrame):
             self._set_status("Dashboard berhasil direfresh.")
 
         run_async(self, _load, callback=_done)
+
+    def shutdown(self) -> None:
+        if self.workstation_tools_screen is None:
+            return
+        if not self.workstation_tools_screen.winfo_exists():
+            self.workstation_tools_screen = None
+            return
+        self.workstation_tools_screen.destroy()
+        self.workstation_tools_screen = None
+
+    def destroy(self) -> None:
+        self.shutdown()
+        super().destroy()

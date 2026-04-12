@@ -143,6 +143,43 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertTrue(users)
         self.assertTrue(all("password_hash" not in item for item in users))
 
+    def test_00e2_legacy_engineer_login_is_mapped_to_supported_role(self) -> None:
+        login_response = self.client.post(
+            "/auth/login",
+            json={"username": "engineer", "password": "engineer123"},
+        )
+        self.assertEqual(login_response.status_code, 200, login_response.get_json())
+        user = login_response.get_json().get("user") or {}
+        self.assertEqual(user.get("role"), "admin")
+
+    def test_00e3_admin_cannot_create_engineer_role(self) -> None:
+        response = self.client.post(
+            "/auth/users",
+            json={"username": f"blocked_{uuid4().hex[:8]}", "password": "secret123", "role": "engineer"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(response.status_code, 400, response.get_json())
+        payload = response.get_json() or {}
+        self.assertIn("must be one of", str(payload.get("error") or ""))
+
+    def test_00e4_admin_cannot_change_role_to_engineer(self) -> None:
+        create_response = self.client.post(
+            "/auth/users",
+            json={"username": f"rolecheck_{uuid4().hex[:8]}", "password": "secret123", "role": "operator"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(create_response.status_code, 201, create_response.get_json())
+        user = create_response.get_json()
+
+        change_response = self.client.post(
+            f"/auth/users/{user['id']}/role",
+            json={"role": "engineer"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(change_response.status_code, 400, change_response.get_json())
+        payload = change_response.get_json() or {}
+        self.assertIn("must be one of", str(payload.get("error") or ""))
+
     def test_00f_admin_can_retry_failed_push_via_api(self) -> None:
         from backend.app.api import inspection_routes as inspection_routes_module
 

@@ -40,7 +40,7 @@ def list_datasets():
 
 
 @workstation_blueprint.post("/datasets")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def create_dataset():
     payload = request.get_json(force=True) or {}
     name = str(payload.get("name") or "").strip()
@@ -50,7 +50,7 @@ def create_dataset():
 
 
 @workstation_blueprint.delete("/datasets/<dataset_id>")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def delete_dataset(dataset_id: str):
     ok = datasets_repo.delete_dataset(dataset_id)
     if not ok:
@@ -89,7 +89,7 @@ def list_dataset_versions(dataset_id: str):
 
 
 @workstation_blueprint.post("/datasets/<dataset_id>/versions")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def create_dataset_version(dataset_id: str):
     payload = request.get_json(force=True) or {}
     try:
@@ -110,7 +110,7 @@ def get_dataset_version(dataset_id: str, version_id: str):
 
 
 @workstation_blueprint.post("/datasets/<dataset_id>/versions/<version_id>/export")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def export_dataset_version(dataset_id: str, version_id: str):
     try:
         return jsonify(dataset_versions_repo.export_version(dataset_id, version_id))
@@ -121,7 +121,7 @@ def export_dataset_version(dataset_id: str, version_id: str):
 
 
 @workstation_blueprint.post("/datasets/<dataset_id>/upload")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def upload_dataset_file(dataset_id: str):
     if request.files:
         target = str(request.form.get("target") or "images").strip()
@@ -166,7 +166,7 @@ def get_annotation(dataset_id: str, image_name: str):
 
 
 @workstation_blueprint.post("/datasets/<dataset_id>/annotations/<image_name>")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def save_annotation(dataset_id: str, image_name: str):
     payload = request.get_json(force=True)
     if payload is None:
@@ -200,7 +200,7 @@ def get_augment_job(job_id: str):
 
 
 @workstation_blueprint.post("/augment/jobs")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def create_augment_job():
     payload = request.get_json(force=True) or {}
     dataset_id = str(payload.get("dataset_id") or "").strip()
@@ -223,7 +223,7 @@ def create_augment_job():
 
 
 @workstation_blueprint.post("/augment/jobs/<job_id>/cancel")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def cancel_augment_job(job_id: str):
     try:
         result = augment_repo.cancel_job(job_id)
@@ -251,7 +251,7 @@ def list_training_base_models():
 
 
 @workstation_blueprint.post("/train/jobs")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def create_training_job():
     payload = request.get_json(force=True) or {}
     dataset_id = str(payload.get("dataset_id") or "").strip()
@@ -312,7 +312,7 @@ def get_training_job(job_id: str):
 
 
 @workstation_blueprint.post("/train/jobs/<job_id>/cancel")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def cancel_training_job(job_id: str):
     try:
         result = training_service.cancel_job(job_id)
@@ -328,7 +328,7 @@ def list_models():
 
 
 @workstation_blueprint.post("/models/upload")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def upload_model():
     payload = request.get_json(force=True) or {}
     name = str(payload.get("name") or "").strip()
@@ -364,7 +364,7 @@ def upload_model():
 
 
 @workstation_blueprint.post("/models")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def create_model():
     payload = request.get_json(force=True) or {}
     name = str(payload.get("name") or "").strip()
@@ -390,7 +390,7 @@ def create_model():
 
 
 @workstation_blueprint.post("/models/<int:model_id>/transition")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def transition_model_lifecycle(model_id: int):
     payload = request.get_json(force=True) or {}
     new_status = str(payload.get("status") or "").strip().lower()
@@ -417,7 +417,7 @@ def transition_model_lifecycle(model_id: int):
 # ---------------------------------------------------------------------------
 
 @workstation_blueprint.get("/workstations")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def list_workstations():
     """List all registered workstations and their last-seen timestamps."""
     return jsonify(workstation_registry_repo.list_workstations())

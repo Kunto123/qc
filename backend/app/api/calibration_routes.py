@@ -12,7 +12,7 @@ calibration_blueprint = Blueprint("calibration", __name__, url_prefix="/calibrat
 
 
 @calibration_blueprint.post("/color-profile")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def compute_color_profile():
     payload = request.get_json(force=True) or {}
     try:
@@ -35,7 +35,7 @@ def list_profiles():
 
 
 @calibration_blueprint.post("/profiles")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def create_profile():
     payload = request.get_json(force=True) or {}
     expiry_raw = payload.get("expiry_interval_days")
@@ -77,7 +77,7 @@ def get_active_profile():
 
 
 @calibration_blueprint.delete("/profiles/<int:profile_id>")
-@require_roles(UserRole.ADMIN, UserRole.ENGINEER)
+@require_roles(UserRole.ADMIN)
 def delete_profile(profile_id: int):
     ok = profiles_repo.delete(profile_id)
     if not ok:
