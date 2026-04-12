@@ -25,7 +25,7 @@ class JsonRepository:
                 data = self._clone_default()
                 self.save(data)
                 return data
-            return json.loads(self._path.read_text(encoding="utf-8"))
+            return json.loads(self._path.read_text(encoding="utf-8-sig"))
 
     def save(self, data: Any) -> None:
         with self._lock:
