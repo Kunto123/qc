@@ -44,6 +44,21 @@ _TRAINING_STATUS_COLORS = {
     "failed": "#dc2626",
     "cancelled": "#d97706",
 }
+_TRAINING_HPARAM_RANGES = {
+    "epochs": (1, 1000),
+    "imgsz": (64, 2048),
+    "batch": (1, 256),
+    "patience": (1, 500),
+    "workers": (0, 32),
+}
+_TRAINING_HPARAM_DEFAULTS = {
+    "epochs": 1,
+    "imgsz": 320,
+    "batch": 4,
+    "patience": 5,
+    "workers": 0,
+    "cache": False,
+}
 
 
 class EngineerScreen(ctk.CTkFrame):
@@ -672,6 +687,75 @@ class EngineerScreen(ctk.CTkFrame):
             justify="left",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.train_dataset_version.bind("<<ComboboxSelected>>", self.on_dataset_version_selected)
+
+        hparams_panel = ttk.LabelFrame(self.train_panel, text="Hyperparameters", padding=8)
+        hparams_panel.pack(fill="x", pady=(8, 0))
+        hparams_panel.columnconfigure(1, weight=1)
+        hparams_panel.columnconfigure(3, weight=1)
+        hparams_panel.columnconfigure(5, weight=1)
+
+        self.train_epochs = ttk.Spinbox(
+            hparams_panel,
+            from_=_TRAINING_HPARAM_RANGES["epochs"][0],
+            to=_TRAINING_HPARAM_RANGES["epochs"][1],
+            increment=1,
+            width=8,
+        )
+        self.train_imgsz = ttk.Spinbox(
+            hparams_panel,
+            from_=_TRAINING_HPARAM_RANGES["imgsz"][0],
+            to=_TRAINING_HPARAM_RANGES["imgsz"][1],
+            increment=1,
+            width=8,
+        )
+        self.train_batch = ttk.Spinbox(
+            hparams_panel,
+            from_=_TRAINING_HPARAM_RANGES["batch"][0],
+            to=_TRAINING_HPARAM_RANGES["batch"][1],
+            increment=1,
+            width=8,
+        )
+        self.train_patience = ttk.Spinbox(
+            hparams_panel,
+            from_=_TRAINING_HPARAM_RANGES["patience"][0],
+            to=_TRAINING_HPARAM_RANGES["patience"][1],
+            increment=1,
+            width=8,
+        )
+        self.train_workers = ttk.Spinbox(
+            hparams_panel,
+            from_=_TRAINING_HPARAM_RANGES["workers"][0],
+            to=_TRAINING_HPARAM_RANGES["workers"][1],
+            increment=1,
+            width=8,
+        )
+        self.train_cache_var = tk.BooleanVar(value=bool(_TRAINING_HPARAM_DEFAULTS["cache"]))
+        self.train_cache = ttk.Checkbutton(hparams_panel, variable=self.train_cache_var, text="Enable")
+
+        self._grid_entry(hparams_panel, 0, 0, "Epochs", self.train_epochs)
+        self._grid_entry(hparams_panel, 0, 2, "Image Size", self.train_imgsz)
+        self._grid_entry(hparams_panel, 0, 4, "Batch", self.train_batch)
+        self._grid_entry(hparams_panel, 1, 0, "Patience", self.train_patience)
+        self._grid_entry(hparams_panel, 1, 2, "Workers", self.train_workers)
+        ttk.Label(hparams_panel, text="Cache").grid(row=1, column=4, sticky="w", padx=(0, 8), pady=4)
+        self.train_cache.grid(row=1, column=5, sticky="w", pady=4)
+
+        self.train_epochs.set(str(_TRAINING_HPARAM_DEFAULTS["epochs"]))
+        self.train_imgsz.set(str(_TRAINING_HPARAM_DEFAULTS["imgsz"]))
+        self.train_batch.set(str(_TRAINING_HPARAM_DEFAULTS["batch"]))
+        self.train_patience.set(str(_TRAINING_HPARAM_DEFAULTS["patience"]))
+        self.train_workers.set(str(_TRAINING_HPARAM_DEFAULTS["workers"]))
+
+        ttk.Label(
+            hparams_panel,
+            text=(
+                "Rentang: epochs 1-1000, imgsz 64-2048, batch 1-256, "
+                "patience 1-500, workers 0-32."
+            ),
+            foreground="#64748b",
+            wraplength=540,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(4, 0))
 
         button_bar = ttk.Frame(self.train_panel)
         button_bar.pack(fill="x", pady=(8, 0))
@@ -2341,7 +2425,16 @@ class EngineerScreen(ctk.CTkFrame):
             self._ignore_next_training_job_selection_event = True
             self.after_idle(self._clear_training_job_selection_guard)
             if not self._select_training_job_in_listbox(self._active_training_job_id):
-                self._select_training_job_in_listbox(filtered_items[0].get("id"))
+                # No prior selection: prefer an active (queued/running) job,
+                # otherwise fall back to the most recently created one (last in list).
+                _fallback_id: str | None = None
+                for _candidate in reversed(filtered_items):
+                    if str(_candidate.get("status") or "").strip().lower() in {"queued", "running"}:
+                        _fallback_id = _candidate.get("id")
+                        break
+                if _fallback_id is None:
+                    _fallback_id = filtered_items[-1].get("id")
+                self._select_training_job_in_listbox(_fallback_id)
             self._apply_training_selected()
             self._schedule_training_auto_refresh()
         else:
@@ -2451,7 +2544,10 @@ class EngineerScreen(ctk.CTkFrame):
 
     @staticmethod
     def _format_training_percent(value: object) -> str:
-        raw = str(value or "").strip()
+        # Explicit None check so that 0 and 0.0 format as "0.00%" rather than "-".
+        if value is None:
+            return "-"
+        raw = str(value).strip()
         if not raw:
             return "-"
         if raw.endswith("%"):
@@ -2466,7 +2562,10 @@ class EngineerScreen(ctk.CTkFrame):
 
     @staticmethod
     def _format_training_decimal(value: object, *, digits: int = 3) -> str:
-        raw = str(value or "").strip()
+        # Explicit None check so that 0 and 0.0 format as "0.000" rather than "-".
+        if value is None:
+            return "-"
+        raw = str(value).strip()
         if not raw:
             return "-"
         if raw.endswith("%"):
@@ -2484,6 +2583,10 @@ class EngineerScreen(ctk.CTkFrame):
             ("MAE", ("mae", "validation_mae", "val_mae")),
             ("MSE", ("mse", "validation_mse", "val_mse")),
             ("Loss", ("loss", "val_loss", "validation_loss")),
+            # YOLO-specific validation losses stored in job["evaluation"] by training worker.
+            ("Box", ("val_box_loss",)),
+            ("Cls", ("val_cls_loss",)),
+            ("Dfl", ("val_dfl_loss",)),
             ("Error", ("error",)),
         ):
             value = self._training_metric_value(item, *keys)
@@ -2583,6 +2686,29 @@ class EngineerScreen(ctk.CTkFrame):
     def _reset_training_progress_widgets(self) -> None:
         self._set_training_progress_widgets(percent=0, stage="-", message="-")
 
+    def _parse_training_hparam(self, *, key: str, widget) -> int:
+        raw_value = str(widget.get() or "").strip()
+        if not raw_value:
+            return int(_TRAINING_HPARAM_DEFAULTS[key])
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} harus bilangan bulat.") from exc
+        min_value, max_value = _TRAINING_HPARAM_RANGES[key]
+        if parsed < min_value or parsed > max_value:
+            raise ValueError(f"{key} harus di antara {min_value} dan {max_value}.")
+        return parsed
+
+    def _build_training_hparam_payload(self) -> dict:
+        return {
+            "epochs": self._parse_training_hparam(key="epochs", widget=self.train_epochs),
+            "imgsz": self._parse_training_hparam(key="imgsz", widget=self.train_imgsz),
+            "batch": self._parse_training_hparam(key="batch", widget=self.train_batch),
+            "patience": self._parse_training_hparam(key="patience", widget=self.train_patience),
+            "workers": self._parse_training_hparam(key="workers", widget=self.train_workers),
+            "cache": bool(self.train_cache_var.get()),
+        }
+
     def create_training_job(self):
         spec = self._selected_base_model_spec()
         if spec is None:
@@ -2591,6 +2717,11 @@ class EngineerScreen(ctk.CTkFrame):
         dataset_id = self.train_dataset.get().strip()
         if not dataset_id:
             messagebox.showwarning("Training", "Dataset ID wajib diisi.")
+            return
+        try:
+            hparams_payload = self._build_training_hparam_payload()
+        except ValueError as exc:
+            messagebox.showerror("Training", str(exc))
             return
         version = self._selected_dataset_version_spec()
         payload = {
@@ -2602,6 +2733,7 @@ class EngineerScreen(ctk.CTkFrame):
             "base_model_weights_name": spec.get("weights_name"),
             "device_mode": self.train_device.get().strip() or "auto",
         }
+        payload.update(hparams_payload)
         version = version or self._selected_dataset_version_record() or self._active_dataset_version_record()
         if version is not None:
             payload["dataset_version_id"] = version.get("id")

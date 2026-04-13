@@ -45,6 +45,11 @@ class AppConfig:
     training_default_patience: int = max(1, int(os.getenv("QC_SUITE_TRAINING_DEFAULT_PATIENCE", "5")))
     push_worker_interval_seconds: int = max(5, int(os.getenv("QC_SUITE_PUSH_WORKER_INTERVAL_SECONDS", "30")))
     push_worker_max_retry: int = max(1, int(os.getenv("QC_SUITE_PUSH_WORKER_MAX_RETRY", "5")))
+    # Logging toggles — default ON for backward compatibility.
+    # Set to "0" to suppress 2xx/3xx access log noise while keeping >= 400 errors visible.
+    access_logs_enabled: bool = os.getenv("QC_SUITE_ACCESS_LOGS_ENABLED", "1").strip() != "0"
+    # Set to "0" to raise werkzeug request logger to ERROR level (suppresses per-request lines).
+    werkzeug_logs_enabled: bool = os.getenv("QC_SUITE_WERKZEUG_REQUEST_LOGS_ENABLED", "1").strip() != "0"
 
     @property
     def sql_enabled(self) -> bool:

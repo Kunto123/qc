@@ -62,6 +62,22 @@ def configure_ttk_navy_theme(style: ttk.Style) -> None:
         foreground=[("disabled", TEXT_SECONDARY)],
     )
     style.configure(
+        "TSpinbox",
+        fieldbackground=INPUT_BG,
+        background=INPUT_BG,
+        foreground=TEXT_PRIMARY,
+        insertcolor=TEXT_PRIMARY,
+        arrowcolor=TEXT_PRIMARY,
+        borderwidth=1,
+        relief="flat",
+    )
+    style.map(
+        "TSpinbox",
+        fieldbackground=[("disabled", PANEL_ALT_BG), ("readonly", PANEL_BG)],
+        foreground=[("disabled", TEXT_SECONDARY)],
+        arrowcolor=[("disabled", TEXT_SECONDARY)],
+    )
+    style.configure(
         "TCombobox",
         fieldbackground=INPUT_BG,
         background=INPUT_BG,

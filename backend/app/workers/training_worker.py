@@ -282,6 +282,80 @@ class TrainingWorker:
             return [str(item) for item in names]
         return []
 
+    @staticmethod
+    def _extract_run_metrics(run_dir: Path, epochs_requested: int) -> tuple[dict, dict, dict]:
+        """Parse results.csv and return (metrics, evaluation, epoch_summary).
+
+        Column names are stripped of BOM and whitespace for YOLO compatibility.
+        Returns empty dicts (with epochs_ran=0) when results.csv is absent or unreadable.
+        """
+        import csv as _csv
+
+        results_csv = run_dir / "results.csv"
+        metrics: dict = {}
+        evaluation: dict = {}
+        epoch_summary: dict = {
+            "epochs_requested": epochs_requested,
+            "epochs_ran": 0,
+            "early_stopped": False,
+        }
+
+        if not results_csv.exists():
+            return metrics, evaluation, epoch_summary
+
+        try:
+            rows: list[dict] = []
+            with results_csv.open(encoding="utf-8-sig") as fh:
+                reader = _csv.DictReader(fh)
+                for row in reader:
+                    rows.append({k.strip(): v.strip() for k, v in row.items()})
+
+            if not rows:
+                return metrics, evaluation, epoch_summary
+
+            epochs_ran = len(rows)
+            epoch_summary["epochs_ran"] = epochs_ran
+            epoch_summary["early_stopped"] = epochs_ran < epochs_requested
+
+            last = rows[-1]
+
+            def _sf(val: object) -> float | None:
+                try:
+                    return float(val)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    return None
+
+            precision = _sf(last.get("metrics/precision(B)"))
+            recall    = _sf(last.get("metrics/recall(B)"))
+            map50     = _sf(last.get("metrics/mAP50(B)"))
+            map50_95  = _sf(last.get("metrics/mAP50-95(B)"))
+
+            if precision is not None:
+                metrics["precision"] = precision
+                metrics["accuracy"] = precision  # UI "Accuracy" column reads this key
+            if recall is not None:
+                metrics["recall"] = recall
+            if map50 is not None:
+                metrics["mAP50"] = map50
+                metrics["map50"] = map50
+            if map50_95 is not None:
+                metrics["mAP50_95"] = map50_95
+                metrics["map50_95"] = map50_95
+
+            for csv_col, eval_key in (
+                ("val/box_loss", "val_box_loss"),
+                ("val/cls_loss", "val_cls_loss"),
+                ("val/dfl_loss", "val_dfl_loss"),
+            ):
+                val = _sf(last.get(csv_col))
+                if val is not None:
+                    evaluation[eval_key] = val
+
+        except Exception:  # noqa: BLE001
+            logger.warning("[training-worker] failed to parse results.csv from: %s", run_dir)
+
+        return metrics, evaluation, epoch_summary
+
     def _resolve_output_weights_path(self, *, model, run_project: Path, run_name: str) -> Path:
         candidates: list[Path] = []
 
@@ -311,8 +385,8 @@ class TrainingWorker:
         job: dict,
         artifact_path: Path,
         resolution: DeviceResolution,
-        timeout_seconds: int,
-    ) -> list[str]:
+        timeout_seconds: int,  # noqa: ARG002 — kept for API compatibility; hard stop handled by caller
+    ) -> tuple[list[str], dict, dict, dict]:
         from ultralytics import YOLO  # type: ignore
 
         self._raise_if_cancelled(job_id)
@@ -325,7 +399,22 @@ class TrainingWorker:
 
         run_project.mkdir(parents=True, exist_ok=True)
         model = YOLO(weights_name)
+
+        # Log hparams before training starts so log reflects what was actually requested.
+        self._repo.update_job(
+            job_id,
+            log_line=(
+                f"Training started: epochs={hparams['epochs']}, imgsz={hparams['imgsz']}, "
+                f"batch={hparams['batch']}, patience={hparams['patience']}, "
+                f"workers={hparams['workers']}, weights={weights_name}, "
+                f"device={resolution.effective_device}"
+            ),
+        )
+
         self._set_progress(job_id, percent=35, stage="training", message="YOLO training is running.")
+        # NOTE: `time=` (hours limit) is intentionally omitted — it overrides `epochs` in
+        # Ultralytics and caused training to run far more epochs than requested. The elapsed
+        # wall-clock guard in _run_job handles the timeout after training returns.
         model.train(
             data=str(data_yaml_path),
             epochs=hparams["epochs"],
@@ -335,7 +424,6 @@ class TrainingWorker:
             workers=hparams["workers"],
             cache=hparams["cache"],
             device=resolution.effective_device,
-            time=max(0.01, float(timeout_seconds) / 3600.0),
             project=str(run_project),
             name=run_name,
             exist_ok=True,
@@ -343,6 +431,20 @@ class TrainingWorker:
         )
         self._raise_if_cancelled(job_id)
         self._set_progress(job_id, percent=75, stage="validating", message="Validating generated weights artifact.")
+
+        # Extract metrics from results.csv before copying weights.
+        run_dir = run_project / run_name
+        metrics, evaluation, epoch_summary = self._extract_run_metrics(run_dir, hparams["epochs"])
+
+        # Safety assertion: epochs actually run must not exceed what was requested.
+        # Early stopping (epochs_ran < epochs_requested) is acceptable.
+        epochs_ran = epoch_summary.get("epochs_ran", 0)
+        if epochs_ran > hparams["epochs"]:
+            raise ValueError(
+                f"Epoch safety violation: requested {hparams['epochs']} epoch(s) but "
+                f"results.csv records {epochs_ran} rows. "
+                "A conflicting time= or epochs override may be active."
+            )
 
         source_weights = self._resolve_output_weights_path(model=model, run_project=run_project, run_name=run_name)
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
@@ -356,32 +458,49 @@ class TrainingWorker:
         validated_model = YOLO(str(artifact_path))
         self._set_progress(job_id, percent=85, stage="validating", message="Extracting class metadata from trained model.")
         class_names = self._extract_class_names_from_model(validated_model)
-        if class_names:
-            return class_names
+        if not class_names:
+            params = job.get("params") if isinstance(job.get("params"), dict) else {}
+            class_names = list(params.get("class_names") or params.get("classes") or [])
 
-        params = job.get("params") if isinstance(job.get("params"), dict) else {}
-        return list(params.get("class_names") or params.get("classes") or [])
+        return class_names, metrics, evaluation, epoch_summary
 
-    def _run_simulated_training(self, *, job_id: str, artifact_path: Path) -> None:
+    def _run_simulated_training(
+        self, *, job_id: str, artifact_path: Path, epochs_requested: int
+    ) -> tuple[dict, dict, dict]:
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._repo.update_job(
+            job_id,
+            log_line=f"Training started (simulated): epochs={epochs_requested}",
+        )
 
         # Simulate small work chunks so cancellation can be observed promptly.
         remaining = _SIMULATED_TOTAL_SECONDS
-        completed = 0.0
+        completed_time = 0.0
         self._set_progress(job_id, percent=20, stage="training", message="Simulated training started.")
         while remaining > 0:
             self._raise_if_cancelled(job_id)
             step = min(_SIMULATED_STEP_SECONDS, remaining)
             time.sleep(step)
             remaining -= step
-            completed += step
-            ratio = min(1.0, completed / _SIMULATED_TOTAL_SECONDS)
+            completed_time += step
+            ratio = min(1.0, completed_time / _SIMULATED_TOTAL_SECONDS)
             progress = 20 + int(round(ratio * 55))
             self._set_progress(job_id, percent=progress, stage="training", message="Simulated training is running.")
 
         artifact_path.write_bytes(b"QC Suite simulated trained model artifact\n")
         self._set_progress(job_id, percent=80, stage="validating", message="Validating simulated artifact.")
         self._raise_if_cancelled(job_id)
+
+        # Return stub metrics so the job record and UI have non-empty fields.
+        metrics = {"precision": 0.0, "recall": 0.0, "mAP50": 0.0, "map50": 0.0, "accuracy": 0.0}
+        evaluation: dict = {}
+        epoch_summary = {
+            "epochs_requested": epochs_requested,
+            "epochs_ran": epochs_requested,
+            "early_stopped": False,
+        }
+        return metrics, evaluation, epoch_summary
 
     def _register_trained_model(
         self,
@@ -476,13 +595,17 @@ class TrainingWorker:
             artifact_path = self._trained_artifact_path(trained_path)
             self._raise_if_cancelled(job_id)
 
+            params = job.get("params") if isinstance(job.get("params"), dict) else {}
+            epochs_requested = int(params.get("epochs") or 1)
+
             if self._training_mode == "simulated":
-                self._run_simulated_training(job_id=job_id, artifact_path=artifact_path)
-                params = job.get("params") if isinstance(job.get("params"), dict) else {}
+                metrics, evaluation, epoch_summary = self._run_simulated_training(
+                    job_id=job_id, artifact_path=artifact_path, epochs_requested=epochs_requested
+                )
                 raw_class_names = params.get("class_names") or params.get("classes") or []
                 class_names = [str(item) for item in raw_class_names] if isinstance(raw_class_names, list) else []
             else:
-                class_names = self._run_real_training(
+                class_names, metrics, evaluation, epoch_summary = self._run_real_training(
                     job_id=job_id,
                     job=job,
                     artifact_path=artifact_path,
@@ -506,16 +629,32 @@ class TrainingWorker:
             )
             self._raise_if_cancelled(job_id)
 
+            # Build a compact metric summary for the log line.
+            _summary_parts: list[str] = [
+                f"epochs={epoch_summary.get('epochs_ran', '?')}/{epoch_summary.get('epochs_requested', '?')}",
+            ]
+            if epoch_summary.get("early_stopped"):
+                _summary_parts.append("early_stopped=true")
+            for _mkey, _mlabel in (("mAP50", "mAP50"), ("precision", "precision"), ("recall", "recall")):
+                _mval = metrics.get(_mkey)
+                if _mval is not None:
+                    _summary_parts.append(f"{_mlabel}={_mval:.4f}")
+            _metric_summary = ", ".join(_summary_parts)
+
             self._repo.transition(
                 job_id,
                 "completed",
                 trained_model_path=trained_path,
                 registered_model_id=(registered_model or {}).get("id"),
+                metrics=metrics,
+                evaluation=evaluation,
+                epoch_summary=epoch_summary,
                 log_line=(
                     f"Training completed. Model saved to: {trained_path} "
                     f"({self._device_log_suffix(resolution)}, base_model={base_model_label}"
                     f"{', dataset_version=' + dataset_version_label if dataset_version_label else ''}, "
-                    f"mode={self._training_mode}, elapsed={elapsed_seconds}s)"
+                    f"mode={self._training_mode}, elapsed={elapsed_seconds}s) "
+                    f"[Summary: {_metric_summary}]"
                 ),
                 progress_percent=100,
                 progress_stage="completed",

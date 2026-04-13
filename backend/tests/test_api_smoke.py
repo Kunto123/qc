@@ -1300,6 +1300,12 @@ class ApiSmokeTest(unittest.TestCase):
                 "dataset_id": dataset["id"],
                 "base_model": "yolov11m",
                 "device_mode": "cpu",
+                "epochs": 3,
+                "imgsz": 640,
+                "batch": 8,
+                "patience": 20,
+                "workers": 2,
+                "cache": True,
                 "classes": ["K0W-HB0", "K1Z-FA0"],
                 "note": "phase8 regression",
             },
@@ -1314,6 +1320,12 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(training_payload["base_model_family"], "yolov11")
         self.assertEqual(training_payload["base_model_variant"], "m")
         self.assertEqual(training_payload["base_model_display_name"], "YOLOv11 Medium")
+        self.assertEqual(training_payload["params"]["epochs"], 3)
+        self.assertEqual(training_payload["params"]["imgsz"], 640)
+        self.assertEqual(training_payload["params"]["batch"], 8)
+        self.assertEqual(training_payload["params"]["patience"], 20)
+        self.assertEqual(training_payload["params"]["workers"], 2)
+        self.assertTrue(training_payload["params"]["cache"])
 
         filtered_dashboard_response = self.client.get(
             "/dashboard/summary?line_id=LINE-FILTER&station_id=ST-FILTER&template_version_id=1",

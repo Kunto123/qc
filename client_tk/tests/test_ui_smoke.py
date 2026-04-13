@@ -1078,6 +1078,91 @@ class UiSmokeTest(unittest.TestCase):
 
             self.assertTrue(captured_payloads)
             self.assertEqual(captured_payloads[-1].get("dataset_version_id"), "ver-1")
+            self.assertEqual(captured_payloads[-1].get("epochs"), 1)
+            self.assertEqual(captured_payloads[-1].get("imgsz"), 320)
+            self.assertEqual(captured_payloads[-1].get("batch"), 4)
+            self.assertEqual(captured_payloads[-1].get("patience"), 5)
+            self.assertEqual(captured_payloads[-1].get("workers"), 0)
+            self.assertEqual(captured_payloads[-1].get("cache"), False)
+
+            screen.destroy()
+
+    def test_engineer_training_job_includes_custom_hyperparams(self) -> None:
+        frame = np.zeros((24, 24, 3), dtype=np.uint8)
+        ok, buffer = cv2.imencode(".png", frame)
+        self.assertTrue(ok)
+        image_bytes = buffer.tobytes()
+
+        captured_payloads: list[dict] = []
+
+        def create_training_job(payload: dict):
+            captured_payloads.append(dict(payload))
+            return {"id": "train-hparams", **payload}
+
+        with mock.patch.object(
+            self.api,
+            "list_datasets",
+            return_value=[{"id": "ds-vers", "name": "Dataset Versioned"}],
+        ), mock.patch.object(
+            self.api,
+            "list_dataset_files",
+            return_value=[{"name": "sample.png", "path": "Z:/missing/sample.png", "size": 123}],
+        ), mock.patch.object(
+            self.api,
+            "download_dataset_image",
+            return_value=image_bytes,
+        ), mock.patch.object(
+            self.api,
+            "get_annotation",
+            return_value={"labels": []},
+        ), mock.patch.object(
+            self.api,
+            "list_dataset_versions",
+            return_value=[
+                {
+                    "id": "ver-1",
+                    "display_label": "v1 | Snapshot v1 | ready | 1/1 ann",
+                    "version_number": 1,
+                    "name": "Snapshot v1",
+                    "status": "ready",
+                    "export_format": "yolo",
+                    "export_root": "data/export/ver-1",
+                    "image_count": 1,
+                    "annotated_image_count": 1,
+                    "coverage_percent": 100.0,
+                    "class_names": ["K0W-HB0"],
+                }
+            ],
+        ), mock.patch.object(
+            self.api,
+            "create_training_job",
+            side_effect=create_training_job,
+        ):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+
+            screen.train_epochs.delete(0, "end")
+            screen.train_epochs.insert(0, "3")
+            screen.train_imgsz.delete(0, "end")
+            screen.train_imgsz.insert(0, "640")
+            screen.train_batch.delete(0, "end")
+            screen.train_batch.insert(0, "8")
+            screen.train_patience.delete(0, "end")
+            screen.train_patience.insert(0, "20")
+            screen.train_workers.delete(0, "end")
+            screen.train_workers.insert(0, "2")
+            screen.train_cache_var.set(True)
+
+            screen.create_training_job()
+
+            self.assertTrue(captured_payloads)
+            payload = captured_payloads[-1]
+            self.assertEqual(payload.get("epochs"), 3)
+            self.assertEqual(payload.get("imgsz"), 640)
+            self.assertEqual(payload.get("batch"), 8)
+            self.assertEqual(payload.get("patience"), 20)
+            self.assertEqual(payload.get("workers"), 2)
+            self.assertEqual(payload.get("cache"), True)
 
             screen.destroy()
 
@@ -2269,3 +2354,96 @@ class UiSmokeTest(unittest.TestCase):
         self.root.update_idletasks()
 
         self.assertEqual((live_view.winfo_width(), live_view.winfo_height()), initial_size)
+
+    # ------------------------------------------------------------------
+    # Training summary formatter regression tests
+    # ------------------------------------------------------------------
+
+    def test_format_training_percent_zero_float_shows_zero_percent(self) -> None:
+        """0.0 must render as '0.00%', not '-'."""
+        self.assertEqual(EngineerScreen._format_training_percent(0.0), "0.00%")
+
+    def test_format_training_percent_zero_int_shows_zero_percent(self) -> None:
+        self.assertEqual(EngineerScreen._format_training_percent(0), "0.00%")
+
+    def test_format_training_percent_none_shows_dash(self) -> None:
+        self.assertEqual(EngineerScreen._format_training_percent(None), "-")
+
+    def test_format_training_percent_nonzero_value(self) -> None:
+        self.assertEqual(EngineerScreen._format_training_percent(0.875), "87.50%")
+
+    def test_format_training_decimal_zero_float_shows_zeros(self) -> None:
+        """0.0 must render as '0.000', not '-'."""
+        self.assertEqual(EngineerScreen._format_training_decimal(0.0), "0.000")
+
+    def test_format_training_decimal_zero_int_shows_zeros(self) -> None:
+        self.assertEqual(EngineerScreen._format_training_decimal(0), "0.000")
+
+    def test_format_training_decimal_none_shows_dash(self) -> None:
+        self.assertEqual(EngineerScreen._format_training_decimal(None), "-")
+
+    def test_training_error_summary_reads_val_box_loss(self) -> None:
+        """_training_error_summary falls back to val_box_loss when no RMSE/Loss present."""
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        job = {
+            "status": "completed",
+            "evaluation": {"val_box_loss": 0.9234},
+        }
+        summary = screen._training_error_summary(job)
+        self.assertTrue(
+            summary.startswith("Box"),
+            f"Expected 'Box ...' but got: {summary!r}",
+        )
+        self.assertIn("0.9234", summary)
+        screen.destroy()
+
+    def test_training_error_summary_prefers_rmse_over_box_loss(self) -> None:
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        job = {
+            "status": "completed",
+            "metrics": {"rmse": 0.1111},
+            "evaluation": {"val_box_loss": 0.9234},
+        }
+        summary = screen._training_error_summary(job)
+        self.assertTrue(summary.startswith("RMSE"), f"Expected 'RMSE ...' but got: {summary!r}")
+        screen.destroy()
+
+    def test_apply_training_jobs_default_selects_newest_not_oldest(self) -> None:
+        """When no prior selection, the newest job (last in list) is auto-selected."""
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+
+        older = {"id": "job-old", "status": "completed", "dataset_id": "ds1",
+                 "params": {}, "base_model": "yolov5s"}
+        newer = {"id": "job-new", "status": "completed", "dataset_id": "ds1",
+                 "params": {}, "base_model": "yolov5s"}
+        screen._active_training_job_id = None
+        screen._apply_training_jobs([older, newer])
+        screen.update_idletasks()
+
+        self.assertEqual(
+            screen._active_training_job_id, "job-new",
+            "Newest job should be auto-selected when no prior selection exists",
+        )
+        screen.destroy()
+
+    def test_apply_training_jobs_prefers_active_over_newest(self) -> None:
+        """When an active job exists, it should be preferred over the newest completed."""
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+
+        completed = {"id": "job-done", "status": "completed", "dataset_id": "ds1",
+                     "params": {}, "base_model": "yolov5s"}
+        running   = {"id": "job-run",  "status": "running",   "dataset_id": "ds1",
+                     "params": {}, "base_model": "yolov5s"}
+        screen._active_training_job_id = None
+        screen._apply_training_jobs([completed, running])
+        screen.update_idletasks()
+
+        self.assertEqual(
+            screen._active_training_job_id, "job-run",
+            "Active (running) job should be preferred over completed one",
+        )
+        screen.destroy()
