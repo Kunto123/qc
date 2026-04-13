@@ -398,8 +398,24 @@ def create_training_job():
     dataset_version_id = str(payload.get("dataset_version_id") or "").strip() or None
     if not dataset_id:
         return jsonify({"error": "dataset_id is required"}), 400
+    if not datasets_repo.get_dataset(dataset_id):
+        return jsonify({"error": "Dataset not found"}), 404
     if device_mode not in {"auto", "gpu", "cpu"}:
         return jsonify({"error": "device_mode must be one of: auto, gpu, cpu"}), 400
+
+    for key, min_value, max_value in (("epochs", 1, 1000), ("imgsz", 64, 2048), ("batch", 1, 256), ("patience", 1, 500), ("workers", 0, 32)):
+        if payload.get(key) in (None, ""):
+            continue
+        try:
+            value = int(payload.get(key))
+        except (TypeError, ValueError):
+            return jsonify({"error": f"{key} must be an integer"}), 400
+        if value < min_value or value > max_value:
+            return jsonify({"error": f"{key} must be between {min_value} and {max_value}"}), 400
+        payload[key] = value
+
+    if "cache" in payload and not isinstance(payload.get("cache"), bool):
+        payload["cache"] = str(payload.get("cache") or "").strip().lower() in {"1", "true", "yes", "on"}
     try:
         base_model_spec = resolve_base_model(base_model, family=base_model_family, variant=base_model_variant)
     except ValueError as exc:
@@ -408,6 +424,10 @@ def create_training_job():
         dataset_version = dataset_versions_repo.get_version(dataset_version_id)
         if dataset_version is None or str(dataset_version.get("dataset_id")) != str(dataset_id):
             return jsonify({"error": "Dataset version not found"}), 404
+        export_root = Path(str(dataset_version.get("export_root") or "").strip())
+        data_yaml_path = export_root / "data.yaml"
+        if not export_root.exists() or not export_root.is_dir() or not data_yaml_path.exists():
+            return jsonify({"error": "Dataset version export is not ready. Re-export the selected version first."}), 400
         payload["dataset_version_id"] = dataset_version["id"]
         payload["dataset_version_number"] = dataset_version.get("version_number")
         payload["dataset_version_name"] = dataset_version.get("name")
@@ -417,6 +437,7 @@ def create_training_job():
         payload["dataset_version_export_root"] = dataset_version.get("export_root")
         payload["dataset_version_manifest_path"] = dataset_version.get("manifest_path")
         payload["dataset_version_split_ratios"] = dataset_version.get("split_ratios")
+        payload["class_names"] = list(dataset_version.get("class_names") or [])
     if base_model_spec is not None:
         resolved_base_model = base_model_spec["id"]
         payload["base_model"] = base_model_spec["id"]
@@ -435,7 +456,11 @@ def create_training_job():
         resolved_base_model = base_model
         payload["base_model"] = base_model
     payload["device_mode"] = device_mode
-    return jsonify(training_service.create_job(dataset_id, resolved_base_model, dict(payload))), 201
+    try:
+        job = training_service.create_job(dataset_id, resolved_base_model, dict(payload))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(job), 201
 
 
 @workstation_blueprint.get("/train/jobs/<job_id>")
@@ -453,7 +478,9 @@ def cancel_training_job(job_id: str):
     try:
         result = training_service.cancel_job(job_id)
     except ValueError as exc:
-        return jsonify({"error": str(exc)}), 404
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
     return jsonify(result)
 
 

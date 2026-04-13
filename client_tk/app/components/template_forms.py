@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+from pathlib import Path
 import tkinter as tk
 from tkinter import Text, filedialog, messagebox, ttk
 
@@ -13,6 +15,9 @@ import numpy as np
 from client_tk.app.components.roi_picker_canvas import RoiPickerCanvas
 from client_tk.app.components.scrollable_frame import AutoHideScrollbar, ScrollableFrame
 from client_tk.app.theme import APP_BG, ACCENT, BORDER, INPUT_BG, PANEL_ALT_BG, PANEL_BG, TEXT_ON_ACCENT, TEXT_PRIMARY, TEXT_SECONDARY
+
+
+_MODEL_FILE_EXTENSIONS = {".pt", ".onnx", ".engine", ".bin"}
 
 
 def _float_or_none(value: str) -> float | None:
@@ -161,6 +166,7 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.columnconfigure(0, weight=1)
 
         self._model_lookup: dict[str, dict] = {}
+        self._model_path_lookup: dict[str, dict] = {}
         self._profile_lookup: dict[str, dict] = {}
 
         self.name_var = tk.StringVar()
@@ -353,7 +359,10 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.model_selector = ttk.Combobox(vision_tab, textvariable=self.model_choice_var, state="readonly")
         self.model_selector.grid(row=0, column=1, columnspan=3, sticky="ew", pady=4)
         self.model_selector.bind("<<ComboboxSelected>>", self._on_model_selected)
-        self._entry(vision_tab, 1, 0, "Model Path", self.model_path_var)
+        ctk.CTkLabel(vision_tab, text="Model Path", text_color=TEXT_PRIMARY).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.model_path_selector = ttk.Combobox(vision_tab, textvariable=self.model_path_var, state="readonly")
+        self.model_path_selector.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=4)
+        self.model_path_selector.bind("<<ComboboxSelected>>", self._on_model_path_selected)
         self._entry(vision_tab, 1, 2, "Meta Path", self.model_meta_path_var)
         self._entry(vision_tab, 2, 0, "Runtime", self.model_runtime_var)
         self._entry(vision_tab, 2, 2, "Conf Threshold", self.model_conf_threshold_var)
@@ -492,14 +501,66 @@ class TemplateEditorForm(ctk.CTkFrame):
             pady=4,
         )
 
+    def _detect_model_file_options(self) -> list[dict]:
+        data_root = Path(os.getenv("QC_SUITE_DATA_ROOT", Path(__file__).resolve().parents[3] / "data")).resolve()
+        models_dir = data_root / "models"
+        if not models_dir.exists():
+            return []
+
+        detected: list[dict] = []
+        for model_file in sorted(models_dir.rglob("*")):
+            if not model_file.is_file() or model_file.suffix.lower() not in _MODEL_FILE_EXTENSIONS:
+                continue
+            relative_name = str(model_file.relative_to(models_dir)).replace("/", "\\")
+            meta_candidate = model_file.with_suffix(".meta.json")
+            meta_path = str(meta_candidate) if meta_candidate.exists() else ""
+            detected.append(
+                {
+                    "id": f"detected:{relative_name}",
+                    "name": f"Detected {model_file.name}",
+                    "path": str(model_file),
+                    "meta_path": meta_path,
+                    "runtime": "ultralytics",
+                    "class_names": [],
+                    "source": "detected",
+                }
+            )
+        return detected
+
     def set_model_options(self, models: list[dict]) -> None:
         self._model_lookup = {}
+        self._model_path_lookup = {}
         values: list[str] = []
-        for item in models:
+        combined_models: list[dict] = []
+        seen_model_keys: set[tuple[str, str]] = set()
+        for source_item in list(models) + self._detect_model_file_options():
+            item = dict(source_item)
+            model_id = str(item.get("id") or "").strip().lower()
+            model_path = str(item.get("path") or "").strip().lower()
+            dedupe_key = (model_id, model_path)
+            if dedupe_key in seen_model_keys:
+                continue
+            seen_model_keys.add(dedupe_key)
+            combined_models.append(item)
+
+        for item in combined_models:
             label = f"{item.get('id')} | {item.get('name')} | {item.get('runtime') or '-'}"
             self._model_lookup[label] = item
             values.append(label)
+            path_key = str(item.get("path") or "").strip()
+            if path_key:
+                if path_key not in self._model_path_lookup:
+                    self._model_path_lookup[path_key] = dict(item)
+                    self._model_path_lookup[path_key]["_selector_label"] = label
+                elif not str(self._model_path_lookup[path_key].get("meta_path") or "").strip():
+                    meta = str(item.get("meta_path") or "").strip()
+                    if meta:
+                        self._model_path_lookup[path_key]["meta_path"] = meta
         self.model_selector.configure(values=values)
+
+        path_values = sorted(self._model_path_lookup.keys(), key=lambda item: item.lower())
+        self.model_path_selector.configure(values=path_values)
+
         current_path = self.model_path_var.get().strip().lower()
         for label, item in self._model_lookup.items():
             if str(item.get("path") or "").strip().lower() == current_path:
@@ -532,6 +593,21 @@ class TemplateEditorForm(ctk.CTkFrame):
         class_names = item.get("class_names") or []
         if class_names:
             self.model_classes_var.set(",".join(str(name) for name in class_names))
+
+    def _on_model_path_selected(self, _event=None) -> None:
+        item = self._model_path_lookup.get(self.model_path_var.get().strip())
+        if not item:
+            return
+        meta_path = str(item.get("meta_path") or "").strip()
+        if meta_path:
+            self.model_meta_path_var.set(meta_path)
+        self.model_runtime_var.set(str(item.get("runtime") or "ultralytics"))
+        class_names = item.get("class_names") or []
+        if class_names:
+            self.model_classes_var.set(",".join(str(name) for name in class_names))
+        selector_label = str(item.get("_selector_label") or "").strip()
+        if selector_label:
+            self.model_choice_var.set(selector_label)
 
     def _on_profile_selected(self, _event=None) -> None:
         item = self._profile_lookup.get(self.part_ready_profile_choice.get().strip())

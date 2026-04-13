@@ -16,6 +16,7 @@ except Exception:  # noqa: BLE001
 from client_tk.app.screens.admin.view import AdminScreen
 from client_tk.app.components.live_view import LiveView
 from client_tk.app.components.annotation_canvas import AnnotationCanvas
+from client_tk.app.components.template_forms import TemplateEditorForm
 from client_tk.app.screens.engineer.view import EngineerScreen
 from client_tk.app.screens.operator.view import OperatorScreen
 from client_tk.app.components.scrollable_frame import ScrollableFrame, _dispatch_mousewheel
@@ -152,6 +153,9 @@ class _StubApi:
 
     def list_augment_jobs(self):
         return []
+
+    def create_augment_job(self, payload: dict):
+        return {"id": "aug-stub", **payload}
     
     def delete_augment_job(self, job_id: str):
         return {"deleted": True, "id": job_id}
@@ -316,6 +320,33 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(screen.template_form.name_var.get(), "QC Line A")
         self.assertEqual(screen.template_raw_editor.get_payload()["name"], "QC Line A")
         screen.destroy()
+
+    def test_template_form_model_path_dropdown_autofills_meta_path(self) -> None:
+        form = TemplateEditorForm(self.root)
+        form.pack()
+        form.update_idletasks()
+
+        form.set_model_options(
+            [
+                {
+                    "id": 9,
+                    "name": "Model A",
+                    "runtime": "ultralytics",
+                    "path": "data\\models\\akh.pt",
+                    "meta_path": "data\\models\\akh.meta.json",
+                    "class_names": ["K0W-HB0"],
+                }
+            ]
+        )
+
+        available_paths = [str(item) for item in form.model_path_selector.cget("values")]
+        self.assertIn("data\\models\\akh.pt", available_paths)
+
+        form.model_path_var.set("data\\models\\akh.pt")
+        form._on_model_path_selected()
+        self.assertEqual(form.model_meta_path_var.get(), "data\\models\\akh.meta.json")
+        self.assertEqual(form.model_runtime_var.get(), "ultralytics")
+        form.destroy()
 
     def test_admin_layout_switches_to_compact(self) -> None:
         screen = AdminScreen(self.root, self.api, self.state)
@@ -494,6 +525,45 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(str(screen.annot_shape["state"]), "readonly")
         self.assertEqual(str(screen.annot_class["state"]), "normal")
         self.assertEqual(str(screen.annot_apply_class_button["state"]), "disabled")
+        screen.destroy()
+
+    def test_engineer_create_augment_job_uses_checklist_transforms(self) -> None:
+        payloads: list[dict] = []
+
+        def create_augment_job(payload: dict):
+            payloads.append(dict(payload))
+            return {"id": "aug-1", **payload}
+
+        with mock.patch.object(self.api, "create_augment_job", side_effect=create_augment_job):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Training")
+            screen.update_idletasks()
+
+            screen.augment_dataset.delete(0, "end")
+            screen.augment_dataset.insert(0, "ds-1")
+            for var in screen._augment_transform_vars.values():
+                var.set(False)
+            screen._augment_transform_vars["rotate"].set(True)
+            screen._augment_transform_vars["noise"].set(True)
+            screen._on_augment_transform_selection_changed()
+
+            screen.create_augment_job()
+
+            self.assertEqual(len(payloads), 1)
+            self.assertEqual(payloads[0]["dataset_id"], "ds-1")
+            self.assertEqual(payloads[0]["transforms"], ["rotate", "noise"])
+            self.assertEqual(payloads[0]["multiplier"], 2)
+            screen.destroy()
+
+    def test_engineer_job_listboxes_disable_exportselection(self) -> None:
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        screen.select_tab("Training")
+        screen.update_idletasks()
+
+        self.assertEqual(str(screen.augment_jobs.cget("exportselection")), "0")
+        self.assertEqual(str(screen.train_jobs.cget("exportselection")), "0")
         screen.destroy()
 
     def test_engineer_delete_selected_augment_job_calls_api(self) -> None:
@@ -757,6 +827,180 @@ class UiSmokeTest(unittest.TestCase):
             self.assertEqual(screen.training_summary._labels["map_score"].cget("text"), "81.23%")
             self.assertEqual(screen.training_summary._labels["r2_score"].cget("text"), "0.785")
             self.assertEqual(screen.training_summary._labels["error"].cget("text"), "RMSE 0.0456")
+
+            screen.destroy()
+
+    def test_engineer_training_progress_widgets_show_stage_and_message(self) -> None:
+        jobs = [
+            {
+                "id": "train-002",
+                "dataset_id": "ds-train",
+                "status": "running",
+                "base_model": "yolov5s",
+                "base_model_display_name": "YOLOv5 Small",
+                "requested_device_mode": "auto",
+                "effective_device": "cpu",
+                "progress_percent": 42,
+                "progress_stage": "training",
+                "progress_message": "YOLO training is running.",
+                "params": {"device_mode": "auto"},
+            }
+        ]
+
+        with mock.patch.object(self.api, "list_training_jobs", return_value=jobs):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Training")
+            screen.update_idletasks()
+
+            screen.train_jobs.selection_clear(0, "end")
+            screen.train_jobs.selection_set(0)
+            screen.on_training_selected()
+
+            self.assertEqual(screen.training_progress_percent_var.get(), "42%")
+            self.assertEqual(screen.training_progress_stage_var.get(), "Stage: training")
+            self.assertEqual(screen.training_progress_message_var.get(), "YOLO training is running.")
+            self.assertEqual(int(float(screen.training_progress_bar.cget("value"))), 42)
+            self.assertIn("42%", screen.train_jobs.get(0))
+            self.assertIsNotNone(screen._training_auto_refresh_job)
+
+            screen.select_tab("Data")
+            self.assertIsNone(screen._training_auto_refresh_job)
+
+            screen.destroy()
+
+    def test_engineer_training_filter_modes(self) -> None:
+        jobs = [
+            {
+                "id": "train-q",
+                "dataset_id": "ds-train",
+                "status": "queued",
+                "base_model": "yolov5s",
+                "base_model_display_name": "YOLOv5 Small",
+                "requested_device_mode": "auto",
+                "effective_device": "pending",
+                "progress_percent": 5,
+                "progress_stage": "queued",
+                "params": {"device_mode": "auto"},
+            },
+            {
+                "id": "train-r",
+                "dataset_id": "ds-train",
+                "status": "running",
+                "base_model": "yolov5s",
+                "base_model_display_name": "YOLOv5 Small",
+                "requested_device_mode": "auto",
+                "effective_device": "cpu",
+                "progress_percent": 42,
+                "progress_stage": "training",
+                "params": {"device_mode": "auto"},
+            },
+            {
+                "id": "train-f",
+                "dataset_id": "ds-train",
+                "status": "failed",
+                "base_model": "yolov11m",
+                "base_model_display_name": "YOLOv11 Medium",
+                "requested_device_mode": "gpu",
+                "effective_device": "cpu",
+                "progress_percent": 95,
+                "progress_stage": "failed",
+                "params": {"device_mode": "gpu"},
+            },
+            {
+                "id": "train-c",
+                "dataset_id": "ds-train",
+                "status": "completed",
+                "base_model": "yolov11m",
+                "base_model_display_name": "YOLOv11 Medium",
+                "requested_device_mode": "cpu",
+                "effective_device": "cpu",
+                "progress_percent": 100,
+                "progress_stage": "completed",
+                "params": {"device_mode": "cpu"},
+            },
+            {
+                "id": "train-x",
+                "dataset_id": "ds-train",
+                "status": "cancelled",
+                "base_model": "yolov11m",
+                "base_model_display_name": "YOLOv11 Medium",
+                "requested_device_mode": "cpu",
+                "effective_device": "cpu",
+                "progress_percent": 55,
+                "progress_stage": "cancelled",
+                "params": {"device_mode": "cpu"},
+            },
+        ]
+
+        with mock.patch.object(self.api, "list_training_jobs", return_value=jobs):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Training")
+            screen.update_idletasks()
+
+            self.assertEqual(screen.train_status_filter.get(), "All")
+            self.assertEqual(screen.train_jobs.size(), 5)
+
+            screen.train_status_filter.set("Failed")
+            screen._on_training_filter_changed()
+            screen.update_idletasks()
+            self.assertEqual(screen.train_jobs.size(), 1)
+            self.assertIn("train-f", screen.train_jobs.get(0))
+            self.assertIsNotNone(screen._training_auto_refresh_job)
+
+            screen.train_status_filter.set("Completed")
+            screen._on_training_filter_changed()
+            screen.update_idletasks()
+            self.assertEqual(screen.train_jobs.size(), 1)
+            self.assertIn("train-c", screen.train_jobs.get(0))
+
+            screen.train_status_filter.set("Active")
+            screen._on_training_filter_changed()
+            screen.update_idletasks()
+            self.assertEqual(screen.train_jobs.size(), 2)
+            active_rows = [str(item) for item in screen.train_jobs.get(0, "end")]
+            self.assertTrue(any("train-q" in row for row in active_rows))
+            self.assertTrue(any("train-r" in row for row in active_rows))
+
+            screen.destroy()
+
+    def test_engineer_training_status_colors_and_log_autoscroll(self) -> None:
+        jobs = [
+            {
+                "id": "train-003",
+                "dataset_id": "ds-train",
+                "status": "failed",
+                "base_model": "yolov11m",
+                "base_model_display_name": "YOLOv11 Medium",
+                "requested_device_mode": "gpu",
+                "effective_device": "cpu",
+                "progress_percent": 95,
+                "progress_stage": "failed",
+                "progress_message": "Training failed due to timeout.",
+                "error": "timeout",
+                "log": [f"log line {index}" for index in range(80)],
+                "params": {"device_mode": "gpu"},
+            }
+        ]
+
+        with mock.patch.object(self.api, "list_training_jobs", return_value=jobs):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Training")
+            screen.update_idletasks()
+
+            screen.train_jobs.selection_clear(0, "end")
+            screen.train_jobs.selection_set(0)
+            screen.on_training_selected()
+
+            self.assertEqual(screen._training_status_text_color("failed"), "#dc2626")
+            self.assertEqual(screen._training_stage_text_color("failed", status="failed"), "#dc2626")
+            self.assertEqual(screen.training_summary._labels["status"].cget("text_color"), "#dc2626")
+
+            rendered_log = screen.training_log_text.get("1.0", "end-1c")
+            self.assertIn("log line 79", rendered_log)
+            self.assertGreaterEqual(float(screen.training_log_text.yview()[1]), 0.99)
 
             screen.destroy()
 

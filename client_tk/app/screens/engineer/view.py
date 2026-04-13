@@ -25,6 +25,27 @@ from client_tk.app.components.template_forms import JsonEditor, LabeledValuePane
 from client_tk.app.theme import APP_BG, BORDER
 
 
+_AUGMENT_TRANSFORM_OPTIONS = (
+    "flip_h",
+    "flip_v",
+    "brightness",
+    "contrast",
+    "blur",
+    "rotate",
+    "noise",
+)
+_AUGMENT_DEFAULT_TRANSFORMS = ("flip_h", "brightness", "blur")
+_TRAINING_AUTO_REFRESH_MS = 1500
+_TRAINING_FILTER_OPTIONS = ("All", "Active", "Failed", "Completed")
+_TRAINING_STATUS_COLORS = {
+    "queued": "#64748b",
+    "running": "#0284c7",
+    "completed": "#16a34a",
+    "failed": "#dc2626",
+    "cancelled": "#d97706",
+}
+
+
 class EngineerScreen(ctk.CTkFrame):
     def __init__(self, master, api_client, session_state):
         super().__init__(master, fg_color=APP_BG, corner_radius=0)
@@ -41,7 +62,9 @@ class EngineerScreen(ctk.CTkFrame):
         self._dataset_version_cache: list[dict] = []
         self._dataset_version_lookup: dict[str, dict] = {}
         self._augment_jobs: list[dict] = []
+        self._training_jobs_all: list[dict] = []
         self._training_jobs: list[dict] = []
+        self._training_status_filter = tk.StringVar(value="All")
         self._active_training_job_id: str | None = None
         self._model_cache: list[dict] = []
         self._profile_cache: list[dict] = []
@@ -79,6 +102,8 @@ class EngineerScreen(ctk.CTkFrame):
         self._training_jobs_refresh_sequence = 0
         self._workstations_refresh_sequence = 0
         self._responsive_layout_job: str | None = None
+        self._training_auto_refresh_job: str | None = None
+        self._augment_selected_transforms: list[str] = list(_AUGMENT_DEFAULT_TRANSFORMS)
 
         notebook = ctk.CTkTabview(self, fg_color=APP_BG, corner_radius=0, command=self._on_notebook_tab_changed)
         notebook.pack(fill="both", expand=True, padx=8, pady=8)
@@ -193,6 +218,45 @@ class EngineerScreen(ctk.CTkFrame):
         except tk.TclError:
             return
 
+    def _cancel_training_auto_refresh_job(self) -> None:
+        job_id = self._training_auto_refresh_job
+        self._training_auto_refresh_job = None
+        if job_id is None:
+            return
+        try:
+            self.after_cancel(job_id)
+        except tk.TclError:
+            return
+
+    def _run_training_auto_refresh(self) -> None:
+        self._training_auto_refresh_job = None
+        if not self.winfo_exists():
+            return
+        if self._selected_tab_name != "Training":
+            return
+        self.refresh_training_jobs()
+
+    def _schedule_training_auto_refresh(self, *, force: bool = False) -> None:
+        if self._selected_tab_name != "Training":
+            self._cancel_training_auto_refresh_job()
+            return
+        job_pool = self._training_jobs_all if self._training_jobs_all else self._training_jobs
+        has_active_jobs = any(
+            str(item.get("status") or "").strip().lower() in {"queued", "running"}
+            for item in job_pool
+        )
+        if not has_active_jobs:
+            self._cancel_training_auto_refresh_job()
+            return
+        if force:
+            self._cancel_training_auto_refresh_job()
+        elif self._training_auto_refresh_job is not None:
+            return
+        try:
+            self._training_auto_refresh_job = self.after(_TRAINING_AUTO_REFRESH_MS, self._run_training_auto_refresh)
+        except tk.TclError:
+            self._training_auto_refresh_job = None
+
     def _should_use_compact_layout(self, width: int) -> bool:
         if self._layout_compact is None:
             return width < 1360
@@ -231,6 +295,9 @@ class EngineerScreen(ctk.CTkFrame):
             self.refresh_augment_jobs()
             self.refresh_training_jobs()
             self.refresh_workstations()
+            self._schedule_training_auto_refresh(force=True)
+        else:
+            self._cancel_training_auto_refresh_job()
         if selected_tab_text == "Models":
             if not self._models_tab_built:
                 self._ensure_models_tab_built()
@@ -252,6 +319,7 @@ class EngineerScreen(ctk.CTkFrame):
 
     def destroy(self) -> None:
         self._cancel_responsive_layout_job()
+        self._cancel_training_auto_refresh_job()
         super().destroy()
 
     def _layout_data_annotation(self, *, compact: bool) -> None:
@@ -501,20 +569,56 @@ class EngineerScreen(ctk.CTkFrame):
         augment_form.columnconfigure(1, weight=1)
         augment_form.columnconfigure(3, weight=1)
         self.augment_dataset = ttk.Entry(augment_form)
-        self.augment_transforms = ttk.Entry(augment_form)
-        self.augment_multiplier = ttk.Spinbox(augment_form, from_=1, to=10, increment=1, width=8)
-        self.augment_transforms.insert(0, "flip_h, brightness, blur")
-        self.augment_multiplier.set(2)
+        self.augment_multiplier = ttk.Combobox(
+            augment_form,
+            values=[str(value) for value in range(1, 11)],
+            state="readonly",
+            width=6,
+        )
+        self.augment_multiplier.set("2")
         self._grid_entry(augment_form, 0, 0, "Dataset ID", self.augment_dataset)
-        self._grid_entry(augment_form, 0, 2, "Transforms", self.augment_transforms)
-        self._grid_entry(augment_form, 1, 0, "Multiplier", self.augment_multiplier)
+        ttk.Label(augment_form, text="Multiplier").grid(row=0, column=2, sticky="w", padx=(0, 8), pady=4)
+        self.augment_multiplier.grid(row=0, column=3, sticky="w", pady=4)
+
+        ttk.Label(augment_form, text="Transforms").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        transform_picker_frame = ttk.Frame(augment_form)
+        transform_picker_frame.grid(row=1, column=1, columnspan=3, sticky="ew", pady=4)
+        for col in range(3):
+            transform_picker_frame.columnconfigure(col, weight=1)
+        self._augment_transform_vars: dict[str, tk.BooleanVar] = {}
+        for index, transform_name in enumerate(_AUGMENT_TRANSFORM_OPTIONS):
+            var = tk.BooleanVar(value=transform_name in self._augment_selected_transforms)
+            self._augment_transform_vars[transform_name] = var
+            ttk.Checkbutton(
+                transform_picker_frame,
+                text=transform_name,
+                variable=var,
+                command=self._on_augment_transform_selection_changed,
+            ).grid(row=index // 3, column=index % 3, sticky="w", padx=(0, 8), pady=2)
+
+        self.augment_transforms_var = tk.StringVar(value=", ".join(self._augment_selected_transforms))
+        ttk.Label(augment_form, text="Selected").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.augment_transforms = ttk.Label(
+            augment_form,
+            textvariable=self.augment_transforms_var,
+            foreground="#475569",
+            justify="left",
+        )
+        self.augment_transforms.grid(row=2, column=1, columnspan=3, sticky="ew", pady=4)
+
+        transform_btn_bar = ttk.Frame(augment_form)
+        transform_btn_bar.grid(row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        ttk.Button(transform_btn_bar, text="Reset", command=self._reset_augment_transforms).pack(side="left")
+
+        self._set_augment_selected_transforms(self._augment_selected_transforms)
+
         augment_btn_bar = ttk.Frame(augment_form)
-        augment_btn_bar.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        augment_btn_bar.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         ttk.Button(augment_btn_bar, text="Create Augment Job", command=self.create_augment_job).pack(side="left")
         ttk.Button(augment_btn_bar, text="Delete Selected", command=self.delete_selected_augment_job).pack(side="left", padx=6)
         ttk.Button(augment_btn_bar, text="Refresh", command=self.refresh_augment_jobs).pack(side="left", padx=6)
 
-        self.augment_jobs = tk.Listbox(self.augment_panel, height=12)
+        self.augment_jobs = tk.Listbox(self.augment_panel, height=12, exportselection=False)
         self.augment_jobs.pack(fill="both", expand=True, pady=(8, 0))
 
         workstation_frame = ttk.LabelFrame(self.augment_panel, text="Workstations", padding=8)
@@ -575,13 +679,24 @@ class EngineerScreen(ctk.CTkFrame):
         ttk.Button(button_bar, text="Cancel Selected", command=self.cancel_training_job).pack(side="left", padx=6)
         ttk.Button(button_bar, text="Delete Selected", command=self.delete_selected_training_job).pack(side="left", padx=6)
         ttk.Button(button_bar, text="Refresh", command=self.refresh_training_jobs).pack(side="left")
+        ttk.Label(button_bar, text="Filter").pack(side="left", padx=(16, 6))
+        self.train_status_filter = ttk.Combobox(
+            button_bar,
+            textvariable=self._training_status_filter,
+            values=list(_TRAINING_FILTER_OPTIONS),
+            state="readonly",
+            width=12,
+        )
+        self.train_status_filter.pack(side="left")
+        self.train_status_filter.bind("<<ComboboxSelected>>", self._on_training_filter_changed)
+        self.train_status_filter.set("All")
 
         self.training_lower = ctk.CTkFrame(self.train_panel, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
         self.training_lower.pack(fill="both", expand=True, pady=(10, 0))
         self.training_jobs_panel = ctk.CTkFrame(self.training_lower, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
         self.training_detail_panel = ctk.CTkFrame(self.training_lower, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
 
-        self.train_jobs = tk.Listbox(self.training_jobs_panel)
+        self.train_jobs = tk.Listbox(self.training_jobs_panel, exportselection=False)
         self.train_jobs.pack(fill="both", expand=True)
         self.train_jobs.bind("<<ListboxSelect>>", lambda _event: self.on_training_selected())
 
@@ -599,6 +714,60 @@ class EngineerScreen(ctk.CTkFrame):
             columns=2,
         )
         self.training_summary.pack(fill="x")
+
+        self.training_progress_shell = ctk.CTkFrame(
+            self.training_detail_panel,
+            fg_color=APP_BG,
+            corner_radius=12,
+            border_width=1,
+            border_color=BORDER,
+        )
+        self.training_progress_shell.pack(fill="x", pady=(10, 0))
+        progress_head = ttk.Frame(self.training_progress_shell)
+        progress_head.pack(fill="x", padx=10, pady=(8, 2))
+        ttk.Label(progress_head, text="Training Progress", font=("Segoe UI", 9, "bold")).pack(side="left")
+        self.training_progress_percent_var = tk.StringVar(value="-")
+        ttk.Label(progress_head, textvariable=self.training_progress_percent_var, foreground="#475569").pack(side="right")
+        self.training_progress_bar = ttk.Progressbar(self.training_progress_shell, orient="horizontal", mode="determinate", maximum=100)
+        self.training_progress_bar.pack(fill="x", padx=10, pady=(0, 4))
+        self.training_progress_stage_var = tk.StringVar(value="-")
+        self.training_progress_message_var = tk.StringVar(value="-")
+        self.training_progress_stage_label = ttk.Label(
+            self.training_progress_shell,
+            textvariable=self.training_progress_stage_var,
+            foreground="#334155",
+        )
+        self.training_progress_stage_label.pack(anchor="w", padx=10)
+        self.training_progress_message_label = ttk.Label(
+            self.training_progress_shell,
+            textvariable=self.training_progress_message_var,
+            foreground="#64748b",
+            wraplength=560,
+            justify="left",
+        )
+        self.training_progress_message_label.pack(anchor="w", padx=10, pady=(2, 8))
+
+        self.training_log_shell = ctk.CTkFrame(
+            self.training_detail_panel,
+            fg_color=APP_BG,
+            corner_radius=12,
+            border_width=1,
+            border_color=BORDER,
+        )
+        self.training_log_shell.pack(fill="both", expand=True, pady=(10, 0))
+        ttk.Label(self.training_log_shell, text="Training Log", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
+
+        training_log_body = ttk.Frame(self.training_log_shell)
+        training_log_body.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        training_log_body.columnconfigure(0, weight=1)
+        training_log_body.rowconfigure(0, weight=1)
+
+        self.training_log_text = tk.Text(training_log_body, height=8, wrap="word", state="disabled")
+        self.training_log_text.grid(row=0, column=0, sticky="nsew")
+        training_log_scroll = ttk.Scrollbar(training_log_body, orient="vertical", command=self.training_log_text.yview)
+        training_log_scroll.grid(row=0, column=1, sticky="ns")
+        self.training_log_text.configure(yscrollcommand=training_log_scroll.set)
+
         self.training_detail = JsonEditor(self.training_detail_panel, "Training Job Detail", {})
         self.training_detail.pack(fill="both", expand=True, pady=(10, 0))
         self._layout_split_shell(self.training_container, self.augment_panel, self.train_panel, compact=False, left_weight=1, right_weight=2)
@@ -2122,38 +2291,104 @@ class EngineerScreen(ctk.CTkFrame):
 
         run_async(self, _load, callback=_done)
 
+    def _active_training_filter_mode(self) -> str:
+        selected = str(self._training_status_filter.get() or "").strip().lower()
+        if selected in {"all", "active", "failed", "completed"}:
+            return selected
+        return "all"
+
+    def _filter_training_jobs(self, items: list[dict]) -> list[dict]:
+        mode = self._active_training_filter_mode()
+        if mode == "all":
+            return list(items)
+        if mode == "active":
+            return [item for item in items if str(item.get("status") or "").strip().lower() in {"queued", "running"}]
+        if mode == "failed":
+            return [item for item in items if str(item.get("status") or "").strip().lower() == "failed"]
+        if mode == "completed":
+            return [item for item in items if str(item.get("status") or "").strip().lower() == "completed"]
+        return list(items)
+
+    def _on_training_filter_changed(self, _event=None) -> None:
+        if self._training_jobs_all:
+            self._apply_training_jobs(self._training_jobs_all)
+            return
+        self.refresh_training_jobs()
+
     def _apply_training_jobs(self, items: list[dict]) -> None:
-        self._training_jobs = items
+        self._training_jobs_all = list(items)
+        filtered_items = self._filter_training_jobs(self._training_jobs_all)
+        self._training_jobs = list(filtered_items)
         try:
             self.train_jobs.delete(0, "end")
         except Exception:
             return
-        for item in items:
+        for item in filtered_items:
             device_mode = item.get("requested_device_mode") or item.get("device_mode") or item.get("params", {}).get("device_mode") or "auto"
             effective_device = item.get("effective_device") or "pending"
             base_model = item.get("base_model_display_name") or item.get("base_model") or "-"
             version_label = item.get("dataset_version_display_label") or item.get("dataset_version_name") or item.get("dataset_version_id") or "-"
+            progress_percent = self._training_progress_percent(item)
+            progress_stage = self._training_progress_stage(item)
+            status_value = str(item.get("status") or "-")
+            status_display = status_value if progress_stage == status_value else f"{status_value}/{progress_stage}"
             self.train_jobs.insert(
                 "end",
-                f"{item['id']} | {item['dataset_id']} | {version_label} | {item['status']} | {base_model} | {device_mode} -> {effective_device}",
+                f"{item['id']} | {item['dataset_id']} | {version_label} | {status_display} {progress_percent}% | {base_model} | {device_mode} -> {effective_device}",
             )
 
-        if items:
+        if filtered_items:
             self._ignore_next_training_job_selection_event = True
             self.after_idle(self._clear_training_job_selection_guard)
             if not self._select_training_job_in_listbox(self._active_training_job_id):
-                self._select_training_job_in_listbox(items[0].get("id"))
+                self._select_training_job_in_listbox(filtered_items[0].get("id"))
             self._apply_training_selected()
+            self._schedule_training_auto_refresh()
         else:
             self._active_training_job_id = None
+            self._training_jobs_all = []
             self.training_summary.reset()
             self.training_detail.set_payload({})
+            self._set_training_status_color(None)
+            self._reset_training_progress_widgets()
+            self._set_training_log_lines([])
+            if self._training_jobs_all:
+                self._schedule_training_auto_refresh()
+            else:
+                self._cancel_training_auto_refresh_job()
+
+    def _normalize_augment_transform(self, value: str | None) -> str:
+        normalized = str(value or "").strip().lower()
+        return normalized if normalized in _AUGMENT_TRANSFORM_OPTIONS else ""
+
+    def _set_augment_selected_transforms(self, transforms: list[str]) -> None:
+        selected: list[str] = []
+        for item in transforms:
+            normalized = self._normalize_augment_transform(item)
+            if normalized and normalized not in selected:
+                selected.append(normalized)
+        if not selected:
+            selected = list(_AUGMENT_DEFAULT_TRANSFORMS)
+        self._augment_selected_transforms = selected
+        if hasattr(self, "_augment_transform_vars"):
+            for name, var in self._augment_transform_vars.items():
+                var.set(name in self._augment_selected_transforms)
+        if hasattr(self, "augment_transforms_var"):
+            self.augment_transforms_var.set(", ".join(self._augment_selected_transforms))
+
+    def _on_augment_transform_selection_changed(self) -> None:
+        selected = [
+            name
+            for name, var in getattr(self, "_augment_transform_vars", {}).items()
+            if bool(var.get())
+        ]
+        self._set_augment_selected_transforms(selected)
+
+    def _reset_augment_transforms(self) -> None:
+        self._set_augment_selected_transforms(list(_AUGMENT_DEFAULT_TRANSFORMS))
 
     def create_augment_job(self):
-        raw_transforms = self.augment_transforms.get().strip()
-        transforms = [item.strip() for item in raw_transforms.split(",") if item.strip()] if raw_transforms else []
-        if not transforms:
-            transforms = ["flip_h", "brightness", "blur"]
+        transforms = list(self._augment_selected_transforms) or list(_AUGMENT_DEFAULT_TRANSFORMS)
         try:
             multiplier = max(1, min(10, int(float(self.augment_multiplier.get() or 2))))
         except ValueError:
@@ -2259,6 +2494,95 @@ class EngineerScreen(ctk.CTkFrame):
                 return f"{label} {formatted}"
         return "-"
 
+    def _training_progress_percent(self, item: dict) -> int:
+        raw_value = item.get("progress_percent")
+        try:
+            numeric = int(raw_value)
+        except (TypeError, ValueError):
+            status = str(item.get("status") or "").strip().lower()
+            if status == "completed":
+                numeric = 100
+            elif status == "running":
+                numeric = 10
+            else:
+                numeric = 0
+        return max(0, min(100, numeric))
+
+    def _training_progress_stage(self, item: dict) -> str:
+        stage = str(item.get("progress_stage") or "").strip().lower()
+        if stage:
+            return stage
+        return str(item.get("status") or "queued").strip().lower() or "queued"
+
+    def _training_progress_message(self, item: dict) -> str:
+        raw_message = str(item.get("progress_message") or "").strip()
+        if raw_message:
+            return raw_message
+        status = str(item.get("status") or "").strip().lower()
+        if status == "completed":
+            return "Training completed successfully."
+        if status == "failed":
+            return str(item.get("error") or "Training failed.")
+        if status == "cancelled":
+            return "Training cancelled."
+        if status == "running":
+            return "Training is running."
+        return "Training job queued."
+
+    def _training_status_text_color(self, status: str | None) -> str:
+        normalized = str(status or "").strip().lower()
+        return _TRAINING_STATUS_COLORS.get(normalized, "#334155")
+
+    def _training_stage_text_color(self, stage: str | None, *, status: str | None = None) -> str:
+        normalized_stage = str(stage or "").strip().lower()
+        if normalized_stage in _TRAINING_STATUS_COLORS:
+            return _TRAINING_STATUS_COLORS[normalized_stage]
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status in _TRAINING_STATUS_COLORS:
+            return _TRAINING_STATUS_COLORS[normalized_status]
+        return _TRAINING_STATUS_COLORS.get("running", "#0284c7")
+
+    def _set_training_status_color(self, status: str | None) -> None:
+        status_widget = self.training_summary._labels.get("status")
+        if status_widget is None:
+            return
+        status_widget.configure(text_color=self._training_status_text_color(status))
+
+    @staticmethod
+    def _training_log_lines(item: dict) -> list[str]:
+        raw_log = item.get("log")
+        if isinstance(raw_log, list):
+            lines = [str(entry).strip() for entry in raw_log if str(entry).strip()]
+            return lines
+        if isinstance(raw_log, str):
+            lines = [line.strip() for line in raw_log.splitlines() if line.strip()]
+            return lines
+        return []
+
+    def _set_training_log_lines(self, lines: list[str]) -> None:
+        if not hasattr(self, "training_log_text"):
+            return
+        content = "\n".join(lines) if lines else "-"
+        self.training_log_text.configure(state="normal")
+        self.training_log_text.delete("1.0", "end")
+        self.training_log_text.insert("1.0", content)
+        self.training_log_text.see("end")
+        self.training_log_text.configure(state="disabled")
+
+    def _set_training_progress_widgets(self, *, percent: int, stage: str, message: str) -> None:
+        if not hasattr(self, "training_progress_bar"):
+            return
+        safe_percent = max(0, min(100, int(percent)))
+        self.training_progress_bar["value"] = safe_percent
+        self.training_progress_percent_var.set(f"{safe_percent}%")
+        self.training_progress_stage_var.set(f"Stage: {stage or '-'}")
+        self.training_progress_message_var.set(message or "-")
+        if hasattr(self, "training_progress_stage_label"):
+            self.training_progress_stage_label.configure(foreground=self._training_stage_text_color(stage))
+
+    def _reset_training_progress_widgets(self) -> None:
+        self._set_training_progress_widgets(percent=0, stage="-", message="-")
+
     def create_training_job(self):
         spec = self._selected_base_model_spec()
         if spec is None:
@@ -2346,10 +2670,17 @@ class EngineerScreen(ctk.CTkFrame):
         index = self._selected_listbox_index(self.train_jobs)
         if index is None or index >= len(self._training_jobs):
             self.training_summary.reset()
+            self._set_training_status_color(None)
             self.training_detail.set_payload({})
+            self._reset_training_progress_widgets()
+            self._set_training_log_lines([])
             return
         item = self._training_jobs[index]
         self._active_training_job_id = str(item.get("id") or "").strip() or None
+        progress_percent = self._training_progress_percent(item)
+        progress_stage = self._training_progress_stage(item)
+        progress_message = self._training_progress_message(item)
+        status_value = str(item.get("status") or "").strip().lower()
         self.training_summary.set_values(
             {
                 "base_model": item.get("base_model_display_name") or item.get("base_model") or "-",
@@ -2367,6 +2698,13 @@ class EngineerScreen(ctk.CTkFrame):
                 "error": self._training_error_summary(item),
             }
         )
+        self._set_training_status_color(status_value)
+        self._set_training_progress_widgets(percent=progress_percent, stage=progress_stage, message=progress_message)
+        if hasattr(self, "training_progress_stage_label"):
+            self.training_progress_stage_label.configure(
+                foreground=self._training_stage_text_color(progress_stage, status=status_value)
+            )
+        self._set_training_log_lines(self._training_log_lines(item))
         self.training_detail.set_payload(item)
 
     def _selected_base_model_spec(self) -> dict | None:

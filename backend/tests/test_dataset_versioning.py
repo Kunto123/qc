@@ -91,6 +91,7 @@ class DatasetVersioningTest(unittest.TestCase):
         self.assertTrue((export_root / "data.yaml").exists())
         self.assertTrue((export_root / "classes.txt").exists())
         data_yaml = (export_root / "data.yaml").read_text(encoding="utf-8")
+        self.assertIn(f"path: {export_root.resolve().as_posix()}", data_yaml)
         self.assertIn("bbox-class", data_yaml)
         self.assertIn("poly-class", data_yaml)
 

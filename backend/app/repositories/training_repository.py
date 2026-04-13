@@ -17,6 +17,39 @@ _TRANSITIONS: dict[str, set[str]] = {
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
+def _coerce_int_param(params: dict, key: str, *, default: int, min_value: int, max_value: int) -> int:
+    raw_value = params.get(key, default)
+    if raw_value in (None, ""):
+        value = default
+    else:
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} must be an integer") from exc
+    if value < min_value or value > max_value:
+        raise ValueError(f"{key} must be between {min_value} and {max_value}")
+    params[key] = value
+    return value
+
+
+def _coerce_bool_param(params: dict, key: str, *, default: bool = False) -> bool:
+    raw_value = params.get(key, default)
+    if isinstance(raw_value, bool):
+        value = raw_value
+    else:
+        value = str(raw_value or "").strip().lower() in {"1", "true", "yes", "on"}
+    params[key] = value
+    return value
+
+
+def _normalize_progress(value: object, *, default: int = 0) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        parsed = default
+    return min(100, max(0, parsed))
+
+
 class TrainingRepository(JsonRepository):
     def __init__(self) -> None:
         super().__init__("training_jobs.json", {"jobs": []})
@@ -32,6 +65,12 @@ class TrainingRepository(JsonRepository):
         items = payload["jobs"]
         now = datetime.now(UTC).isoformat()
         request_params = dict(params or {})
+        _coerce_int_param(request_params, "epochs", default=1, min_value=1, max_value=1000)
+        _coerce_int_param(request_params, "imgsz", default=320, min_value=64, max_value=2048)
+        _coerce_int_param(request_params, "batch", default=4, min_value=1, max_value=256)
+        _coerce_int_param(request_params, "patience", default=5, min_value=1, max_value=500)
+        _coerce_int_param(request_params, "workers", default=0, min_value=0, max_value=32)
+        _coerce_bool_param(request_params, "cache", default=False)
         base_model_spec = request_params.get("base_model_spec")
         if not isinstance(base_model_spec, dict):
             base_model_spec = {}
@@ -100,6 +139,9 @@ class TrainingRepository(JsonRepository):
             "started_at": None,
             "finished_at": None,
             "error": None,
+            "progress_percent": 0,
+            "progress_stage": "queued",
+            "progress_message": "Training job queued.",
             "log": [
                 f"Training job queued (device: {requested_device_mode}, base model: {base_model_display_name or base_model_catalog_id or requested_base_model or 'baseline'}"
                 f"{', dataset version: ' + (dataset_version_display_label or dataset_version_name or dataset_version_id) if dataset_version_display_label or dataset_version_name or dataset_version_id else ''})."
@@ -108,6 +150,20 @@ class TrainingRepository(JsonRepository):
         items.append(record)
         self.save(payload)
         return record
+
+    def update_job(self, job_id: str, *, log_line: str | None = None, **fields) -> dict:
+        payload = self.load()
+        for item in payload["jobs"]:
+            if item["id"] != job_id:
+                continue
+            for key, value in fields.items():
+                item[key] = value
+            if log_line:
+                item.setdefault("log", []).append(log_line)
+            item["updated_at"] = datetime.now(UTC).isoformat()
+            self.save(payload)
+            return dict(item)
+        raise ValueError(f"Training job '{job_id}' not found.")
 
     def transition(self, job_id: str, new_status: str, *, log_line: str | None = None, **extra_fields) -> dict:
         """Transition a job to new_status, raising ValueError if the transition is invalid."""
@@ -126,8 +182,23 @@ class TrainingRepository(JsonRepository):
             item["status"] = new_status
             if new_status == "running" and item.get("started_at") is None:
                 item["started_at"] = now
+                extra_fields.setdefault("progress_percent", 5)
+                extra_fields.setdefault("progress_stage", "running")
+                extra_fields.setdefault("progress_message", "Training job started.")
             if new_status in {"completed", "failed", "cancelled"}:
                 item["finished_at"] = now
+            if new_status == "completed":
+                extra_fields.setdefault("progress_percent", 100)
+                extra_fields.setdefault("progress_stage", "completed")
+                extra_fields.setdefault("progress_message", "Training completed.")
+            if new_status == "failed":
+                extra_fields.setdefault("progress_percent", _normalize_progress(item.get("progress_percent"), default=95))
+                extra_fields.setdefault("progress_stage", "failed")
+                extra_fields.setdefault("progress_message", str(extra_fields.get("error") or "Training failed."))
+            if new_status == "cancelled":
+                extra_fields.setdefault("progress_percent", min(99, _normalize_progress(item.get("progress_percent"), default=0)))
+                extra_fields.setdefault("progress_stage", "cancelled")
+                extra_fields.setdefault("progress_message", "Training cancelled.")
             for key, value in extra_fields.items():
                 item[key] = value
             if log_line:
@@ -142,7 +213,12 @@ class TrainingRepository(JsonRepository):
             raise ValueError("Training job not found.")
         if job["status"] not in {"queued", "running"}:
             raise ValueError(f"Cannot cancel job in status '{job['status']}'.")
-        return self.transition(job_id, "cancelled", log_line="Job cancelled by user.")
+        return self.transition(
+            job_id,
+            "cancelled",
+            log_line="Job cancelled by user.",
+            progress_message="Job cancelled by user.",
+        )
 
     def delete_job(self, job_id: str) -> dict:
         payload = self.load()

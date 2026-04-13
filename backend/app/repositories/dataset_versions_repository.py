@@ -384,7 +384,7 @@ class DatasetVersionRepository(JsonRepository):
 
         data_yaml_path = export_root / "data.yaml"
         classes_path = export_root / "classes.txt"
-        data_yaml_path.write_text(self._build_data_yaml(class_names), encoding="utf-8")
+        data_yaml_path.write_text(self._build_data_yaml(class_names, export_root=export_root), encoding="utf-8")
         classes_path.write_text("\n".join(class_names), encoding="utf-8")
 
         return {
@@ -546,7 +546,8 @@ class DatasetVersionRepository(JsonRepository):
         return f"{class_id} {x:.6f} {y:.6f} {width:.6f} {height:.6f}"
 
     @staticmethod
-    def _build_data_yaml(class_names: list[str]) -> str:
+    def _build_data_yaml(class_names: list[str], *, export_root: Path) -> str:
+        dataset_root = export_root.resolve().as_posix()
         if class_names:
             names_block = "\n".join(f"  {index}: {name}" for index, name in enumerate(class_names))
             names_section = f"names:\n{names_block}\n"
@@ -554,7 +555,7 @@ class DatasetVersionRepository(JsonRepository):
             names_section = "names: []\n"
 
         return (
-            "path: .\n"
+            f"path: {dataset_root}\n"
             "train: images/train\n"
             "val: images/valid\n"
             "test: images/test\n"

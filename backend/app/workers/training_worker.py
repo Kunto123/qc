@@ -1,29 +1,36 @@
-"""training_worker.py — background daemon that drives training job state transitions.
+"""training_worker.py — background daemon that drives training job execution.
 
 State machine:
     queued → running → completed | failed
     Any non-terminal state → cancelled (on user request via cancel_job())
 
-The worker does not perform real ML training; it simulates the lifecycle so the
-state machine contract is honoured.  Real training integration would replace the
-``_run_job`` method body.
+Training mode is configurable via ``QC_SUITE_TRAINING_ENGINE_MODE``:
+    - ``real``: execute Ultralytics YOLO training.
+    - ``simulated``: keep legacy placeholder behavior for smoke/local fallback.
 """
 from __future__ import annotations
 
 import json
 import logging
+import shutil
 import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from backend.app.core.config import AppConfig
+from backend.app.core.config import AppConfig, MODELS_DIR, PROJECT_ROOT
 from backend.app.core.device_runtime import DeviceResolution, DeviceRuntimeResolver
-from backend.app.core.config import MODELS_DIR
 
 logger = logging.getLogger(__name__)
 
-_POLL_INTERVAL = 5  # seconds between queue checks
+_POLL_INTERVAL = 1  # seconds between queue checks
+_SIMULATED_TOTAL_SECONDS = 0.8
+_SIMULATED_STEP_SECONDS = 0.1
+
+
+class _TrainingJobCancelled(RuntimeError):
+    """Raised when a training job is cancelled while execution is in progress."""
 
 
 def _safe_fragment(value: str) -> str:
@@ -32,12 +39,21 @@ def _safe_fragment(value: str) -> str:
 
 
 class TrainingWorker:
-    def __init__(self, training_repo, models_repo=None, device_runtime: DeviceRuntimeResolver | None = None) -> None:
+    def __init__(
+        self,
+        training_repo,
+        models_repo=None,
+        device_runtime: DeviceRuntimeResolver | None = None,
+        app_config: AppConfig | None = None,
+    ) -> None:
         self._repo = training_repo
         self._models_repo = models_repo
-        self._device_runtime = device_runtime or DeviceRuntimeResolver(AppConfig())
+        self._config = app_config or AppConfig()
+        self._device_runtime = device_runtime or DeviceRuntimeResolver(self._config)
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        mode = str(self._config.training_engine_mode or "real").strip().lower()
+        self._training_mode = mode if mode in {"real", "simulated"} else "real"
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -71,6 +87,16 @@ class TrainingWorker:
             or params.get("device_mode")
             or "auto"
         ).strip().lower() or "auto"
+        if self._training_mode == "simulated":
+            fallback_reason = "simulated_mode_forces_cpu" if requested_device_mode != "cpu" else "simulated_mode"
+            return DeviceResolution(
+                requested_mode=requested_device_mode,
+                effective_device="cpu",
+                backend="cpu",
+                gpu_available=False,
+                cuda_device_id=None,
+                fallback_reason=fallback_reason,
+            )
         return self._device_runtime.resolve(requested_device_mode)
 
     @staticmethod
@@ -105,12 +131,269 @@ class TrainingWorker:
             relative = Path(*relative.parts[1:])
         return MODELS_DIR / relative
 
-    def _register_trained_model(self, job: dict, trained_model_path: str, artifact_path: Path) -> dict | None:
+    def _job_status(self, job_id: str) -> str:
+        job = self._repo.get_job(job_id)
+        if not isinstance(job, dict):
+            return ""
+        return str(job.get("status") or "").strip().lower()
+
+    def _raise_if_cancelled(self, job_id: str) -> None:
+        if self._job_status(job_id) == "cancelled":
+            raise _TrainingJobCancelled("Job cancelled by user.")
+
+    @staticmethod
+    def _cleanup_generated_artifacts(artifact_path: Path) -> None:
+        for target in (artifact_path, artifact_path.with_suffix(".meta.json")):
+            try:
+                if target.exists() and target.is_file():
+                    target.unlink()
+            except OSError:
+                logger.warning("[training-worker] failed to remove artifact: %s", target)
+
+    @staticmethod
+    def _clamp_progress(value: int) -> int:
+        return min(100, max(0, int(value)))
+
+    def _set_progress(
+        self,
+        job_id: str,
+        *,
+        percent: int,
+        stage: str,
+        message: str,
+        append_log: bool = False,
+    ) -> None:
+        self._raise_if_cancelled(job_id)
+        payload = {
+            "progress_percent": self._clamp_progress(percent),
+            "progress_stage": str(stage or "running").strip() or "running",
+            "progress_message": str(message or "").strip(),
+        }
+        log_line = payload["progress_message"] if append_log and payload["progress_message"] else None
+        self._repo.update_job(job_id, log_line=log_line, **payload)
+
+    def _resolve_training_source(self, job: dict) -> Path:
+        params = job.get("params") if isinstance(job.get("params"), dict) else {}
+        export_root_raw = str(
+            job.get("dataset_version_export_root")
+            or params.get("dataset_version_export_root")
+            or ""
+        ).strip()
+        if not export_root_raw:
+            raise ValueError("dataset_version_id with exported dataset is required for real training.")
+
+        export_root = Path(export_root_raw)
+        if not export_root.is_absolute():
+            export_root = (PROJECT_ROOT / export_root).resolve()
+        if not export_root.exists() or not export_root.is_dir():
+            raise ValueError(f"Dataset version export directory not found: {export_root}")
+
+        data_yaml = export_root / "data.yaml"
+        if not data_yaml.exists() or not data_yaml.is_file():
+            raise ValueError(f"Dataset version export is not ready (missing data.yaml): {export_root}")
+        self._normalize_data_yaml(data_yaml_path=data_yaml, export_root=export_root)
+        return data_yaml
+
+    @staticmethod
+    def _normalize_data_yaml(*, data_yaml_path: Path, export_root: Path) -> None:
+        """Ensure exported YOLO data.yaml uses an absolute dataset root path.
+
+        Some Ultralytics versions resolve `path: .` relative to the process CWD
+        instead of the YAML file location. Rewriting `path` to an absolute export
+        root keeps train/val/test lookups stable across runtime environments.
+        """
+        try:
+            original = data_yaml_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+
+        expected_path_line = f"path: {export_root.resolve().as_posix()}"
+        lines = original.splitlines()
+        path_index = next(
+            (index for index, line in enumerate(lines) if line.strip().startswith("path:")),
+            None,
+        )
+
+        changed = False
+        if path_index is None:
+            lines.insert(0, expected_path_line)
+            changed = True
+        elif lines[path_index].strip() != expected_path_line:
+            lines[path_index] = expected_path_line
+            changed = True
+
+        if not changed:
+            return
+
+        normalized = "\n".join(lines).rstrip() + "\n"
+        try:
+            data_yaml_path.write_text(normalized, encoding="utf-8")
+        except OSError:
+            logger.warning("[training-worker] failed to normalize data.yaml path: %s", data_yaml_path)
+
+    @staticmethod
+    def _resolve_weights_name(job: dict) -> str:
+        raw_value = str(
+            job.get("base_model_weights_name")
+            or job.get("base_model_catalog_id")
+            or job.get("base_model")
+            or "yolov5n"
+        ).strip()
+        if not raw_value:
+            raw_value = "yolov5n"
+        if not Path(raw_value).suffix:
+            raw_value = f"{raw_value}.pt"
+        return raw_value
+
+    def _resolve_train_hparams(self, job: dict) -> dict[str, Any]:
+        params = job.get("params") if isinstance(job.get("params"), dict) else {}
+
+        def _int_value(key: str, default: int, minimum: int, maximum: int) -> int:
+            try:
+                value = int(params.get(key, default))
+            except (TypeError, ValueError):
+                value = default
+            return min(maximum, max(minimum, value))
+
+        cache_raw = params.get("cache", False)
+        if isinstance(cache_raw, bool):
+            cache_value = cache_raw
+        else:
+            cache_value = str(cache_raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+        return {
+            "epochs": _int_value("epochs", self._config.training_default_epochs, 1, 1000),
+            "imgsz": _int_value("imgsz", self._config.training_default_imgsz, 64, 2048),
+            "batch": _int_value("batch", self._config.training_default_batch, 1, 256),
+            "patience": _int_value("patience", self._config.training_default_patience, 1, 500),
+            "workers": _int_value("workers", 0, 0, 32),
+            "cache": cache_value,
+        }
+
+    @staticmethod
+    def _extract_class_names_from_model(model) -> list[str]:
+        names = getattr(model, "names", None)
+        if isinstance(names, dict):
+            values: list[str] = []
+            for index in sorted(names):
+                values.append(str(names[index]))
+            return values
+        if isinstance(names, list):
+            return [str(item) for item in names]
+        return []
+
+    def _resolve_output_weights_path(self, *, model, run_project: Path, run_name: str) -> Path:
+        candidates: list[Path] = []
+
+        trainer = getattr(model, "trainer", None)
+        if trainer is not None:
+            for attr_name in ("best", "last"):
+                raw_path = getattr(trainer, attr_name, None)
+                if raw_path:
+                    candidates.append(Path(str(raw_path)))
+
+        candidates.extend(
+            [
+                run_project / run_name / "weights" / "best.pt",
+                run_project / run_name / "weights" / "last.pt",
+            ]
+        )
+
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        raise FileNotFoundError("Training completed but no YOLO weights file was produced.")
+
+    def _run_real_training(
+        self,
+        *,
+        job_id: str,
+        job: dict,
+        artifact_path: Path,
+        resolution: DeviceResolution,
+        timeout_seconds: int,
+    ) -> list[str]:
+        from ultralytics import YOLO  # type: ignore
+
+        self._raise_if_cancelled(job_id)
+        self._set_progress(job_id, percent=20, stage="preparing", message="Preparing YOLO training inputs.")
+        data_yaml_path = self._resolve_training_source(job)
+        weights_name = self._resolve_weights_name(job)
+        hparams = self._resolve_train_hparams(job)
+        run_project = artifact_path.parent / "training_runs"
+        run_name = str(job.get("id") or datetime.now(UTC).strftime("%Y%m%d%H%M%S"))
+
+        run_project.mkdir(parents=True, exist_ok=True)
+        model = YOLO(weights_name)
+        self._set_progress(job_id, percent=35, stage="training", message="YOLO training is running.")
+        model.train(
+            data=str(data_yaml_path),
+            epochs=hparams["epochs"],
+            imgsz=hparams["imgsz"],
+            batch=hparams["batch"],
+            patience=hparams["patience"],
+            workers=hparams["workers"],
+            cache=hparams["cache"],
+            device=resolution.effective_device,
+            time=max(0.01, float(timeout_seconds) / 3600.0),
+            project=str(run_project),
+            name=run_name,
+            exist_ok=True,
+            verbose=False,
+        )
+        self._raise_if_cancelled(job_id)
+        self._set_progress(job_id, percent=75, stage="validating", message="Validating generated weights artifact.")
+
+        source_weights = self._resolve_output_weights_path(model=model, run_project=run_project, run_name=run_name)
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_weights, artifact_path)
+        self._raise_if_cancelled(job_id)
+
+        if not artifact_path.exists() or artifact_path.stat().st_size <= 0:
+            raise ValueError(f"Training produced invalid artifact: {artifact_path}")
+
+        # Quality gate: ensure generated model can be loaded before marking job completed.
+        validated_model = YOLO(str(artifact_path))
+        self._set_progress(job_id, percent=85, stage="validating", message="Extracting class metadata from trained model.")
+        class_names = self._extract_class_names_from_model(validated_model)
+        if class_names:
+            return class_names
+
+        params = job.get("params") if isinstance(job.get("params"), dict) else {}
+        return list(params.get("class_names") or params.get("classes") or [])
+
+    def _run_simulated_training(self, *, job_id: str, artifact_path: Path) -> None:
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Simulate small work chunks so cancellation can be observed promptly.
+        remaining = _SIMULATED_TOTAL_SECONDS
+        completed = 0.0
+        self._set_progress(job_id, percent=20, stage="training", message="Simulated training started.")
+        while remaining > 0:
+            self._raise_if_cancelled(job_id)
+            step = min(_SIMULATED_STEP_SECONDS, remaining)
+            time.sleep(step)
+            remaining -= step
+            completed += step
+            ratio = min(1.0, completed / _SIMULATED_TOTAL_SECONDS)
+            progress = 20 + int(round(ratio * 55))
+            self._set_progress(job_id, percent=progress, stage="training", message="Simulated training is running.")
+
+        artifact_path.write_bytes(b"QC Suite simulated trained model artifact\n")
+        self._set_progress(job_id, percent=80, stage="validating", message="Validating simulated artifact.")
+        self._raise_if_cancelled(job_id)
+
+    def _register_trained_model(
+        self,
+        job: dict,
+        trained_model_path: str,
+        artifact_path: Path,
+        *,
+        class_names: list[str],
+    ) -> dict | None:
         if self._models_repo is None:
             return None
 
-        artifact_path.parent.mkdir(parents=True, exist_ok=True)
-        artifact_path.write_bytes(b"QC Suite simulated trained model artifact\n")
         meta_path = artifact_path.with_suffix(".meta.json")
         params = job.get("params") if isinstance(job.get("params"), dict) else {}
         meta_path.write_text(
@@ -122,17 +405,21 @@ class TrainingWorker:
                     "base_model": job.get("base_model"),
                     "base_model_display_name": job.get("base_model_display_name"),
                     "trained_model_path": trained_model_path,
+                    "training_engine_mode": self._training_mode,
+                    "training_params": {
+                        "epochs": params.get("epochs"),
+                        "imgsz": params.get("imgsz"),
+                        "batch": params.get("batch"),
+                        "patience": params.get("patience"),
+                        "workers": params.get("workers"),
+                        "cache": params.get("cache"),
+                    },
                 },
                 ensure_ascii=True,
                 indent=2,
             ),
             encoding="utf-8",
         )
-        class_names = job.get("class_names")
-        if not isinstance(class_names, list):
-            class_names = params.get("class_names") or params.get("classes") or []
-        if not isinstance(class_names, list):
-            class_names = []
         name = str(job.get("base_model_display_name") or job.get("base_model") or "trained model").strip()
         suffix = str(job.get("dataset_version_display_label") or job.get("dataset_version_name") or job.get("dataset_id") or "dataset").strip()
         return self._models_repo.add_model(
@@ -174,21 +461,51 @@ class TrainingWorker:
                 ),
                 **device_fields,
             )
+            self._set_progress(job_id, percent=10, stage="initializing", message="Resolving training runtime and resources.")
         except ValueError:
             return  # already transitioned (race or cancelled)
 
-        # --- real ML training would go here ---
+        artifact_path: Path | None = None
         try:
-            time.sleep(2)  # simulate short work
+            start_time = time.monotonic()
+            timeout_seconds = max(60, int(self._config.training_timeout_minutes) * 60)
             path_prefix = f"{job['dataset_id']}__{base_model_fragment}"
             if dataset_version_fragment:
                 path_prefix = f"{job['dataset_id']}__{dataset_version_fragment}__{base_model_fragment}"
             trained_path = f"models/trained/{path_prefix}__{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}.pt"
-            registered_model = None
-            try:
-                registered_model = self._register_trained_model(job, trained_path, self._trained_artifact_path(trained_path))
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("[training-worker] model registration failed for job %s: %s", job_id, exc)
+            artifact_path = self._trained_artifact_path(trained_path)
+            self._raise_if_cancelled(job_id)
+
+            if self._training_mode == "simulated":
+                self._run_simulated_training(job_id=job_id, artifact_path=artifact_path)
+                params = job.get("params") if isinstance(job.get("params"), dict) else {}
+                raw_class_names = params.get("class_names") or params.get("classes") or []
+                class_names = [str(item) for item in raw_class_names] if isinstance(raw_class_names, list) else []
+            else:
+                class_names = self._run_real_training(
+                    job_id=job_id,
+                    job=job,
+                    artifact_path=artifact_path,
+                    resolution=resolution,
+                    timeout_seconds=timeout_seconds,
+                )
+
+            elapsed_seconds = round(time.monotonic() - start_time, 3)
+            if elapsed_seconds > timeout_seconds:
+                raise TimeoutError(
+                    f"Training exceeded timeout ({elapsed_seconds:.2f}s > {timeout_seconds}s)."
+                )
+            self._raise_if_cancelled(job_id)
+
+            self._set_progress(job_id, percent=90, stage="registering", message="Registering trained model metadata.")
+            registered_model = self._register_trained_model(
+                job,
+                trained_path,
+                artifact_path,
+                class_names=list(class_names or []),
+            )
+            self._raise_if_cancelled(job_id)
+
             self._repo.transition(
                 job_id,
                 "completed",
@@ -197,15 +514,33 @@ class TrainingWorker:
                 log_line=(
                     f"Training completed. Model saved to: {trained_path} "
                     f"({self._device_log_suffix(resolution)}, base_model={base_model_label}"
-                    f"{', dataset_version=' + dataset_version_label if dataset_version_label else ''})"
+                    f"{', dataset_version=' + dataset_version_label if dataset_version_label else ''}, "
+                    f"mode={self._training_mode}, elapsed={elapsed_seconds}s)"
                 ),
+                progress_percent=100,
+                progress_stage="completed",
+                progress_message="Training completed successfully.",
                 **device_fields,
             )
             logger.info("[training-worker] job %s completed", job_id)
+        except _TrainingJobCancelled as exc:
+            if artifact_path is not None:
+                self._cleanup_generated_artifacts(artifact_path)
+            try:
+                self._repo.update_job(
+                    job_id,
+                    progress_stage="cancelled",
+                    progress_message="Job cancelled while training was running.",
+                )
+            except ValueError:
+                pass
+            logger.info("[training-worker] job %s cancelled during execution: %s", job_id, exc)
         except ValueError:
             pass  # job was cancelled mid-run
         except Exception as exc:  # noqa: BLE001
             logger.exception("[training-worker] job %s failed: %s", job_id, exc)
+            if artifact_path is not None:
+                self._cleanup_generated_artifacts(artifact_path)
             try:
                 self._repo.transition(
                     job_id,
@@ -215,6 +550,8 @@ class TrainingWorker:
                         f"Training failed: {exc} ({self._device_log_suffix(resolution)}, base_model={base_model_label}"
                         f"{', dataset_version=' + dataset_version_label if dataset_version_label else ''})"
                     ),
+                    progress_stage="failed",
+                    progress_message=f"Training failed: {exc}",
                     **device_fields,
                 )
             except ValueError:

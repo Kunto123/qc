@@ -37,6 +37,12 @@ class AppConfig:
     sticker_inference_mode: str = os.getenv("QC_SUITE_STICKER_INFERENCE_MODE", "auto").strip().lower() or "auto"
     default_sticker_model_path: str = DEFAULT_STICKER_MODEL_PATH
     default_sticker_model_meta_path: str = DEFAULT_STICKER_MODEL_META_PATH
+    training_engine_mode: str = os.getenv("QC_SUITE_TRAINING_ENGINE_MODE", "real").strip().lower() or "real"
+    training_timeout_minutes: int = max(1, int(os.getenv("QC_SUITE_TRAINING_TIMEOUT_MINUTES", "30")))
+    training_default_epochs: int = max(1, int(os.getenv("QC_SUITE_TRAINING_DEFAULT_EPOCHS", "1")))
+    training_default_imgsz: int = max(64, int(os.getenv("QC_SUITE_TRAINING_DEFAULT_IMGSZ", "320")))
+    training_default_batch: int = max(1, int(os.getenv("QC_SUITE_TRAINING_DEFAULT_BATCH", "4")))
+    training_default_patience: int = max(1, int(os.getenv("QC_SUITE_TRAINING_DEFAULT_PATIENCE", "5")))
     push_worker_interval_seconds: int = max(5, int(os.getenv("QC_SUITE_PUSH_WORKER_INTERVAL_SECONDS", "30")))
     push_worker_max_retry: int = max(1, int(os.getenv("QC_SUITE_PUSH_WORKER_MAX_RETRY", "5")))
 

@@ -23,6 +23,7 @@ TEST_DATA_ROOT = Path(tempfile.mkdtemp(prefix="qc-suite-tests-"))
 atexit.register(lambda: shutil.rmtree(TEST_DATA_ROOT, ignore_errors=True))
 os.environ["QC_SUITE_DATA_ROOT"] = str(TEST_DATA_ROOT)
 os.environ["QC_SUITE_STICKER_INFERENCE_MODE"] = "classic"
+os.environ["QC_SUITE_TRAINING_ENGINE_MODE"] = "simulated"
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -794,6 +795,8 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertIsNotNone(completed_job)
         self.assertEqual(completed_job.get("status"), "completed")
         self.assertIsNotNone(completed_job.get("registered_model_id"))
+        self.assertEqual(int(completed_job.get("progress_percent") or 0), 100)
+        self.assertEqual(str(completed_job.get("progress_stage") or "").lower(), "completed")
 
         models_response = self.client.get("/models", headers=_headers(self.engineer_token))
         self.assertEqual(models_response.status_code, 200, models_response.get_json())
@@ -855,6 +858,131 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(dataset_list_response.status_code, 200, dataset_list_response.get_json())
         dataset_list = dataset_list_response.get_json()
         self.assertFalse(any(item["id"] == dataset["id"] for item in dataset_list))
+
+    def test_04a_training_job_rejects_broken_dataset_version_export(self) -> None:
+        dataset_response = self.client.post(
+            "/datasets",
+            json={"name": f"train-broken-export-{uuid4().hex[:8]}", "description": "training export validation"},
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
+        dataset = dataset_response.get_json()
+
+        upload_response = self.client.post(
+            f"/datasets/{dataset['id']}/upload",
+            json={
+                "file_name": "image-1.jpg",
+                "target": "images",
+                "content_b64": _sample_image_b64(),
+            },
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(upload_response.status_code, 201, upload_response.get_json())
+
+        self.client.post(
+            f"/datasets/{dataset['id']}/annotations/image-1.jpg",
+            json={"labels": [{"type": "bbox", "class": "sample", "bbox": {"x": 0.25, "y": 0.25, "w": 0.2, "h": 0.2}}]},
+            headers=_headers(self.engineer_token),
+        )
+
+        version_response = self.client.post(
+            f"/datasets/{dataset['id']}/versions",
+            json={"name": "Broken Export", "description": "for fail-fast test"},
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(version_response.status_code, 201, version_response.get_json())
+        version_payload = version_response.get_json()
+
+        data_yaml_path = Path(str(version_payload["export_root"])) / "data.yaml"
+        if data_yaml_path.exists():
+            data_yaml_path.unlink()
+
+        train_response = self.client.post(
+            "/train/jobs",
+            json={
+                "dataset_id": dataset["id"],
+                "dataset_version_id": version_payload["id"],
+                "base_model": "yolov5s",
+            },
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(train_response.status_code, 400, train_response.get_json())
+        self.assertIn("not ready", str((train_response.get_json() or {}).get("error") or "").lower())
+
+    def test_04c_training_job_rejects_invalid_hyperparams(self) -> None:
+        dataset_response = self.client.post(
+            "/datasets",
+            json={"name": f"train-invalid-hparams-{uuid4().hex[:8]}", "description": "training hyperparams validation"},
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
+        dataset = dataset_response.get_json()
+
+        train_response = self.client.post(
+            "/train/jobs",
+            json={
+                "dataset_id": dataset["id"],
+                "base_model": "yolov5s",
+                "epochs": 0,
+            },
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(train_response.status_code, 400, train_response.get_json())
+        self.assertIn("epochs", str((train_response.get_json() or {}).get("error") or "").lower())
+
+    def test_04d_cancelled_training_job_does_not_register_model(self) -> None:
+        dataset_response = self.client.post(
+            "/datasets",
+            json={"name": f"train-cancelled-{uuid4().hex[:8]}", "description": "training cancellation guard"},
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
+        dataset = dataset_response.get_json()
+
+        train_response = self.client.post(
+            "/train/jobs",
+            json={
+                "dataset_id": dataset["id"],
+                "base_model": "yolov5s",
+            },
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(train_response.status_code, 201, train_response.get_json())
+        train_payload = train_response.get_json()
+
+        deadline = time.time() + 12.0
+        cancelled_job = None
+        while time.time() < deadline:
+            status_response = self.client.get(
+                f"/train/jobs/{train_payload['id']}",
+                headers=_headers(self.engineer_token),
+            )
+            self.assertEqual(status_response.status_code, 200, status_response.get_json())
+            job_payload = status_response.get_json()
+            status = str(job_payload.get("status") or "").lower()
+            if status == "cancelled":
+                cancelled_job = job_payload
+                break
+            if status in {"queued", "running"}:
+                cancel_response = self.client.post(
+                    f"/train/jobs/{train_payload['id']}/cancel",
+                    headers=_headers(self.engineer_token),
+                )
+                self.assertIn(cancel_response.status_code, {200, 400}, cancel_response.get_json())
+            else:
+                self.fail(f"Training job reached terminal status '{status}' before cancellation.")
+            time.sleep(0.2)
+
+        self.assertIsNotNone(cancelled_job)
+        self.assertEqual(str(cancelled_job.get("progress_stage") or "").lower(), "cancelled")
+        self.assertLess(int(cancelled_job.get("progress_percent") or 0), 100)
+        self.assertIsNone(cancelled_job.get("registered_model_id"))
+        self.assertIsNone(cancelled_job.get("trained_model_path"))
+
+        models_response = self.client.get("/models", headers=_headers(self.engineer_token))
+        self.assertEqual(models_response.status_code, 200, models_response.get_json())
+        models = models_response.get_json()
+        self.assertFalse(any(item.get("provenance", {}).get("training_job_id") == train_payload["id"] for item in models))
 
     def test_06_session_accepts_independent_dual_roi_updates(self) -> None:
         session_response = self.client.post(
