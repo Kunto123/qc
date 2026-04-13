@@ -468,6 +468,7 @@ class AdminScreen(ctk.CTkFrame):
         action_bar = ttk.Frame(form_card)
         action_bar.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         ttk.Button(action_bar, text="Deploy", command=self.deploy_template).pack(side="right")
+        ttk.Button(action_bar, text="Update Selected", command=self.update_selected_deployment).pack(side="right", padx=(0, 6))
 
     def _build_users_tab(self) -> None:
         self.users_shell = ttk.Frame(self.users_tab)
@@ -633,7 +634,23 @@ class AdminScreen(ctk.CTkFrame):
         result_actions.pack(fill="x", pady=(10, 0))
         ttk.Button(result_actions, text="Retry Failed Visible", command=self.retry_visible_failed_pushes).pack(side="left")
         ttk.Button(result_actions, text="Open Selected", command=self.open_result).pack(side="right")
+        ttk.Button(result_actions, text="Delete Selected", command=self.delete_selected_result).pack(side="right", padx=(0, 6))
         ttk.Button(result_actions, text="Retry Selected Push", command=self.retry_selected_push).pack(side="right", padx=(0, 6))
+
+        correction_actions = ttk.Frame(listing)
+        correction_actions.pack(fill="x", pady=(8, 0))
+        ttk.Label(correction_actions, text="Decision").pack(side="left")
+        self.result_correction_decision = ttk.Combobox(
+            correction_actions,
+            values=["", "ACCEPT", "REJECT"],
+            state="readonly",
+            width=10,
+        )
+        self.result_correction_decision.pack(side="left", padx=(6, 8))
+        ttk.Label(correction_actions, text="Reason").pack(side="left")
+        self.result_correction_reason = ttk.Entry(correction_actions, width=34)
+        self.result_correction_reason.pack(side="left", fill="x", expand=True, padx=(6, 8))
+        ttk.Button(correction_actions, text="Apply Correction", command=self.apply_result_correction).pack(side="left")
 
         self.results_right.columnconfigure(0, weight=1)
         self.results_right.rowconfigure(0, weight=1)
@@ -1078,6 +1095,14 @@ class AdminScreen(ctk.CTkFrame):
             return
         item = next((entry for entry in self._deployments_cache if int(entry["id"]) == deployment_id), None)
         if item:
+            self.dep_template_id.delete(0, "end")
+            self.dep_template_id.insert(0, str(item.get("template_id") or ""))
+            self.dep_version_id.delete(0, "end")
+            self.dep_version_id.insert(0, str(item.get("template_version_id") or ""))
+            self.dep_line.delete(0, "end")
+            self.dep_line.insert(0, str(item.get("line_id") or ""))
+            self.dep_station.delete(0, "end")
+            self.dep_station.insert(0, str(item.get("station_id") or ""))
             self.deployment_context_var.set(
                 f"Selected deployment #{item['id']} | {_safe_text(item.get('line_id'))}/{_safe_text(item.get('station_id'))} "
                 f"| template={_safe_text(item.get('template_name'))}"
@@ -1114,6 +1139,44 @@ class AdminScreen(ctk.CTkFrame):
             f"Deployment dibuat untuk {payload['line_id']}/{payload['station_id']} memakai template version {payload['template_version_id']}."
         )
         messagebox.showinfo("Deployments", "Deployment saved.")
+
+    def update_selected_deployment(self) -> None:
+        deployment_id = self._selected_treeview_id(self.deployment_table)
+        if deployment_id is None:
+            messagebox.showwarning("Deployments", "Pilih deployment dulu.")
+            return
+
+        try:
+            template_version_id = int(self.dep_version_id.get().strip() or 0)
+        except ValueError:
+            messagebox.showerror("Deployments", "Version ID harus angka.")
+            return
+        if template_version_id <= 0:
+            messagebox.showerror("Deployments", "Version ID harus diisi.")
+            return
+
+        line_id = self.dep_line.get().strip()
+        station_id = self.dep_station.get().strip()
+        if not line_id or not station_id:
+            messagebox.showerror("Deployments", "Line dan Station wajib diisi.")
+            return
+
+        payload = {
+            "template_version_id": template_version_id,
+            "line_id": line_id,
+            "station_id": station_id,
+        }
+        try:
+            updated = self.api.update_deployment(deployment_id, payload)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Deployments", str(exc))
+            return
+
+        self.refresh_deployments()
+        self._set_status(
+            f"Deployment #{deployment_id} diupdate ke {line_id}/{station_id} version {template_version_id}."
+        )
+        messagebox.showinfo("Deployments", f"Deployment #{updated.get('id', deployment_id)} updated.")
 
     def deactivate_selected_deployment(self) -> None:
         deployment_id = self._selected_treeview_id(self.deployment_table)
@@ -1361,11 +1424,74 @@ class AdminScreen(ctk.CTkFrame):
             }
         )
         self.result_detail.set_payload(detail)
+        self.result_correction_decision.set(str(detail.get("decision") or "").strip().upper())
+        self.result_correction_reason.delete(0, "end")
+        reason = str(detail.get("reject_reason_code") or "").strip()
+        if reason and reason.upper() != "OK":
+            self.result_correction_reason.insert(0, reason)
         self.results_context_var.set(
             f"Selected result #{detail.get('id')} | push={_safe_text(detail.get('push_status'))} | "
             f"retry={_safe_text(detail.get('retry_count'), fallback='0')}"
         )
         self._set_status(f"Inspection result #{result_id} dibuka.")
+
+    def apply_result_correction(self) -> None:
+        result_id = self._selected_treeview_id(self.results_table)
+        if result_id is None:
+            messagebox.showwarning("Results", "Pilih hasil inspeksi yang ingin dikoreksi.")
+            return
+
+        current_decision = ""
+        for item in self._results_cache:
+            if int(item.get("id") or 0) == result_id:
+                current_decision = str(item.get("decision") or "").strip().upper()
+                break
+
+        decision = self.result_correction_decision.get().strip().upper() or current_decision
+        if decision not in {"ACCEPT", "REJECT"}:
+            messagebox.showerror("Results", "Decision correction harus ACCEPT atau REJECT.")
+            return
+
+        reason = self.result_correction_reason.get().strip() or None
+        if decision == "ACCEPT":
+            reason = None
+
+        if not messagebox.askyesno("Results", f"Terapkan koreksi untuk result #{result_id}?"):
+            return
+
+        patch = {
+            "decision": decision,
+            "decision_code": decision,
+            "reject_reason_code": reason,
+        }
+        try:
+            self.api.update_inspection(result_id, patch)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Results", str(exc))
+            return
+
+        self.refresh_results()
+        self._set_status(f"Inspection result #{result_id} berhasil dikoreksi.")
+
+    def delete_selected_result(self) -> None:
+        result_id = self._selected_treeview_id(self.results_table)
+        if result_id is None:
+            messagebox.showwarning("Results", "Pilih hasil inspeksi yang ingin dihapus.")
+            return
+        if not messagebox.askyesno("Results", f"Hapus inspection result #{result_id}? Tindakan ini tidak bisa dibatalkan."):
+            return
+        try:
+            self.api.delete_inspection(result_id)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Results", str(exc))
+            return
+
+        self.result_summary.reset()
+        self.result_detail.set_payload({})
+        self.result_correction_decision.set("")
+        self.result_correction_reason.delete(0, "end")
+        self.refresh_results()
+        self._set_status(f"Inspection result #{result_id} dihapus.")
 
     def _retryable_visible_result_ids(self) -> list[int]:
         retryable_ids: list[int] = []

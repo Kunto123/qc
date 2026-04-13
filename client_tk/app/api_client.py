@@ -67,6 +67,9 @@ class ApiClient:
     def _put(self, path: str, payload: dict):
         return self._request_json("PUT", path, payload=payload, timeout=20)
 
+    def _patch(self, path: str, payload: dict):
+        return self._request_json("PATCH", path, payload=payload, timeout=20)
+
     def _delete(self, path: str):
         return self._request_json("DELETE", path, timeout=20)
 
@@ -108,6 +111,9 @@ class ApiClient:
 
     def get_active_deployment(self, line_id: str, station_id: str) -> dict:
         return self._get("/deployments/active", {"line_id": line_id, "station_id": station_id})
+
+    def update_deployment(self, deployment_id: int, payload: dict) -> dict:
+        return self._put(f"/deployments/{deployment_id}", payload)
 
     def deactivate_deployment(self, deployment_id: int) -> dict:
         return self._delete(f"/deployments/{deployment_id}")
@@ -160,6 +166,12 @@ class ApiClient:
     def get_inspection(self, result_id: int) -> dict:
         return self._get(f"/inspections/{result_id}")
 
+    def update_inspection(self, result_id: int, payload: dict) -> dict:
+        return self._patch(f"/inspections/{result_id}", payload)
+
+    def delete_inspection(self, result_id: int) -> dict:
+        return self._delete(f"/inspections/{result_id}")
+
     def retry_inspection_push(self, result_id: int) -> dict:
         return self._post(f"/inspections/{result_id}/retry-push", {})
 
@@ -196,6 +208,9 @@ class ApiClient:
     def save_profile(self, payload: dict) -> dict:
         return self._post("/calibration/profiles", payload)
 
+    def update_profile(self, profile_id: int, payload: dict) -> dict:
+        return self._put(f"/calibration/profiles/{profile_id}", payload)
+
     def delete_profile(self, profile_id: int) -> dict:
         return self._delete(f"/calibration/profiles/{profile_id}")
 
@@ -204,6 +219,9 @@ class ApiClient:
 
     def create_dataset(self, payload: dict) -> dict:
         return self._post("/datasets", payload)
+
+    def update_dataset(self, dataset_id: str, payload: dict) -> dict:
+        return self._patch(f"/datasets/{dataset_id}", payload)
 
     def delete_dataset(self, dataset_id: str) -> dict:
         return self._delete(f"/datasets/{dataset_id}")
@@ -219,6 +237,9 @@ class ApiClient:
 
     def get_dataset_version(self, dataset_id: str, version_id: str) -> dict:
         return self._get(f"/datasets/{dataset_id}/versions/{version_id}")
+
+    def update_dataset_version(self, dataset_id: str, version_id: str, payload: dict) -> dict:
+        return self._put(f"/datasets/{dataset_id}/versions/{version_id}", payload)
 
     def export_dataset_version(self, dataset_id: str, version_id: str) -> dict:
         return self._post(f"/datasets/{dataset_id}/versions/{version_id}/export", {})
@@ -283,6 +304,9 @@ class ApiClient:
     def create_augment_job(self, payload: dict) -> dict:
         return self._post("/augment/jobs", payload)
 
+    def delete_augment_job(self, job_id: str) -> dict:
+        return self._delete(f"/augment/jobs/{job_id}")
+
     def list_training_jobs(self) -> list[dict]:
         return self._get("/train/jobs")
 
@@ -296,6 +320,9 @@ class ApiClient:
     def cancel_training_job(self, job_id: str) -> dict:
         return self._post(f"/train/jobs/{job_id}/cancel", {})
 
+    def delete_training_job(self, job_id: str) -> dict:
+        return self._delete(f"/train/jobs/{job_id}")
+
     def list_models(self) -> list[dict]:
         return self._get("/models")
 
@@ -304,6 +331,10 @@ class ApiClient:
 
     def upload_model_file(self, payload: dict) -> dict:
         return self._post("/models/upload", payload)
+
+    def delete_model(self, model_id: int, *, purge_files: bool = False) -> dict:
+        params = {"purge_files": "1"} if purge_files else None
+        return self._request_json("DELETE", f"/models/{model_id}", params=params, timeout=20)
 
     # ------------------------------------------------------------------
     # Template lifecycle
@@ -351,3 +382,10 @@ class ApiClient:
         if station_id is not None:
             payload["station_id"] = station_id
         return self._post("/workstations/heartbeat", payload)
+
+    def list_workstations(self) -> list[dict]:
+        return self._get("/workstations")
+
+    def delete_workstation(self, machine_id: str) -> dict:
+        safe_id = quote(machine_id, safe="")
+        return self._delete(f"/workstations/{safe_id}")

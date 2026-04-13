@@ -62,6 +62,65 @@ def deactivate_deployment(deployment_id: int):
     return jsonify({"id": deployment_id, "is_active": False})
 
 
+@deployment_blueprint.put("/<int:deployment_id>")
+@require_roles(UserRole.ADMIN)
+def update_deployment(deployment_id: int):
+    payload = request.get_json(force=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Request body must be an object"}), 400
+
+    current = deployments_repo.get_deployment(deployment_id)
+    if current is None:
+        return jsonify({"error": "Deployment not found"}), 404
+    if not bool(current.get("is_active")):
+        return jsonify({"error": "Inactive deployment cannot be updated."}), 409
+
+    updates: dict = {}
+    if "line_id" in payload:
+        updates["line_id"] = payload.get("line_id")
+    if "station_id" in payload:
+        updates["station_id"] = payload.get("station_id")
+
+    if "template_version_id" in payload:
+        try:
+            template_version_id = int(payload.get("template_version_id") or 0)
+        except (TypeError, ValueError):
+            return jsonify({"error": "template_version_id must be an integer"}), 400
+        if template_version_id <= 0:
+            return jsonify({"error": "template_version_id must be a positive integer"}), 400
+
+        version = templates_repo.get_version(template_version_id)
+        if version is None:
+            return jsonify({"error": "Template version not found"}), 404
+
+        version_template_id = int((version.get("template") or {}).get("id") or 0)
+        current_template_id = int(current.get("template_id") or 0)
+        if version_template_id != current_template_id:
+            return jsonify({"error": "Template version does not belong to deployment template"}), 400
+
+        updates["template_version_id"] = template_version_id
+        updates["template_name"] = str((version.get("template") or {}).get("name") or current.get("template_name") or "")
+        updates["version_number"] = int(version.get("version_number") or current.get("version_number") or 0)
+
+    actor = getattr(g, "current_user", None)
+    if actor is not None:
+        updates["deployed_by"] = actor.id
+
+    if not updates:
+        return jsonify({"error": "At least one mutable field must be provided"}), 400
+
+    try:
+        record = deployments_repo.update_deployment(deployment_id, **updates)
+    except ValueError as exc:
+        message = str(exc)
+        if "not found" in message.lower():
+            return jsonify({"error": message}), 404
+        if "inactive" in message.lower():
+            return jsonify({"error": message}), 409
+        return jsonify({"error": message}), 400
+    return jsonify(record)
+
+
 @deployment_blueprint.post("/<int:deployment_id>/rollback")
 @require_roles(UserRole.ADMIN)
 def rollback_deployment(deployment_id: int):

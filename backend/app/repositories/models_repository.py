@@ -158,3 +158,17 @@ class ModelsRepository(JsonRepository):
             self.save(payload)
             return dict(item)
         raise ValueError(f"Model {model_id} not found.")
+
+    def delete_model(self, model_id: int) -> dict[str, Any]:
+        payload = self.load()
+        items = payload["models"]
+        for index, item in enumerate(items):
+            if int(item["id"]) != int(model_id):
+                continue
+            if str(item.get("source") or "").strip().lower() == "seeded-default":
+                raise ValueError("Default seeded model cannot be deleted.")
+            removed = dict(item)
+            del items[index]
+            self.save(payload)
+            return removed
+        raise ValueError(f"Model {model_id} not found.")

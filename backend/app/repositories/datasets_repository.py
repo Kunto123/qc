@@ -12,6 +12,7 @@ from backend.app.repositories.base_json import JsonRepository
 
 
 _ALLOWED_DATASET_TARGETS = {"images", "labels", "exports"}
+_UNSET = object()
 
 
 def _normalize_target(target: str) -> str:
@@ -46,6 +47,36 @@ class DatasetsRepository(JsonRepository):
         items.append(record)
         self.save(payload)
         return record
+
+    def update_dataset(
+        self,
+        dataset_id: str,
+        *,
+        name: object = _UNSET,
+        description: object = _UNSET,
+    ) -> dict:
+        payload = self.load()
+        if name is _UNSET and description is _UNSET:
+            raise ValueError("At least one of name or description is required")
+
+        for item in payload["datasets"]:
+            if item["id"] != dataset_id:
+                continue
+
+            if name is not _UNSET:
+                normalized_name = str(name or "").strip()
+                if not normalized_name:
+                    raise ValueError("Dataset name is required")
+                item["name"] = normalized_name
+
+            if description is not _UNSET:
+                item["description"] = str(description or "")
+
+            item["updated_at"] = datetime.now(UTC).isoformat()
+            self.save(payload)
+            return self._enrich_dataset(item)
+
+        raise ValueError("Dataset not found")
 
     def get_dataset(self, dataset_id: str) -> dict | None:
         return next((item for item in self.list_datasets() if item["id"] == dataset_id), None)

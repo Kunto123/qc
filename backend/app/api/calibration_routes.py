@@ -56,6 +56,30 @@ def create_profile():
     return jsonify(record), 201
 
 
+@calibration_blueprint.put("/profiles/<int:profile_id>")
+@require_roles(UserRole.ADMIN)
+def update_profile(profile_id: int):
+    payload = request.get_json(force=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Request body must be an object"}), 400
+
+    updates: dict = {}
+    for field in ("name", "profile", "scope_line_id", "scope_station_id", "scope_part_name", "expiry_interval_days"):
+        if field in payload:
+            updates[field] = payload.get(field)
+
+    if not updates:
+        return jsonify({"error": "At least one field must be provided"}), 400
+
+    try:
+        record = profiles_repo.update(profile_id, **updates)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+    return jsonify(record)
+
+
 @calibration_blueprint.get("/profiles/active")
 @require_auth
 def get_active_profile():

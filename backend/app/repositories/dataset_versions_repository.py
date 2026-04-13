@@ -15,6 +15,8 @@ from backend.app.repositories.datasets_repository import DatasetsRepository
 _ALLOWED_EXPORT_FORMATS = {"yolo", "yolo-detection"}
 _DEFAULT_SPLIT_RATIOS = {"train": 0.7, "valid": 0.2, "test": 0.1}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+_MUTABLE_VERSION_STATUSES = {"draft", "ready", "archived"}
+_UNSET = object()
 
 
 def _coerce_ratio(value: Any, default: float) -> float:
@@ -96,6 +98,51 @@ class DatasetVersionRepository(JsonRepository):
             if str(item.get("id")) == str(version_id):
                 return self._enrich_version(dict(item))
         return None
+
+    def update_version(
+        self,
+        dataset_id: str,
+        version_id: str,
+        *,
+        name: Any = _UNSET,
+        description: Any = _UNSET,
+        status: Any = _UNSET,
+    ) -> dict:
+        if self._datasets_repo.get_dataset(dataset_id) is None:
+            raise ValueError("Dataset not found.")
+        if name is _UNSET and description is _UNSET and status is _UNSET:
+            raise ValueError("At least one mutable field is required.")
+
+        payload = self.load()
+        for item in payload["versions"]:
+            if str(item.get("id")) != str(version_id) or str(item.get("dataset_id")) != str(dataset_id):
+                continue
+
+            if name is not _UNSET:
+                normalized_name = str(name or "").strip()
+                if not normalized_name:
+                    raise ValueError("name must not be empty")
+                item["name"] = normalized_name
+
+            if description is not _UNSET:
+                item["description"] = str(description or "").strip()
+
+            if status is not _UNSET:
+                normalized_status = str(status or "").strip().lower()
+                if normalized_status not in _MUTABLE_VERSION_STATUSES:
+                    allowed = ", ".join(sorted(_MUTABLE_VERSION_STATUSES))
+                    raise ValueError(f"status must be one of: {allowed}")
+                if normalized_status == "ready" and not list(item.get("class_names") or []):
+                    raise ValueError("status 'ready' requires at least one class in export.")
+                item["status"] = normalized_status
+                item["ready_for_training"] = normalized_status == "ready"
+
+            item["updated_at"] = datetime.now(UTC).isoformat()
+            self.save(payload)
+            self._write_manifest(item)
+            return self._enrich_version(dict(item))
+
+        raise ValueError("Dataset version not found.")
 
     def create_version(self, dataset_id: str, params: dict | None = None) -> dict:
         if self._datasets_repo.get_dataset(dataset_id) is None:

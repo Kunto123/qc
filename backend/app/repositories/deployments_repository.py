@@ -5,12 +5,21 @@ from datetime import UTC, datetime
 from backend.app.repositories.base_json import JsonRepository
 
 
+_UNSET = object()
+
+
 class DeploymentsRepository(JsonRepository):
     def __init__(self) -> None:
         super().__init__("deployments.json", {"deployments": []})
 
     def list_deployments(self) -> list[dict]:
         return self.load()["deployments"]
+
+    def get_deployment(self, deployment_id: int) -> dict | None:
+        return next(
+            (item for item in self.list_deployments() if int(item.get("id") or 0) == int(deployment_id)),
+            None,
+        )
 
     def deploy(
         self,
@@ -70,6 +79,81 @@ class DeploymentsRepository(JsonRepository):
                 self.save(payload)
                 return True
         return False
+
+    def update_deployment(
+        self,
+        deployment_id: int,
+        *,
+        line_id: object = _UNSET,
+        station_id: object = _UNSET,
+        template_version_id: object = _UNSET,
+        template_name: object = _UNSET,
+        version_number: object = _UNSET,
+        deployed_by: object = _UNSET,
+    ) -> dict:
+        if (
+            line_id is _UNSET
+            and station_id is _UNSET
+            and template_version_id is _UNSET
+            and template_name is _UNSET
+            and version_number is _UNSET
+            and deployed_by is _UNSET
+        ):
+            raise ValueError("At least one mutable field is required.")
+
+        payload = self.load()
+        items = payload["deployments"]
+        now = datetime.now(UTC).isoformat()
+
+        for item in items:
+            if int(item.get("id") or 0) != int(deployment_id):
+                continue
+            if not bool(item.get("is_active")):
+                raise ValueError("Inactive deployment cannot be updated.")
+
+            next_line_id = str(item.get("line_id") or "").strip()
+            if line_id is not _UNSET:
+                next_line_id = str(line_id or "").strip()
+
+            next_station_id = str(item.get("station_id") or "").strip()
+            if station_id is not _UNSET:
+                next_station_id = str(station_id or "").strip()
+
+            if not next_line_id or not next_station_id:
+                raise ValueError("line_id and station_id must not be empty")
+
+            for other in items:
+                if int(other.get("id") or 0) == int(deployment_id):
+                    continue
+                if (
+                    bool(other.get("is_active"))
+                    and str(other.get("line_id") or "") == next_line_id
+                    and str(other.get("station_id") or "") == next_station_id
+                ):
+                    other["is_active"] = False
+                    other["effective_until"] = now
+
+            item["line_id"] = next_line_id
+            item["station_id"] = next_station_id
+
+            if template_version_id is not _UNSET:
+                item["template_version_id"] = int(template_version_id)
+
+            if template_name is not _UNSET:
+                normalized_template_name = str(template_name or "").strip()
+                item["template_name"] = normalized_template_name or None
+
+            if version_number is not _UNSET:
+                item["version_number"] = int(version_number)
+
+            if deployed_by is not _UNSET:
+                item["deployed_by"] = None if deployed_by in (None, "") else int(deployed_by)
+
+            item["updated_at"] = now
+            self.save(payload)
+            return dict(item)
+
+        raise ValueError(f"Deployment {deployment_id} not found.")
 
     def rollback(self, deployment_id: int, *, rolled_back_by: int | None = None) -> dict:
         """Deactivate deployment_id and re-deploy the previous version for the same line/station."""

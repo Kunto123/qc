@@ -28,3 +28,6 @@ class TrainingService:
     def cancel_job(self, job_id: str) -> dict:
         return self._training_repo.cancel_job(job_id)
 
+    def delete_job(self, job_id: str) -> dict:
+        return self._training_repo.delete_job(job_id)
+

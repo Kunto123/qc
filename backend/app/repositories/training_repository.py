@@ -14,6 +14,7 @@ _TRANSITIONS: dict[str, set[str]] = {
     "failed":    {"queued"},  # allow re-queue after failure
     "cancelled": {"queued"},  # allow re-queue after cancel
 }
+_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
 class TrainingRepository(JsonRepository):
@@ -142,4 +143,19 @@ class TrainingRepository(JsonRepository):
         if job["status"] not in {"queued", "running"}:
             raise ValueError(f"Cannot cancel job in status '{job['status']}'.")
         return self.transition(job_id, "cancelled", log_line="Job cancelled by user.")
+
+    def delete_job(self, job_id: str) -> dict:
+        payload = self.load()
+        items = payload["jobs"]
+        for index, item in enumerate(items):
+            if item["id"] != job_id:
+                continue
+            status = str(item.get("status") or "").strip().lower()
+            if status not in _TERMINAL_STATUSES:
+                raise ValueError(f"Cannot delete training job in status '{status}'.")
+            removed = dict(item)
+            del items[index]
+            self.save(payload)
+            return removed
+        raise ValueError("Training job not found.")
 

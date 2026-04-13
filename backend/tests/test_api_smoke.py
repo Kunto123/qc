@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import json
 from io import BytesIO
 import os
 import shutil
@@ -1193,3 +1194,653 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(filtered_dashboard_response.status_code, 200, filtered_dashboard_response.get_json())
         filtered_summary = filtered_dashboard_response.get_json()
         self.assertGreaterEqual(filtered_summary["total_inspections"], 1)
+
+    def test_08b_admin_can_update_calibration_profile(self) -> None:
+        compute_response = self.client.post(
+            "/calibration/color-profile",
+            json={
+                "image_b64": _two_roi_ready_image_b64(),
+                "colorspace": "LAB",
+                "roi": {"x": 0.09, "y": 0.12, "w": 0.19, "h": 0.22},
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(compute_response.status_code, 200, compute_response.get_json())
+
+        create_response = self.client.post(
+            "/calibration/profiles",
+            json={"name": "phase8-update-target", "profile": compute_response.get_json()},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(create_response.status_code, 201, create_response.get_json())
+        profile_id = create_response.get_json()["id"]
+
+        update_response = self.client.put(
+            f"/calibration/profiles/{profile_id}",
+            json={
+                "name": "phase8-update-target-renamed",
+                "scope_line_id": "LINE-UPDATED",
+                "scope_station_id": "ST-UPDATED",
+                "expiry_interval_days": 3,
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(update_response.status_code, 200, update_response.get_json())
+        updated_profile = update_response.get_json()
+        self.assertEqual(updated_profile["name"], "phase8-update-target-renamed")
+        self.assertEqual(updated_profile["scope_line_id"], "LINE-UPDATED")
+        self.assertEqual(updated_profile["scope_station_id"], "ST-UPDATED")
+        self.assertIsNotNone(updated_profile.get("expires_at"))
+        self.assertIsNotNone(updated_profile.get("updated_at"))
+
+    def test_08c_operator_cannot_update_calibration_profile(self) -> None:
+        compute_response = self.client.post(
+            "/calibration/color-profile",
+            json={
+                "image_b64": _sample_image_b64(),
+                "colorspace": "LAB",
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(compute_response.status_code, 200, compute_response.get_json())
+
+        create_response = self.client.post(
+            "/calibration/profiles",
+            json={"name": "phase8-operator-forbidden", "profile": compute_response.get_json()},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(create_response.status_code, 201, create_response.get_json())
+        profile_id = create_response.get_json()["id"]
+
+        update_response = self.client.put(
+            f"/calibration/profiles/{profile_id}",
+            json={"name": "should-not-work"},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(update_response.status_code, 403, update_response.get_json())
+
+    def test_08d_admin_can_patch_dataset_metadata(self) -> None:
+        dataset_response = self.client.post(
+            "/datasets",
+            json={"name": f"phase8-metadata-{uuid4().hex[:8]}", "description": "before"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
+        dataset_id = dataset_response.get_json()["id"]
+
+        patch_response = self.client.patch(
+            f"/datasets/{dataset_id}",
+            json={"name": "phase8-metadata-updated", "description": "after"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(patch_response.status_code, 200, patch_response.get_json())
+        updated_dataset = patch_response.get_json()
+        self.assertEqual(updated_dataset["id"], dataset_id)
+        self.assertEqual(updated_dataset["name"], "phase8-metadata-updated")
+        self.assertEqual(updated_dataset["description"], "after")
+        self.assertIsNotNone(updated_dataset.get("updated_at"))
+
+    def test_08e_dataset_patch_validates_role_payload_and_not_found(self) -> None:
+        dataset_response = self.client.post(
+            "/datasets",
+            json={"name": f"phase8-role-{uuid4().hex[:8]}", "description": "seed"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
+        dataset_id = dataset_response.get_json()["id"]
+
+        forbidden_response = self.client.patch(
+            f"/datasets/{dataset_id}",
+            json={"name": "operator-forbidden"},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(forbidden_response.status_code, 403, forbidden_response.get_json())
+
+        invalid_payload_response = self.client.patch(
+            f"/datasets/{dataset_id}",
+            json={},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(invalid_payload_response.status_code, 400, invalid_payload_response.get_json())
+
+        empty_name_response = self.client.patch(
+            f"/datasets/{dataset_id}",
+            json={"name": "   "},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(empty_name_response.status_code, 400, empty_name_response.get_json())
+
+        missing_response = self.client.patch(
+            "/datasets/missing-dataset",
+            json={"name": "phase8-not-found"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(missing_response.status_code, 404, missing_response.get_json())
+
+    def test_09a_model_delete_blocked_when_referenced_by_active_deployment(self) -> None:
+        template_detail_response = self.client.get("/templates/1", headers=_headers(self.admin_token))
+        self.assertEqual(template_detail_response.status_code, 200, template_detail_response.get_json())
+        active_template_model_path = template_detail_response.get_json()["vision"]["model_path"]
+
+        model_response = self.client.post(
+            "/models",
+            json={
+                "name": f"phase9-model-{uuid4().hex[:8]}",
+                "path": active_template_model_path,
+                "source": "manual",
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(model_response.status_code, 201, model_response.get_json())
+        model = model_response.get_json()
+
+        deploy_response = self.client.post(
+            "/deployments",
+            json={
+                "template_id": 1,
+                "template_version_id": 1,
+                "line_id": "LINE-MODEL-GUARD",
+                "station_id": "ST-MODEL-GUARD",
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(deploy_response.status_code, 201, deploy_response.get_json())
+        deployment = deploy_response.get_json()
+
+        blocked_delete_response = self.client.delete(
+            f"/models/{model['id']}",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(blocked_delete_response.status_code, 409, blocked_delete_response.get_json())
+        blocked_payload = blocked_delete_response.get_json()
+        self.assertIn("conflict", blocked_payload)
+        conflict_deployment_id = int(blocked_payload["conflict"].get("deployment_id") or 0)
+        self.assertGreater(conflict_deployment_id, 0)
+
+        # In full-suite runs there may already be another active deployment using
+        # the same model path, so deactivate both the freshly created deployment
+        # and the reported conflict deployment before retrying delete.
+        for deployment_id in {int(deployment["id"]), conflict_deployment_id}:
+            deactivate_response = self.client.delete(
+                f"/deployments/{deployment_id}",
+                headers=_headers(self.admin_token),
+            )
+            self.assertEqual(deactivate_response.status_code, 200, deactivate_response.get_json())
+
+        delete_response = self.client.delete(
+            f"/models/{model['id']}",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(delete_response.status_code, 200, delete_response.get_json())
+        self.assertTrue(delete_response.get_json().get("deleted"))
+
+        models_response = self.client.get("/models", headers=_headers(self.admin_token))
+        self.assertEqual(models_response.status_code, 200, models_response.get_json())
+        models = models_response.get_json()
+        self.assertFalse(any(int(item["id"]) == int(model["id"]) for item in models))
+
+    def test_09b_job_and_workstation_delete_requires_safe_state(self) -> None:
+        dataset_response = self.client.post(
+            "/datasets",
+            json={"name": f"phase9-jobs-{uuid4().hex[:8]}", "description": "phase9 jobs"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
+        dataset_id = dataset_response.get_json()["id"]
+
+        augment_create_response = self.client.post(
+            "/augment/jobs",
+            json={"dataset_id": dataset_id},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(augment_create_response.status_code, 201, augment_create_response.get_json())
+        augment_job = augment_create_response.get_json()
+
+        augment_delete_early_response = self.client.delete(
+            f"/augment/jobs/{augment_job['id']}",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(augment_delete_early_response.status_code, 400, augment_delete_early_response.get_json())
+
+        augment_cancel_response = self.client.post(
+            f"/augment/jobs/{augment_job['id']}/cancel",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(augment_cancel_response.status_code, 200, augment_cancel_response.get_json())
+
+        augment_delete_response = self.client.delete(
+            f"/augment/jobs/{augment_job['id']}",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(augment_delete_response.status_code, 200, augment_delete_response.get_json())
+        self.assertTrue(augment_delete_response.get_json().get("deleted"))
+
+        train_create_response = self.client.post(
+            "/train/jobs",
+            json={"dataset_id": dataset_id, "base_model": "yolov5s"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(train_create_response.status_code, 201, train_create_response.get_json())
+        train_job = train_create_response.get_json()
+
+        train_delete_early_response = self.client.delete(
+            f"/train/jobs/{train_job['id']}",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(train_delete_early_response.status_code, 400, train_delete_early_response.get_json())
+
+        deadline = time.time() + 12.0
+        terminal_statuses = {"completed", "failed", "cancelled"}
+        current_status = None
+        while time.time() < deadline:
+            train_status_response = self.client.get(
+                f"/train/jobs/{train_job['id']}",
+                headers=_headers(self.admin_token),
+            )
+            self.assertEqual(train_status_response.status_code, 200, train_status_response.get_json())
+            current_status = train_status_response.get_json().get("status")
+            if current_status in terminal_statuses:
+                break
+            if current_status in {"queued", "running"}:
+                cancel_response = self.client.post(
+                    f"/train/jobs/{train_job['id']}/cancel",
+                    headers=_headers(self.admin_token),
+                )
+                self.assertEqual(cancel_response.status_code, 200, cancel_response.get_json())
+            time.sleep(0.2)
+
+        self.assertIn(current_status, terminal_statuses)
+
+        train_delete_response = self.client.delete(
+            f"/train/jobs/{train_job['id']}",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(train_delete_response.status_code, 200, train_delete_response.get_json())
+        self.assertTrue(train_delete_response.get_json().get("deleted"))
+
+        machine_id = f"wk-{uuid4().hex[:8]}"
+        heartbeat_response = self.client.post(
+            "/workstations/heartbeat",
+            json={"machine_id": machine_id, "line_id": "LINE-WK", "station_id": "ST-WK"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(heartbeat_response.status_code, 200, heartbeat_response.get_json())
+
+        list_workstations_response = self.client.get("/workstations", headers=_headers(self.admin_token))
+        self.assertEqual(list_workstations_response.status_code, 200, list_workstations_response.get_json())
+        self.assertTrue(any(item.get("machine_id") == machine_id for item in list_workstations_response.get_json()))
+
+        delete_workstation_response = self.client.delete(
+            f"/workstations/{machine_id}",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(delete_workstation_response.status_code, 200, delete_workstation_response.get_json())
+        self.assertTrue(delete_workstation_response.get_json().get("deleted"))
+
+        delete_workstation_not_found_response = self.client.delete(
+            f"/workstations/{machine_id}",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(delete_workstation_not_found_response.status_code, 404, delete_workstation_not_found_response.get_json())
+
+    def test_10a_admin_can_patch_inspection_with_audit_trail(self) -> None:
+        session_response = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "phase10-correction",
+                "camera_index": 0,
+                "template_version_id": 1,
+                "line_id": "LINE-CORR",
+                "station_id": "ST-CORR",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_response.status_code, 201, session_response.get_json())
+        session_id = session_response.get_json()["session_id"]
+
+        frame_response = self.client.post(
+            f"/inspection/sessions/{session_id}/frame",
+            json={"image_b64": _sample_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(frame_response.status_code, 200, frame_response.get_json())
+        result_id = frame_response.get_json()["db_write"]["result_id"]
+        self.assertIsNotNone(result_id)
+
+        operator_patch_response = self.client.patch(
+            f"/inspections/{result_id}",
+            json={"decision_code": "REJECT", "reject_reason_code": "OUT_OF_POSITION"},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(operator_patch_response.status_code, 403, operator_patch_response.get_json())
+
+        patch_response = self.client.patch(
+            f"/inspections/{result_id}",
+            json={
+                "decision_code": "REJECT",
+                "reject_reason_code": "OUT_OF_POSITION",
+                "sticker_confidence": 0.42,
+                "note": "manual correction phase10",
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(patch_response.status_code, 200, patch_response.get_json())
+        patched = patch_response.get_json()
+        self.assertEqual(patched["decision_code"], "REJECT")
+        self.assertEqual(patched["decision"], "REJECT")
+        self.assertEqual(patched["reject_reason_code"], "OUT_OF_POSITION")
+        self.assertEqual(patched["sticker_confidence"], 0.42)
+        self.assertEqual(patched["corrected_by_username"], "admin")
+        self.assertTrue(isinstance(patched.get("corrections"), list) and patched["corrections"])
+
+        inspection_response = self.client.get(f"/inspections/{result_id}", headers=_headers(self.admin_token))
+        self.assertEqual(inspection_response.status_code, 200, inspection_response.get_json())
+        inspected = inspection_response.get_json()
+        self.assertEqual(inspected["decision_code"], "REJECT")
+
+        audit_response = self.client.get("/auth/audit-log?limit=300", headers=_headers(self.admin_token))
+        self.assertEqual(audit_response.status_code, 200, audit_response.get_json())
+        events = audit_response.get_json()
+        matched = False
+        for event in events:
+            if event.get("event_type") != "inspection_corrected":
+                continue
+            details_raw = event.get("details")
+            if not details_raw:
+                continue
+            try:
+                details = json.loads(details_raw)
+            except (TypeError, ValueError):
+                continue
+            if int(details.get("result_id") or -1) == int(result_id):
+                matched = True
+                break
+        self.assertTrue(matched, "Expected inspection_corrected event for patched result")
+
+    def test_10b_admin_can_delete_inspection_with_audit_trail(self) -> None:
+        session_response = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "phase10-delete",
+                "camera_index": 0,
+                "template_version_id": 1,
+                "line_id": "LINE-DEL",
+                "station_id": "ST-DEL",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_response.status_code, 201, session_response.get_json())
+        session_id = session_response.get_json()["session_id"]
+
+        frame_response = self.client.post(
+            f"/inspection/sessions/{session_id}/frame",
+            json={"image_b64": _sample_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(frame_response.status_code, 200, frame_response.get_json())
+        result_id = frame_response.get_json()["db_write"]["result_id"]
+        self.assertIsNotNone(result_id)
+
+        operator_delete_response = self.client.delete(
+            f"/inspections/{result_id}",
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(operator_delete_response.status_code, 403, operator_delete_response.get_json())
+
+        delete_response = self.client.delete(
+            f"/inspections/{result_id}",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(delete_response.status_code, 200, delete_response.get_json())
+        self.assertTrue(delete_response.get_json()["deleted"])
+
+        lookup_response = self.client.get(f"/inspections/{result_id}", headers=_headers(self.admin_token))
+        self.assertEqual(lookup_response.status_code, 404, lookup_response.get_json())
+
+        audit_response = self.client.get("/auth/audit-log?limit=300", headers=_headers(self.admin_token))
+        self.assertEqual(audit_response.status_code, 200, audit_response.get_json())
+        events = audit_response.get_json()
+        matched = False
+        for event in events:
+            if event.get("event_type") != "inspection_deleted":
+                continue
+            details_raw = event.get("details")
+            if not details_raw:
+                continue
+            try:
+                details = json.loads(details_raw)
+            except (TypeError, ValueError):
+                continue
+            if int(details.get("result_id") or -1) == int(result_id):
+                matched = True
+                break
+        self.assertTrue(matched, "Expected inspection_deleted event for removed result")
+
+    def test_11a_admin_can_update_dataset_version_metadata_only(self) -> None:
+        dataset_response = self.client.post(
+            "/datasets",
+            json={"name": f"phase11-ds-{uuid4().hex[:8]}", "description": "phase11 source"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
+        dataset = dataset_response.get_json()
+
+        upload_response = self.client.post(
+            f"/datasets/{dataset['id']}/upload",
+            json={"file_name": "phase11.jpg", "target": "images", "content_b64": _sample_image_b64()},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(upload_response.status_code, 201, upload_response.get_json())
+
+        create_version_response = self.client.post(
+            f"/datasets/{dataset['id']}/versions",
+            json={"name": "phase11-v1", "description": "initial snapshot"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(create_version_response.status_code, 201, create_version_response.get_json())
+        version = create_version_response.get_json()
+
+        forbidden_response = self.client.put(
+            f"/datasets/{dataset['id']}/versions/{version['id']}",
+            json={"name": "operator-forbidden"},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(forbidden_response.status_code, 403, forbidden_response.get_json())
+
+        update_response = self.client.put(
+            f"/datasets/{dataset['id']}/versions/{version['id']}",
+            json={
+                "name": "phase11-v1-renamed",
+                "description": "metadata updated",
+                "status": "archived",
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(update_response.status_code, 200, update_response.get_json())
+        updated = update_response.get_json()
+        self.assertEqual(updated["name"], "phase11-v1-renamed")
+        self.assertEqual(updated["description"], "metadata updated")
+        self.assertEqual(updated["status"], "archived")
+        self.assertFalse(updated["ready_for_training"])
+        self.assertIsNotNone(updated.get("updated_at"))
+
+        immutable_update_response = self.client.put(
+            f"/datasets/{dataset['id']}/versions/{version['id']}",
+            json={"split_ratios": {"train": 1.0}},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(immutable_update_response.status_code, 400, immutable_update_response.get_json())
+
+        invalid_ready_response = self.client.put(
+            f"/datasets/{dataset['id']}/versions/{version['id']}",
+            json={"status": "ready"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(invalid_ready_response.status_code, 400, invalid_ready_response.get_json())
+
+    def test_11b_admin_can_update_deployment_binding(self) -> None:
+        create_template_response = self.client.post(
+            "/templates",
+            json={
+                "name": f"phase11-template-{uuid4().hex[:8]}",
+                "description": "phase11 deployment update",
+                "is_active": True,
+                "camera": {"camera_index": 0, "width": 640, "height": 480, "fps": 15},
+                "part_ready_roi": {"x": 0.10, "y": 0.10, "w": 0.20, "h": 0.20},
+                "sticker_roi": {"x": 0.45, "y": 0.25, "w": 0.25, "h": 0.25},
+                "vision": {"model_path": "models/dummy.pt", "classes": ["sample-sticker"]},
+                "part_ready": {
+                    "enabled": True,
+                    "color_profile_id": None,
+                    "colorspace": "LAB",
+                    "min_match_ratio": 0.70,
+                },
+                "sticker": {
+                    "part_name": "Phase11 Part",
+                    "expected_class": "sample-sticker",
+                    "line": "LINE-DEP-OLD",
+                    "enabled": True,
+                    "validator_mode": "ml_detection",
+                    "min_roi_confidence": 0.0,
+                    "max_offset_x": 80,
+                    "max_offset_y": 80,
+                },
+                "persistence": {"write_to_db": True},
+                "metadata": {"scenario": "phase11-deployment"},
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(create_template_response.status_code, 201, create_template_response.get_json())
+        created_template = create_template_response.get_json()
+
+        update_template_response = self.client.put(
+            f"/templates/{created_template['id']}",
+            json={
+                **created_template,
+                "description": "phase11 deployment update v2",
+                "change_note": "phase11 create v2",
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(update_template_response.status_code, 200, update_template_response.get_json())
+        updated_template = update_template_response.get_json()
+
+        deploy_response = self.client.post(
+            "/deployments",
+            json={
+                "template_id": created_template["id"],
+                "template_version_id": created_template["version_id"],
+                "line_id": "LINE-DEP-OLD",
+                "station_id": "ST-DEP-OLD",
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(deploy_response.status_code, 201, deploy_response.get_json())
+        deployment = deploy_response.get_json()
+
+        forbidden_response = self.client.put(
+            f"/deployments/{deployment['id']}",
+            json={"line_id": "LINE-DEP-BLOCKED"},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(forbidden_response.status_code, 403, forbidden_response.get_json())
+
+        update_response = self.client.put(
+            f"/deployments/{deployment['id']}",
+            json={
+                "line_id": "LINE-DEP-NEW",
+                "station_id": "ST-DEP-NEW",
+                "template_version_id": updated_template["version_id"],
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(update_response.status_code, 200, update_response.get_json())
+        updated_deployment = update_response.get_json()
+        self.assertEqual(updated_deployment["line_id"], "LINE-DEP-NEW")
+        self.assertEqual(updated_deployment["station_id"], "ST-DEP-NEW")
+        self.assertEqual(updated_deployment["template_version_id"], updated_template["version_id"])
+        self.assertEqual(updated_deployment["version_number"], updated_template["version_number"])
+        self.assertEqual(updated_deployment["template_id"], created_template["id"])
+
+        old_active_response = self.client.get(
+            "/deployments/active?line_id=LINE-DEP-OLD&station_id=ST-DEP-OLD",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(old_active_response.status_code, 200, old_active_response.get_json())
+        self.assertIsNone(old_active_response.get_json()["deployment"])
+
+        new_active_response = self.client.get(
+            "/deployments/active?line_id=LINE-DEP-NEW&station_id=ST-DEP-NEW",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(new_active_response.status_code, 200, new_active_response.get_json())
+        self.assertIsNotNone(new_active_response.get_json()["deployment"])
+        self.assertEqual(new_active_response.get_json()["deployment"]["id"], deployment["id"])
+
+    def test_11c_deployment_update_rejects_cross_template_and_inactive(self) -> None:
+        primary_deployment_response = self.client.post(
+            "/deployments",
+            json={
+                "template_id": 1,
+                "template_version_id": 1,
+                "line_id": "LINE-DEP-VAL",
+                "station_id": "ST-DEP-VAL",
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(primary_deployment_response.status_code, 201, primary_deployment_response.get_json())
+        deployment = primary_deployment_response.get_json()
+
+        other_template_response = self.client.post(
+            "/templates",
+            json={
+                "name": f"phase11-other-{uuid4().hex[:8]}",
+                "description": "phase11 cross-template guard",
+                "is_active": True,
+                "camera": {"camera_index": 0, "width": 640, "height": 480, "fps": 15},
+                "part_ready_roi": {"x": 0.10, "y": 0.10, "w": 0.20, "h": 0.20},
+                "sticker_roi": {"x": 0.45, "y": 0.25, "w": 0.25, "h": 0.25},
+                "vision": {"model_path": "models/dummy.pt", "classes": ["sample-sticker"]},
+                "part_ready": {
+                    "enabled": True,
+                    "color_profile_id": None,
+                    "colorspace": "LAB",
+                    "min_match_ratio": 0.70,
+                },
+                "sticker": {
+                    "part_name": "Phase11 Other",
+                    "expected_class": "sample-sticker",
+                    "line": "LINE-OTHER",
+                    "enabled": True,
+                    "validator_mode": "ml_detection",
+                    "min_roi_confidence": 0.0,
+                    "max_offset_x": 80,
+                    "max_offset_y": 80,
+                },
+                "persistence": {"write_to_db": True},
+                "metadata": {"scenario": "phase11-cross-template"},
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(other_template_response.status_code, 201, other_template_response.get_json())
+        other_template = other_template_response.get_json()
+
+        cross_template_response = self.client.put(
+            f"/deployments/{deployment['id']}",
+            json={"template_version_id": other_template["version_id"]},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(cross_template_response.status_code, 400, cross_template_response.get_json())
+
+        deactivate_response = self.client.delete(
+            f"/deployments/{deployment['id']}",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(deactivate_response.status_code, 200, deactivate_response.get_json())
+
+        inactive_update_response = self.client.put(
+            f"/deployments/{deployment['id']}",
+            json={"line_id": "LINE-DEP-INACTIVE"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(inactive_update_response.status_code, 409, inactive_update_response.get_json())

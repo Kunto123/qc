@@ -118,3 +118,14 @@ class SqlServerInspectionMirrorRepository:
             inserted_id = int(cursor.fetchone()[0])
             conn.commit()
         return {"id": inserted_id, **record}
+
+    def delete_result(self, mirror_id: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"DELETE FROM {self.TABLE_NAME} WHERE id = ?",
+                int(mirror_id),
+            )
+            deleted = int(cursor.rowcount or 0) > 0
+            conn.commit()
+        return deleted

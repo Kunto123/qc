@@ -40,10 +40,12 @@ class EngineerScreen(ctk.CTkFrame):
         self._base_model_lookup: dict[str, dict] = {}
         self._dataset_version_cache: list[dict] = []
         self._dataset_version_lookup: dict[str, dict] = {}
+        self._augment_jobs: list[dict] = []
         self._training_jobs: list[dict] = []
         self._active_training_job_id: str | None = None
         self._model_cache: list[dict] = []
         self._profile_cache: list[dict] = []
+        self._workstation_cache: list[dict] = []
         self._annotation_files: list[dict] = []
         self._annotation_index: int | None = None
         self._annotation_dataset_id: str | None = None
@@ -75,6 +77,7 @@ class EngineerScreen(ctk.CTkFrame):
         self._models_refresh_sequence = 0
         self._profiles_refresh_sequence = 0
         self._training_jobs_refresh_sequence = 0
+        self._workstations_refresh_sequence = 0
         self._responsive_layout_job: str | None = None
 
         notebook = ctk.CTkTabview(self, fg_color=APP_BG, corner_radius=0, command=self._on_notebook_tab_changed)
@@ -121,6 +124,7 @@ class EngineerScreen(ctk.CTkFrame):
 
         self.after_idle(self.refresh_datasets)
         self.after_idle(self.refresh_base_models)
+        self.after_idle(self.refresh_workstations)
 
     def _make_scrollable_page(self, tab: ttk.Frame, key: str) -> ttk.Frame:
         scroller = ScrollableFrame(tab)
@@ -226,6 +230,7 @@ class EngineerScreen(ctk.CTkFrame):
                 self.refresh_base_models()
             self.refresh_augment_jobs()
             self.refresh_training_jobs()
+            self.refresh_workstations()
         if selected_tab_text == "Models":
             if not self._models_tab_built:
                 self._ensure_models_tab_built()
@@ -350,6 +355,7 @@ class EngineerScreen(ctk.CTkFrame):
         version_form.columnconfigure(3, weight=1)
         self.version_name = ttk.Entry(version_form)
         self.version_description = ttk.Entry(version_form)
+        self.version_status = ttk.Combobox(version_form, values=["draft", "ready", "archived"], state="readonly")
         self.version_train_ratio = ttk.Entry(version_form)
         self.version_valid_ratio = ttk.Entry(version_form)
         self.version_test_ratio = ttk.Entry(version_form)
@@ -361,14 +367,17 @@ class EngineerScreen(ctk.CTkFrame):
             (self.version_test_ratio, "0.1"),
         ):
             entry.insert(0, default)
+        self.version_status.set("ready")
         self._grid_entry(version_form, 0, 0, "Name", self.version_name)
         self._grid_entry(version_form, 0, 2, "Description", self.version_description)
-        self._grid_entry(version_form, 1, 0, "Train", self.version_train_ratio)
-        self._grid_entry(version_form, 1, 2, "Valid", self.version_valid_ratio)
-        self._grid_entry(version_form, 2, 0, "Test", self.version_test_ratio)
+        self._grid_entry(version_form, 1, 0, "Status", self.version_status)
+        self._grid_entry(version_form, 1, 2, "Train", self.version_train_ratio)
+        self._grid_entry(version_form, 2, 0, "Valid", self.version_valid_ratio)
+        self._grid_entry(version_form, 2, 2, "Test", self.version_test_ratio)
         version_btn_bar = ttk.Frame(version_form)
-        version_btn_bar.grid(row=2, column=2, columnspan=2, sticky="e", pady=(4, 0))
+        version_btn_bar.grid(row=3, column=0, columnspan=4, sticky="e", pady=(4, 0))
         ttk.Button(version_btn_bar, text="Create Version", command=self.create_dataset_version).pack(side="left")
+        ttk.Button(version_btn_bar, text="Update Metadata", command=self.update_dataset_version_metadata).pack(side="left", padx=6)
         ttk.Button(version_btn_bar, text="Rebuild Export", command=self.rebuild_dataset_version_export).pack(side="left", padx=6)
         ttk.Button(version_btn_bar, text="Refresh", command=self.refresh_dataset_versions).pack(side="left")
         self.dataset_versions = tk.Listbox(version_frame, height=5)
@@ -502,10 +511,20 @@ class EngineerScreen(ctk.CTkFrame):
         augment_btn_bar = ttk.Frame(augment_form)
         augment_btn_bar.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         ttk.Button(augment_btn_bar, text="Create Augment Job", command=self.create_augment_job).pack(side="left")
+        ttk.Button(augment_btn_bar, text="Delete Selected", command=self.delete_selected_augment_job).pack(side="left", padx=6)
         ttk.Button(augment_btn_bar, text="Refresh", command=self.refresh_augment_jobs).pack(side="left", padx=6)
 
         self.augment_jobs = tk.Listbox(self.augment_panel, height=12)
         self.augment_jobs.pack(fill="both", expand=True, pady=(8, 0))
+
+        workstation_frame = ttk.LabelFrame(self.augment_panel, text="Workstations", padding=8)
+        workstation_frame.pack(fill="both", expand=True, pady=(10, 0))
+        workstation_actions = ttk.Frame(workstation_frame)
+        workstation_actions.pack(fill="x")
+        ttk.Button(workstation_actions, text="Refresh", command=self.refresh_workstations).pack(side="left")
+        ttk.Button(workstation_actions, text="Deregister Selected", command=self.deregister_selected_workstation).pack(side="left", padx=6)
+        self.workstations = tk.Listbox(workstation_frame, height=6)
+        self.workstations.pack(fill="both", expand=True, pady=(8, 0))
 
         ttk.Label(self.train_panel, text="Training Jobs", font=("Segoe UI", 11, "bold")).pack(anchor="w")
         ttk.Label(
@@ -554,6 +573,7 @@ class EngineerScreen(ctk.CTkFrame):
         button_bar.pack(fill="x", pady=(8, 0))
         ttk.Button(button_bar, text="Start Training", command=self.create_training_job).pack(side="left")
         ttk.Button(button_bar, text="Cancel Selected", command=self.cancel_training_job).pack(side="left", padx=6)
+        ttk.Button(button_bar, text="Delete Selected", command=self.delete_selected_training_job).pack(side="left", padx=6)
         ttk.Button(button_bar, text="Refresh", command=self.refresh_training_jobs).pack(side="left")
 
         self.training_lower = ctk.CTkFrame(self.train_panel, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
@@ -600,7 +620,10 @@ class EngineerScreen(ctk.CTkFrame):
         self.models_list = tk.Listbox(self.models_left_panel)
         self.models_list.pack(fill="both", expand=True, pady=(8, 0))
         self.models_list.bind("<<ListboxSelect>>", lambda _event: self.on_model_selected())
-        ttk.Button(self.models_left_panel, text="Refresh", command=self.refresh_models).pack(anchor="e", pady=(8, 0))
+        models_action_bar = ttk.Frame(self.models_left_panel)
+        models_action_bar.pack(fill="x", pady=(8, 0))
+        ttk.Button(models_action_bar, text="Refresh", command=self.refresh_models).pack(side="left")
+        ttk.Button(models_action_bar, text="Delete Selected", command=self.delete_selected_model).pack(side="left", padx=6)
 
         ttk.Label(self.models_right_panel, text="Register Sticker Model", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
         ttk.Label(
@@ -727,6 +750,7 @@ class EngineerScreen(ctk.CTkFrame):
         action_bar = ttk.Frame(self.calibration_right_panel)
         action_bar.pack(fill="x", pady=(8, 0))
         ttk.Button(action_bar, text="Refresh", command=self.refresh_profiles).pack(side="left")
+        ttk.Button(action_bar, text="Update Selected", command=self.update_selected_profile).pack(side="left", padx=6)
         ttk.Button(action_bar, text="Delete Selected", command=self.delete_selected_profile).pack(side="left", padx=6)
         self.profile_detail = JsonEditor(self.calibration_right_panel, "Profile Detail", {})
         self.profile_detail.pack(fill="x", pady=(10, 0))
@@ -979,6 +1003,13 @@ class EngineerScreen(ctk.CTkFrame):
                 "coverage_percent": f"{float(version.get('coverage_percent') or 0):.1f}%",
             }
         )
+        self.version_name.delete(0, "end")
+        self.version_name.insert(0, str(version.get("name") or ""))
+        self.version_description.delete(0, "end")
+        self.version_description.insert(0, str(version.get("description") or ""))
+        status_value = str(version.get("status") or "ready").strip().lower() or "ready"
+        if status_value in {"draft", "ready", "archived"}:
+            self.version_status.set(status_value)
         self.dataset_version_detail.set_payload(version)
         self.train_dataset_version.set(self._version_lookup_key(version))
         self._refresh_train_dataset_version_info()
@@ -1390,6 +1421,33 @@ class EngineerScreen(ctk.CTkFrame):
         self.refresh_dataset_versions(preferred_version_id=str(created.get("id") or ""), preserve_selection=False)
         self._reload_active_annotation_image()
         messagebox.showinfo("Dataset Versions", f"Version '{created.get('display_label')}' berhasil dibuat.")
+
+    def update_dataset_version_metadata(self):
+        dataset_id = self._current_dataset_id()
+        version = self._selected_dataset_version_spec() or self._selected_dataset_version_record()
+        if not dataset_id or not version:
+            messagebox.showwarning("Dataset Versions", "Pilih dataset dan version dulu.")
+            return
+
+        payload = {
+            "name": self.version_name.get().strip(),
+            "description": self.version_description.get().strip(),
+            "status": self.version_status.get().strip() or str(version.get("status") or "ready"),
+        }
+        if not payload["name"]:
+            messagebox.showerror("Dataset Versions", "Name wajib diisi.")
+            return
+
+        try:
+            updated = self.api.update_dataset_version(dataset_id, str(version.get("id") or ""), payload)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Dataset Versions", str(exc))
+            return
+
+        self.dataset_version_detail.set_payload(updated)
+        self.refresh_dataset_versions(preferred_version_id=str(updated.get("id") or ""), preserve_selection=False)
+        self._reload_active_annotation_image()
+        messagebox.showinfo("Dataset Versions", f"Version '{updated.get('display_label') or updated.get('id')}' berhasil diupdate.")
 
     def rebuild_dataset_version_export(self):
         dataset_id = self._current_dataset_id()
@@ -2001,11 +2059,46 @@ class EngineerScreen(ctk.CTkFrame):
         run_async(self, _load, callback=_done)
 
     def _apply_augment_jobs(self, items: list[dict]) -> None:
+        self._augment_jobs = list(items)
         self.augment_jobs.delete(0, "end")
         for item in items:
             transforms = ", ".join(item.get("transforms") or [])
             multiplier = item.get("multiplier") or 1
             self.augment_jobs.insert("end", f"{item.get('id')} | {item.get('dataset_id')} | {item.get('status')} | x{multiplier} | {transforms}")
+
+    def refresh_workstations(self):
+        self._workstations_refresh_sequence += 1
+        refresh_sequence = self._workstations_refresh_sequence
+
+        def _load():
+            return self.api.list_workstations()
+
+        def _done(result, error):
+            if refresh_sequence != self._workstations_refresh_sequence:
+                return
+            if not self.winfo_exists() or not hasattr(self, "workstations"):
+                return
+            if error:
+                self._show_training_refresh_error("Workstations", error)
+                return
+            if not isinstance(result, list):
+                return
+            self._apply_workstations(result)
+
+        run_async(self, _load, callback=_done)
+
+    def _apply_workstations(self, items: list[dict]) -> None:
+        self._workstation_cache = list(items)
+        self.workstations.delete(0, "end")
+        for item in self._workstation_cache:
+            machine_id = str(item.get("machine_id") or "-")
+            line_id = str(item.get("line_id") or "-")
+            station_id = str(item.get("station_id") or "-")
+            last_seen = str(item.get("last_seen_at") or "-")
+            self.workstations.insert(
+                "end",
+                f"{machine_id} | line={line_id} | station={station_id} | last_seen={last_seen}",
+            )
 
     def refresh_training_jobs(self):
         self._refresh_train_dataset_version_info()
@@ -2073,6 +2166,23 @@ class EngineerScreen(ctk.CTkFrame):
                     "multiplier": multiplier,
                 }
             )
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Augment", str(exc))
+            return
+        self.refresh_augment_jobs()
+
+    def delete_selected_augment_job(self):
+        index = self._selected_listbox_index(self.augment_jobs)
+        if index is None or index >= len(self._augment_jobs):
+            messagebox.showwarning("Augment", "Pilih augment job yang ingin dihapus.")
+            return
+        job_id = str(self._augment_jobs[index].get("id") or "").strip()
+        if not job_id:
+            return
+        if not messagebox.askyesno("Augment", f"Hapus augment job {job_id}?"):
+            return
+        try:
+            self.api.delete_augment_job(job_id)
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Augment", str(exc))
             return
@@ -2190,6 +2300,42 @@ class EngineerScreen(ctk.CTkFrame):
             messagebox.showerror("Training", str(exc))
             return
         self.refresh_training_jobs()
+
+    def delete_selected_training_job(self):
+        index = self._selected_listbox_index(self.train_jobs)
+        if index is None or index >= len(self._training_jobs):
+            messagebox.showwarning("Training", "Pilih training job yang ingin dihapus.")
+            return
+        job_id = str(self._training_jobs[index].get("id") or "").strip()
+        if not job_id:
+            return
+        if not messagebox.askyesno("Training", f"Hapus training job {job_id}?"):
+            return
+        try:
+            self.api.delete_training_job(job_id)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Training", str(exc))
+            return
+        self.refresh_training_jobs()
+
+    def deregister_selected_workstation(self):
+        if not hasattr(self, "workstations"):
+            return
+        index = self._selected_listbox_index(self.workstations)
+        if index is None or index >= len(self._workstation_cache):
+            messagebox.showwarning("Workstations", "Pilih workstation yang ingin dideregister.")
+            return
+        machine_id = str(self._workstation_cache[index].get("machine_id") or "").strip()
+        if not machine_id:
+            return
+        if not messagebox.askyesno("Workstations", f"Deregister workstation '{machine_id}'?"):
+            return
+        try:
+            self.api.delete_workstation(machine_id)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Workstations", str(exc))
+            return
+        self.refresh_workstations()
 
     def on_training_selected(self):
         if self._ignore_next_training_job_selection_event:
@@ -2354,6 +2500,34 @@ class EngineerScreen(ctk.CTkFrame):
             messagebox.showerror("Models", str(exc))
             return
         self.model_detail.set_payload(created)
+        self.refresh_models()
+
+    def delete_selected_model(self):
+        index = self._selected_listbox_index(self.models_list)
+        if index is None or index >= len(self._model_cache):
+            messagebox.showwarning("Models", "Pilih model yang ingin dihapus.")
+            return
+
+        selected = self._model_cache[index]
+        model_id = int(selected.get("id") or 0)
+        model_name = str(selected.get("name") or model_id)
+        if model_id <= 0:
+            return
+
+        purge_files = messagebox.askyesno(
+            "Models",
+            "Ikut hapus file model (.pt/.json) di disk?\nPilih 'No' jika hanya ingin hapus registry.",
+        )
+        if not messagebox.askyesno("Models", f"Hapus model '{model_name}' (id={model_id})?"):
+            return
+
+        try:
+            self.api.delete_model(model_id, purge_files=purge_files)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Models", str(exc))
+            return
+
+        self.model_detail.set_payload({})
         self.refresh_models()
 
     def _upload_model_file(self):
@@ -2622,7 +2796,15 @@ class EngineerScreen(ctk.CTkFrame):
         if index is None or index >= len(self._profile_cache):
             self.profile_detail.set_payload({})
             return
-        self.profile_detail.set_payload(self._profile_cache[index])
+        selected = self._profile_cache[index]
+        self.profile_detail.set_payload(selected)
+
+        # Prefill form and editor so profile update flow is a single-click action.
+        self.profile_name.delete(0, "end")
+        self.profile_name.insert(0, str(selected.get("name") or "").strip())
+        selected_profile = dict(selected.get("profile") or {})
+        self.computed_profile = copy.deepcopy(selected_profile)
+        self.calibration_editor.set_payload(copy.deepcopy(selected_profile))
 
     def delete_selected_profile(self):
         index = self._selected_listbox_index(self.profiles_list)
@@ -2634,3 +2816,32 @@ class EngineerScreen(ctk.CTkFrame):
             messagebox.showerror("Profiles", str(exc))
             return
         self.refresh_profiles()
+
+    def update_selected_profile(self):
+        index = self._selected_listbox_index(self.profiles_list)
+        if index is None or index >= len(self._profile_cache):
+            messagebox.showwarning("Profiles", "Pilih profile yang ingin diupdate.")
+            return
+
+        selected = self._profile_cache[index]
+        profile_id = int(selected.get("id") or 0)
+        if profile_id <= 0:
+            return
+
+        new_name = self.profile_name.get().strip() or str(selected.get("name") or "").strip()
+        edited_profile = self.calibration_editor.get_payload()
+        profile_payload = dict(edited_profile) if isinstance(edited_profile, dict) and edited_profile else dict(selected.get("profile") or {})
+        payload = {
+            "name": new_name,
+            "profile": profile_payload,
+        }
+        try:
+            updated = self.api.update_profile(profile_id, payload)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Profiles", str(exc))
+            return
+
+        self.profile_detail.set_payload(updated)
+        self.computed_profile = copy.deepcopy(payload["profile"])
+        self.refresh_profiles()
+        messagebox.showinfo("Profiles", f"Profile #{profile_id} berhasil diupdate.")

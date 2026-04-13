@@ -25,10 +25,15 @@ from backend.app.repositories.sqlserver.inspection_mirror_repository import SqlS
 class _MirrorSuccess:
     def __init__(self) -> None:
         self.seen_payloads: list[dict] = []
+        self.deleted_ids: list[int] = []
 
     def create_result(self, payload: dict) -> dict:
         self.seen_payloads.append(dict(payload))
         return {"id": 987}
+
+    def delete_result(self, mirror_id: int) -> bool:
+        self.deleted_ids.append(int(mirror_id))
+        return True
 
 
 class _MirrorFailure:
@@ -147,6 +152,20 @@ class HybridInspectionPersistenceTest(unittest.TestCase):
         self.assertEqual(len(retried), 1)
         self.assertEqual(retried[0]["id"], failed["id"])
         self.assertEqual(retried[0]["push_status"], "sent")
+
+    def test_delete_result_deletes_local_and_mirror_when_available(self) -> None:
+        local_repo = InspectionResultsRepository()
+        mirror = _MirrorSuccess()
+        repo = HybridInspectionResultsRepository(local_repo, mirror)
+
+        created = repo.create_result(_sample_payload())
+        result_id = int(created["id"])
+
+        deleted = repo.delete_result(result_id)
+
+        self.assertEqual(int(deleted["id"]), result_id)
+        self.assertIsNone(repo.get_result(result_id))
+        self.assertEqual(mirror.deleted_ids, [987])
 
     def test_sql_payload_uses_only_required_contract_fields(self) -> None:
         payload = SqlServerInspectionMirrorRepository.build_sql_payload(_sample_payload())

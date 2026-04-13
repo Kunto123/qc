@@ -2,15 +2,38 @@ from __future__ import annotations
 
 import csv
 import io
+import json
+from datetime import UTC, datetime
 
 from flask import Blueprint, Response, g, jsonify, request
 
-from backend.app.core.container import inspection_results_repo, inspection_session_service
+from backend.app.core.container import audit_repo, inspection_results_repo, inspection_session_service
 from backend.app.core.http import require_auth, require_roles
-from shared.contracts.enums import UserRole
+from shared.contracts.enums import DecisionCode, RejectReasonCode, UserRole
 
 
 inspection_blueprint = Blueprint("inspection", __name__)
+
+
+def _client_ip() -> str:
+    forwarded_for = str(request.headers.get("X-Forwarded-For") or "").strip()
+    return forwarded_for.split(",", 1)[0].strip() if forwarded_for else (request.remote_addr or "")
+
+
+def _try_audit(event_type: str, **kwargs) -> None:
+    try:
+        audit_repo.log(event_type, **kwargs)
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _parse_optional_float(value: object, *, field_name: str) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be numeric") from exc
 
 
 @inspection_blueprint.post("/inspection/sessions/start")
@@ -99,6 +122,151 @@ def get_inspection(result_id: int):
     if item is None:
         return jsonify({"error": "Inspection result not found"}), 404
     return jsonify(item)
+
+
+@inspection_blueprint.patch("/inspections/<int:result_id>")
+@require_roles(UserRole.ADMIN)
+def patch_inspection(result_id: int):
+    payload = request.get_json(force=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Request body must be an object"}), 400
+
+    current = inspection_results_repo.get_result(result_id)
+    if current is None:
+        return jsonify({"error": "Inspection result not found"}), 404
+
+    updates: dict = {}
+    changed_fields: list[str] = []
+
+    decision_raw = payload.get("decision_code", payload.get("decision"))
+    decision_code: str | None = None
+    if "decision_code" in payload or "decision" in payload:
+        decision_candidate = str(decision_raw or "").strip().upper()
+        try:
+            decision_code = DecisionCode(decision_candidate).value
+        except ValueError as exc:
+            allowed = ", ".join(member.value for member in DecisionCode)
+            return jsonify({"error": f"decision_code must be one of: {allowed}"}), 400
+        updates["decision_code"] = decision_code
+        updates["decision"] = decision_code
+        changed_fields.extend(["decision_code", "decision"])
+
+    if "reject_reason_code" in payload:
+        reject_raw = payload.get("reject_reason_code")
+        if reject_raw in (None, ""):
+            updates["reject_reason_code"] = None
+        else:
+            reject_candidate = str(reject_raw or "").strip().upper()
+            try:
+                updates["reject_reason_code"] = RejectReasonCode(reject_candidate).value
+            except ValueError:
+                allowed = ", ".join(member.value for member in RejectReasonCode)
+                return jsonify({"error": f"reject_reason_code must be one of: {allowed}"}), 400
+        changed_fields.append("reject_reason_code")
+
+    if decision_code == DecisionCode.ACCEPT.value and updates.get("reject_reason_code") not in (None, ""):
+        return jsonify({"error": "reject_reason_code must be empty when decision_code is ACCEPT"}), 400
+
+    if "part_ready_match_ratio" in payload:
+        try:
+            updates["part_ready_match_ratio"] = _parse_optional_float(
+                payload.get("part_ready_match_ratio"),
+                field_name="part_ready_match_ratio",
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        changed_fields.append("part_ready_match_ratio")
+
+    if "sticker_confidence" in payload:
+        try:
+            updates["sticker_confidence"] = _parse_optional_float(
+                payload.get("sticker_confidence"),
+                field_name="sticker_confidence",
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        changed_fields.append("sticker_confidence")
+
+    for field in ("detected_class", "expected_class"):
+        if field in payload:
+            updates[field] = str(payload.get(field) or "").strip() or None
+            changed_fields.append(field)
+
+    note = str(payload.get("note") or "").strip()
+    if note:
+        updates["correction_note"] = note
+
+    if not updates:
+        return jsonify({"error": "No supported fields to update"}), 400
+
+    now = datetime.now(UTC).isoformat()
+    corrections = list(current.get("corrections") or [])
+    corrections.append(
+        {
+            "at": now,
+            "by_user_id": g.current_user.id,
+            "by_username": g.current_user.username,
+            "fields": sorted(set(changed_fields)),
+            "note": note or None,
+        }
+    )
+    updates["corrections"] = corrections
+    updates["corrected_at"] = now
+    updates["corrected_by_user_id"] = g.current_user.id
+    updates["corrected_by_username"] = g.current_user.username
+
+    updated = inspection_results_repo.update_result(
+        result_id,
+        updates,
+        requeue_mirror=True,
+    )
+
+    _try_audit(
+        "inspection_corrected",
+        user_id=updated.get("operator_user_id"),
+        username=str(updated.get("mp_check") or "").strip() or None,
+        actor_id=g.current_user.id,
+        actor_username=g.current_user.username,
+        ip_address=_client_ip(),
+        details=json.dumps(
+            {
+                "result_id": result_id,
+                "fields": sorted(set(changed_fields)),
+                "line_id": updated.get("line_id"),
+                "station_id": updated.get("station_id"),
+            },
+            ensure_ascii=True,
+        ),
+    )
+    return jsonify(updated)
+
+
+@inspection_blueprint.delete("/inspections/<int:result_id>")
+@require_roles(UserRole.ADMIN)
+def delete_inspection(result_id: int):
+    current = inspection_results_repo.get_result(result_id)
+    if current is None:
+        return jsonify({"error": "Inspection result not found"}), 404
+
+    removed = inspection_results_repo.delete_result(result_id)
+    _try_audit(
+        "inspection_deleted",
+        user_id=removed.get("operator_user_id"),
+        username=str(removed.get("mp_check") or "").strip() or None,
+        actor_id=g.current_user.id,
+        actor_username=g.current_user.username,
+        ip_address=_client_ip(),
+        details=json.dumps(
+            {
+                "result_id": result_id,
+                "line_id": removed.get("line_id"),
+                "station_id": removed.get("station_id"),
+                "decision_code": removed.get("decision_code"),
+            },
+            ensure_ascii=True,
+        ),
+    )
+    return jsonify({"deleted": True, "id": result_id})
 
 
 @inspection_blueprint.post("/inspections/<int:result_id>/retry-push")

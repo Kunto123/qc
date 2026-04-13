@@ -6,12 +6,14 @@ from pathlib import Path
 
 from flask import Blueprint, g, jsonify, request, send_file
 
-from backend.app.core.config import MODELS_DIR
+from backend.app.core.config import MODELS_DIR, PROJECT_ROOT
 from backend.app.core.container import (
     augment_repo,
     dataset_versions_repo,
     datasets_repo,
+    deployments_repo,
     models_repo,
+    templates_repo,
     token_store,
     training_service,
     workstation_registry_repo,
@@ -33,6 +35,81 @@ def _multipart_upload_files() -> list:
     return [item for item in files if getattr(item, "filename", "")]
 
 
+def _truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _path_candidates(raw_path: str) -> set[str]:
+    value = str(raw_path or "").strip()
+    if not value:
+        return set()
+    path = Path(value)
+    candidates = {value.replace("/", "\\").lower()}
+    if path.name:
+        candidates.add(path.name.lower())
+    resolved_candidates = [path] if path.is_absolute() else [PROJECT_ROOT / path, MODELS_DIR / path, MODELS_DIR / path.name]
+    for candidate in resolved_candidates:
+        try:
+            candidates.add(str(candidate.resolve()).replace("/", "\\").lower())
+        except Exception:  # noqa: BLE001
+            continue
+    return candidates
+
+
+def _find_active_model_conflict(model_path: str) -> dict | None:
+    model_candidates = _path_candidates(model_path)
+    if not model_candidates:
+        return None
+    for deployment in deployments_repo.list_deployments():
+        if not deployment.get("is_active"):
+            continue
+        version = templates_repo.get_version(int(deployment.get("template_version_id") or 0))
+        if version is None:
+            continue
+        template_payload = dict(version.get("template") or {})
+        vision_payload = dict(template_payload.get("vision") or {})
+        deployed_model_path = str(vision_payload.get("model_path") or "").strip()
+        if not deployed_model_path:
+            continue
+        if model_candidates & _path_candidates(deployed_model_path):
+            return {
+                "deployment_id": deployment.get("id"),
+                "line_id": deployment.get("line_id"),
+                "station_id": deployment.get("station_id"),
+                "template_id": deployment.get("template_id"),
+                "template_version_id": deployment.get("template_version_id"),
+                "template_model_path": deployed_model_path,
+            }
+    return None
+
+
+def _purge_model_files(model: dict) -> list[str]:
+    removed: set[str] = set()
+    allowed_root = MODELS_DIR.resolve()
+    for field in ("path", "meta_path"):
+        raw_value = str(model.get(field) or "").strip()
+        if not raw_value:
+            continue
+        raw_path = Path(raw_value)
+        candidate_paths = [raw_path] if raw_path.is_absolute() else [PROJECT_ROOT / raw_path, MODELS_DIR / raw_path, MODELS_DIR / raw_path.name]
+        for candidate in candidate_paths:
+            try:
+                resolved = candidate.resolve()
+            except Exception:  # noqa: BLE001
+                continue
+            if not resolved.exists() or not resolved.is_file():
+                continue
+            if resolved != allowed_root and allowed_root not in resolved.parents:
+                continue
+            try:
+                resolved.unlink()
+            except OSError:
+                continue
+            removed.add(str(resolved))
+            break
+    return sorted(removed)
+
+
 @workstation_blueprint.get("/datasets")
 @require_auth
 def list_datasets():
@@ -47,6 +124,30 @@ def create_dataset():
     if not name:
         return jsonify({"error": "Dataset name is required"}), 400
     return jsonify(datasets_repo.create_dataset(name, str(payload.get("description") or ""))), 201
+
+
+@workstation_blueprint.patch("/datasets/<dataset_id>")
+@require_roles(UserRole.ADMIN)
+def update_dataset(dataset_id: str):
+    payload = request.get_json(force=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Request body must be an object"}), 400
+
+    updates: dict = {}
+    if "name" in payload:
+        updates["name"] = payload.get("name")
+    if "description" in payload:
+        updates["description"] = payload.get("description")
+    if not updates:
+        return jsonify({"error": "At least one of name or description is required"}), 400
+
+    try:
+        record = datasets_repo.update_dataset(dataset_id, **updates)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+    return jsonify(record)
 
 
 @workstation_blueprint.delete("/datasets/<dataset_id>")
@@ -106,6 +207,29 @@ def get_dataset_version(dataset_id: str, version_id: str):
     version = dataset_versions_repo.get_version(version_id)
     if version is None or str(version.get("dataset_id")) != str(dataset_id):
         return jsonify({"error": "Dataset version not found"}), 404
+    return jsonify(version)
+
+
+@workstation_blueprint.put("/datasets/<dataset_id>/versions/<version_id>")
+@require_roles(UserRole.ADMIN)
+def update_dataset_version(dataset_id: str, version_id: str):
+    payload = request.get_json(force=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Request body must be an object"}), 400
+
+    updates: dict = {}
+    for field in ("name", "description", "status"):
+        if field in payload:
+            updates[field] = payload.get(field)
+    if not updates:
+        return jsonify({"error": "Only metadata fields can be updated: name, description, status"}), 400
+
+    try:
+        version = dataset_versions_repo.update_version(dataset_id, version_id, **updates)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
     return jsonify(version)
 
 
@@ -234,6 +358,18 @@ def cancel_augment_job(job_id: str):
     return jsonify(result)
 
 
+@workstation_blueprint.delete("/augment/jobs/<job_id>")
+@require_roles(UserRole.ADMIN)
+def delete_augment_job(job_id: str):
+    try:
+        removed = augment_repo.delete_job(job_id)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+    return jsonify({"deleted": True, "id": job_id, "job": removed})
+
+
 @workstation_blueprint.get("/train/jobs")
 @require_auth
 def list_training_jobs():
@@ -319,6 +455,18 @@ def cancel_training_job(job_id: str):
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 404
     return jsonify(result)
+
+
+@workstation_blueprint.delete("/train/jobs/<job_id>")
+@require_roles(UserRole.ADMIN)
+def delete_training_job(job_id: str):
+    try:
+        removed = training_service.delete_job(job_id)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+    return jsonify({"deleted": True, "id": job_id, "job": removed})
 
 
 @workstation_blueprint.get("/models")
@@ -412,6 +560,37 @@ def transition_model_lifecycle(model_id: int):
     return jsonify(result)
 
 
+@workstation_blueprint.delete("/models/<int:model_id>")
+@require_roles(UserRole.ADMIN)
+def delete_model(model_id: int):
+    model = models_repo.get_model(model_id)
+    if model is None:
+        return jsonify({"error": "Model not found"}), 404
+
+    conflict = _find_active_model_conflict(str(model.get("path") or ""))
+    if conflict is not None:
+        return jsonify({
+            "error": "Model is referenced by an active deployment",
+            "conflict": conflict,
+        }), 409
+
+    purge_files = _truthy(request.args.get("purge_files"))
+    try:
+        removed = models_repo.delete_model(model_id)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 409 if "cannot be deleted" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+
+    purged_files = _purge_model_files(removed) if purge_files else []
+    return jsonify({
+        "deleted": True,
+        "id": model_id,
+        "purged_files": purged_files,
+        "model": removed,
+    })
+
+
 # ---------------------------------------------------------------------------
 # Workstation registry + heartbeat
 # ---------------------------------------------------------------------------
@@ -421,6 +600,18 @@ def transition_model_lifecycle(model_id: int):
 def list_workstations():
     """List all registered workstations and their last-seen timestamps."""
     return jsonify(workstation_registry_repo.list_workstations())
+
+
+@workstation_blueprint.delete("/workstations/<path:machine_id>")
+@require_roles(UserRole.ADMIN)
+def delete_workstation(machine_id: str):
+    normalized = str(machine_id or "").strip()
+    if not normalized:
+        return jsonify({"error": "machine_id is required"}), 400
+    ok = workstation_registry_repo.delete_workstation(normalized)
+    if not ok:
+        return jsonify({"error": "Workstation not found"}), 404
+    return jsonify({"deleted": True, "machine_id": normalized})
 
 
 @workstation_blueprint.post("/workstations/heartbeat")

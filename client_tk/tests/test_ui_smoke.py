@@ -80,6 +80,9 @@ class _StubApi:
     def create_dataset_version(self, dataset_id: str, payload: dict):
         return {}
 
+    def update_dataset_version(self, dataset_id: str, version_id: str, payload: dict):
+        return {"id": version_id, "dataset_id": dataset_id, **payload}
+
     def export_dataset_version(self, dataset_id: str, version_id: str):
         return {}
 
@@ -89,11 +92,23 @@ class _StubApi:
     def list_deployments(self):
         return []
 
+    def update_deployment(self, deployment_id: int, payload: dict):
+        return {"id": deployment_id, **payload}
+
     def list_users(self):
         return []
 
     def list_inspections(self, params=None):
         return []
+    
+    def get_inspection(self, result_id: int):
+        return {"id": result_id, "decision": "ACCEPT", "retry_count": 0, "push_status": "sent"}
+    
+    def update_inspection(self, result_id: int, payload: dict):
+        return {"id": result_id, **payload}
+    
+    def delete_inspection(self, result_id: int):
+        return {"deleted": True, "id": result_id}
 
     def retry_inspection_push(self, result_id: int):
         return {"ok": True, "result": {"id": result_id, "push_status": "sent"}}
@@ -106,6 +121,12 @@ class _StubApi:
 
     def dashboard_buckets(self, params=None):
         return []
+    
+    def update_profile(self, profile_id: int, payload: dict):
+        return {"id": profile_id, **payload}
+    
+    def delete_profile(self, profile_id: int):
+        return {"deleted": True, "id": profile_id}
 
     def list_datasets(self):
         return []
@@ -131,12 +152,27 @@ class _StubApi:
 
     def list_augment_jobs(self):
         return []
+    
+    def delete_augment_job(self, job_id: str):
+        return {"deleted": True, "id": job_id}
 
     def list_training_jobs(self):
         return []
 
     def create_training_job(self, payload: dict):
         return {"id": "train-stub", **payload}
+    
+    def delete_training_job(self, job_id: str):
+        return {"deleted": True, "id": job_id}
+    
+    def delete_model(self, model_id: int, *, purge_files: bool = False):
+        return {"deleted": True, "id": model_id, "purge_files": purge_files}
+    
+    def list_workstations(self):
+        return []
+    
+    def delete_workstation(self, machine_id: str):
+        return {"deleted": True, "machine_id": machine_id}
 
     def list_base_models(self):
         return [
@@ -311,6 +347,138 @@ class UiSmokeTest(unittest.TestCase):
         self.assertFalse(screen._overview_cards_visible)
         screen.destroy()
 
+    def test_admin_update_selected_deployment_uses_form_payload(self) -> None:
+        deployments = [
+            {
+                "id": 7,
+                "template_id": 1,
+                "template_name": "QC Line A",
+                "template_version_id": 1,
+                "line_id": "LINE-OLD",
+                "station_id": "ST-OLD",
+                "is_active": True,
+            }
+        ]
+        calls: list[tuple[int, dict]] = []
+
+        def update_deployment(deployment_id: int, payload: dict):
+            calls.append((deployment_id, dict(payload)))
+            return {"id": deployment_id, **payload}
+
+        with mock.patch.object(self.api, "list_deployments", return_value=deployments), mock.patch.object(
+            self.api,
+            "update_deployment",
+            side_effect=update_deployment,
+        ), mock.patch("client_tk.app.screens.admin.view.messagebox.showinfo", return_value=None):
+            screen = AdminScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            self.assertTrue(screen.deployment_table.get_children())
+
+            deployment_iid = screen.deployment_table.get_children()[0]
+            screen.deployment_table.selection_set(deployment_iid)
+            screen.deployment_table.focus(deployment_iid)
+            screen.deployment_table.event_generate("<<TreeviewSelect>>")
+            screen.update_idletasks()
+
+            screen.dep_line.delete(0, "end")
+            screen.dep_line.insert(0, "LINE-NEW")
+            screen.dep_station.delete(0, "end")
+            screen.dep_station.insert(0, "ST-NEW")
+            screen.dep_version_id.delete(0, "end")
+            screen.dep_version_id.insert(0, "2")
+
+            screen.update_selected_deployment()
+
+            self.assertTrue(calls)
+            deployment_id, payload = calls[-1]
+            self.assertEqual(deployment_id, 7)
+            self.assertEqual(payload["line_id"], "LINE-NEW")
+            self.assertEqual(payload["station_id"], "ST-NEW")
+            self.assertEqual(payload["template_version_id"], 2)
+            self.assertIn("Deployment #7 diupdate", screen.status_var.get())
+
+            screen.destroy()
+
+    def test_admin_apply_result_correction_calls_update_inspection(self) -> None:
+        results = [
+            {
+                "id": 21,
+                "inspected_at": "2026-04-10T10:00:00+00:00",
+                "decision": "REJECT",
+                "part_name": "Part-A",
+                "line_id": "LINE-A",
+                "station_id": "ST-01",
+                "push_status": "sent",
+                "retry_count": 0,
+                "reject_reason_code": "OFFSET",
+            }
+        ]
+        calls: list[tuple[int, dict]] = []
+
+        def update_inspection(result_id: int, payload: dict):
+            calls.append((result_id, dict(payload)))
+            return {"id": result_id, **payload}
+
+        with mock.patch.object(self.api, "list_inspections", return_value=results), mock.patch.object(
+            self.api,
+            "update_inspection",
+            side_effect=update_inspection,
+        ), mock.patch("client_tk.app.screens.admin.view.messagebox.askyesno", return_value=True):
+            screen = AdminScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            result_iid = screen.results_table.get_children()[0]
+            screen.results_table.selection_set(result_iid)
+            screen.results_table.focus(result_iid)
+
+            screen.result_correction_decision.set("ACCEPT")
+            screen.result_correction_reason.delete(0, "end")
+            screen.result_correction_reason.insert(0, "MANUAL")
+            screen.apply_result_correction()
+
+            self.assertTrue(calls)
+            result_id, payload = calls[-1]
+            self.assertEqual(result_id, 21)
+            self.assertEqual(payload["decision"], "ACCEPT")
+            self.assertEqual(payload["decision_code"], "ACCEPT")
+            self.assertIsNone(payload["reject_reason_code"])
+            screen.destroy()
+
+    def test_admin_delete_selected_result_calls_delete_inspection(self) -> None:
+        results = [
+            {
+                "id": 33,
+                "inspected_at": "2026-04-10T10:00:00+00:00",
+                "decision": "ACCEPT",
+                "part_name": "Part-B",
+                "line_id": "LINE-B",
+                "station_id": "ST-02",
+                "push_status": "sent",
+                "retry_count": 0,
+                "reject_reason_code": None,
+            }
+        ]
+        deleted_ids: list[int] = []
+
+        def delete_inspection(result_id: int):
+            deleted_ids.append(result_id)
+            return {"deleted": True, "id": result_id}
+
+        with mock.patch.object(self.api, "list_inspections", return_value=results), mock.patch.object(
+            self.api,
+            "delete_inspection",
+            side_effect=delete_inspection,
+        ), mock.patch("client_tk.app.screens.admin.view.messagebox.askyesno", return_value=True):
+            screen = AdminScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            result_iid = screen.results_table.get_children()[0]
+            screen.results_table.selection_set(result_iid)
+            screen.results_table.focus(result_iid)
+
+            screen.delete_selected_result()
+
+            self.assertEqual(deleted_ids, [33])
+            screen.destroy()
+
     def test_engineer_screen_initializes(self) -> None:
         screen = EngineerScreen(self.root, self.api, self.state)
         screen.update_idletasks()
@@ -327,6 +495,129 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(str(screen.annot_class["state"]), "normal")
         self.assertEqual(str(screen.annot_apply_class_button["state"]), "disabled")
         screen.destroy()
+
+    def test_engineer_delete_selected_augment_job_calls_api(self) -> None:
+        jobs = [{"id": "aug-1", "dataset_id": "ds-1", "status": "queued", "transforms": ["flip_h"], "multiplier": 2}]
+        deleted_ids: list[str] = []
+
+        def delete_augment_job(job_id: str):
+            deleted_ids.append(job_id)
+            return {"deleted": True, "id": job_id}
+
+        with mock.patch.object(self.api, "list_augment_jobs", return_value=jobs), mock.patch.object(
+            self.api,
+            "delete_augment_job",
+            side_effect=delete_augment_job,
+        ), mock.patch("client_tk.app.screens.engineer.view.messagebox.askyesno", return_value=True):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Training")
+            screen.update_idletasks()
+            screen.augment_jobs.selection_set(0)
+
+            screen.delete_selected_augment_job()
+
+            self.assertEqual(deleted_ids, ["aug-1"])
+            screen.destroy()
+
+    def test_engineer_delete_selected_training_job_calls_api(self) -> None:
+        jobs = [{"id": "train-2", "dataset_id": "ds-1", "status": "queued"}]
+        deleted_ids: list[str] = []
+
+        def delete_training_job(job_id: str):
+            deleted_ids.append(job_id)
+            return {"deleted": True, "id": job_id}
+
+        with mock.patch.object(self.api, "list_training_jobs", return_value=jobs), mock.patch.object(
+            self.api,
+            "delete_training_job",
+            side_effect=delete_training_job,
+        ), mock.patch("client_tk.app.screens.engineer.view.messagebox.askyesno", return_value=True):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Training")
+            screen.update_idletasks()
+            screen.train_jobs.selection_set(0)
+
+            screen.delete_selected_training_job()
+
+            self.assertEqual(deleted_ids, ["train-2"])
+            screen.destroy()
+
+    def test_engineer_delete_selected_model_calls_api(self) -> None:
+        models = [{"id": 9, "name": "Model 9", "path": "models/m9.pt"}]
+        calls: list[tuple[int, bool]] = []
+
+        def delete_model(model_id: int, *, purge_files: bool = False):
+            calls.append((model_id, purge_files))
+            return {"deleted": True, "id": model_id, "purge_files": purge_files}
+
+        with mock.patch.object(self.api, "list_models", return_value=models), mock.patch.object(
+            self.api,
+            "delete_model",
+            side_effect=delete_model,
+        ), mock.patch("client_tk.app.screens.engineer.view.messagebox.askyesno", return_value=True):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Models")
+            screen.models_list.selection_set(0)
+
+            screen.delete_selected_model()
+
+            self.assertEqual(calls, [(9, True)])
+            screen.destroy()
+
+    def test_engineer_update_selected_profile_calls_api(self) -> None:
+        profiles = [{"id": 4, "name": "Profile Old", "profile": {"colorspace": "LAB"}}]
+        calls: list[tuple[int, dict]] = []
+
+        def update_profile(profile_id: int, payload: dict):
+            calls.append((profile_id, dict(payload)))
+            return {"id": profile_id, **payload}
+
+        with mock.patch.object(self.api, "list_profiles", return_value=profiles), mock.patch.object(
+            self.api,
+            "update_profile",
+            side_effect=update_profile,
+        ):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Calibration")
+            screen.profiles_list.selection_set(0)
+            screen.on_profile_selected()
+            screen.profile_name.delete(0, "end")
+            screen.profile_name.insert(0, "Profile New")
+
+            screen.update_selected_profile()
+
+            self.assertTrue(calls)
+            profile_id, payload = calls[-1]
+            self.assertEqual(profile_id, 4)
+            self.assertEqual(payload["name"], "Profile New")
+            self.assertEqual(payload["profile"], {"colorspace": "LAB"})
+            screen.destroy()
+
+    def test_engineer_deregister_selected_workstation_calls_api(self) -> None:
+        workstations = [{"machine_id": "WS-01", "line_id": "LINE-A", "station_id": "ST-01", "last_seen_at": "2026-04-10T10:00:00+00:00"}]
+        deleted_ids: list[str] = []
+
+        def delete_workstation(machine_id: str):
+            deleted_ids.append(machine_id)
+            return {"deleted": True, "machine_id": machine_id}
+
+        with mock.patch.object(self.api, "list_workstations", return_value=workstations), mock.patch.object(
+            self.api,
+            "delete_workstation",
+            side_effect=delete_workstation,
+        ), mock.patch("client_tk.app.screens.engineer.view.messagebox.askyesno", return_value=True):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.workstations.selection_set(0)
+
+            screen.deregister_selected_workstation()
+
+            self.assertEqual(deleted_ids, ["WS-01"])
+            screen.destroy()
 
     def test_engineer_layout_hysteresis_prevents_threshold_flapping(self) -> None:
         screen = EngineerScreen(self.root, self.api, self.state)
@@ -1450,6 +1741,94 @@ class UiSmokeTest(unittest.TestCase):
             self.assertIsNotNone(screen.annotation_canvas._photo)
 
         screen.destroy()
+
+    def test_engineer_update_dataset_version_metadata_uses_selected_version(self) -> None:
+        frame = np.zeros((24, 24, 3), dtype=np.uint8)
+        ok, buffer = cv2.imencode(".png", frame)
+        self.assertTrue(ok)
+        image_bytes = buffer.tobytes()
+
+        versions = [
+            {
+                "id": "ver-1",
+                "display_label": "v1 | Snapshot v1 | ready | 1/1 ann",
+                "version_number": 1,
+                "name": "Snapshot v1",
+                "description": "initial",
+                "status": "ready",
+                "export_format": "yolo",
+                "export_root": "data/export/ver-1",
+                "image_count": 1,
+                "annotated_image_count": 1,
+                "coverage_percent": 100.0,
+                "class_names": ["K0W-HB0"],
+            }
+        ]
+        calls: list[tuple[str, str, dict]] = []
+
+        def list_dataset_versions(dataset_id: str):
+            return [dict(item) for item in versions]
+
+        def update_dataset_version(dataset_id: str, version_id: str, payload: dict):
+            calls.append((dataset_id, version_id, dict(payload)))
+            updated = dict(versions[0])
+            updated.update(payload)
+            updated["display_label"] = f"v1 | {updated.get('name')} | {updated.get('status')} | 1/1 ann"
+            versions[0] = dict(updated)
+            return dict(updated)
+
+        with mock.patch.object(
+            self.api,
+            "list_datasets",
+            return_value=[{"id": "ds-1", "name": "Dataset One"}],
+        ), mock.patch.object(
+            self.api,
+            "list_dataset_files",
+            return_value=[{"name": "sample.png", "path": "Z:/missing/sample.png", "size": 123}],
+        ), mock.patch.object(
+            self.api,
+            "download_dataset_image",
+            return_value=image_bytes,
+        ), mock.patch.object(
+            self.api,
+            "get_annotation",
+            return_value={"labels": []},
+        ), mock.patch.object(
+            self.api,
+            "list_dataset_versions",
+            side_effect=list_dataset_versions,
+        ), mock.patch.object(
+            self.api,
+            "update_dataset_version",
+            side_effect=update_dataset_version,
+        ), mock.patch(
+            "client_tk.app.screens.engineer.view.messagebox.showinfo",
+            return_value=None,
+        ):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+
+            self.assertEqual(screen._active_dataset_version_id, "ver-1")
+            screen.version_name.delete(0, "end")
+            screen.version_name.insert(0, "Snapshot v1 revised")
+            screen.version_description.delete(0, "end")
+            screen.version_description.insert(0, "metadata update")
+            screen.version_status.set("archived")
+
+            screen.update_dataset_version_metadata()
+            screen.update_idletasks()
+
+            self.assertTrue(calls)
+            dataset_id, version_id, payload = calls[-1]
+            self.assertEqual(dataset_id, "ds-1")
+            self.assertEqual(version_id, "ver-1")
+            self.assertEqual(payload["name"], "Snapshot v1 revised")
+            self.assertEqual(payload["description"], "metadata update")
+            self.assertEqual(payload["status"], "archived")
+            self.assertEqual(screen.version_status.get(), "archived")
+            self.assertEqual(screen._active_dataset_version_id, "ver-1")
+
+            screen.destroy()
 
     def test_annotation_canvas_right_click_resize_selected_bbox(self) -> None:
         host = ttk.Frame(self.root, width=220, height=220)

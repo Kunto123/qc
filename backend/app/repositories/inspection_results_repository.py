@@ -77,6 +77,18 @@ class InspectionResultsRepository(JsonRepository):
             return item
         raise ValueError("Inspection result not found.")
 
+    def delete_result(self, result_id: int) -> dict[str, Any]:
+        store = self.load()
+        items = store["results"]
+        for index, item in enumerate(items):
+            if int(item["id"]) != int(result_id):
+                continue
+            removed = dict(item)
+            del items[index]
+            self.save(store)
+            return removed
+        raise ValueError("Inspection result not found.")
+
     def list_results(
         self,
         *,

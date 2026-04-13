@@ -17,6 +17,9 @@ def _is_expired(record: dict) -> bool:
         return False
 
 
+_UNSET = object()
+
+
 class ProfilesRepository(JsonRepository):
     def __init__(self) -> None:
         super().__init__("profiles.json", {"profiles": []})
@@ -126,6 +129,61 @@ class ProfilesRepository(JsonRepository):
         result = dict(record)
         result["is_expired"] = False
         return result
+
+    def update(
+        self,
+        profile_id: int,
+        *,
+        name: Any = _UNSET,
+        profile: Any = _UNSET,
+        scope_line_id: Any = _UNSET,
+        scope_station_id: Any = _UNSET,
+        scope_part_name: Any = _UNSET,
+        expiry_interval_days: Any = _UNSET,
+    ) -> dict:
+        payload = self.load()
+        now = datetime.now(UTC)
+        for item in payload["profiles"]:
+            if int(item["id"]) != int(profile_id):
+                continue
+
+            if name is not _UNSET:
+                normalized_name = str(name or "").strip()
+                if not normalized_name:
+                    raise ValueError("name must not be empty")
+                item["name"] = normalized_name
+
+            if profile is not _UNSET:
+                if not isinstance(profile, dict):
+                    raise ValueError("profile must be an object")
+                item["profile"] = profile
+
+            if scope_line_id is not _UNSET:
+                item["scope_line_id"] = str(scope_line_id or "").strip() or None
+            if scope_station_id is not _UNSET:
+                item["scope_station_id"] = str(scope_station_id or "").strip() or None
+            if scope_part_name is not _UNSET:
+                item["scope_part_name"] = str(scope_part_name or "").strip() or None
+
+            if expiry_interval_days is not _UNSET:
+                if expiry_interval_days in (None, ""):
+                    item["expires_at"] = None
+                else:
+                    try:
+                        expiry_days = int(expiry_interval_days)
+                    except (ValueError, TypeError) as exc:
+                        raise ValueError("expiry_interval_days must be a positive integer") from exc
+                    if expiry_days <= 0:
+                        raise ValueError("expiry_interval_days must be a positive integer")
+                    item["expires_at"] = (now + timedelta(days=expiry_days)).isoformat()
+
+            item["updated_at"] = now.isoformat()
+            self.save(payload)
+            result = dict(item)
+            result["is_expired"] = _is_expired(result)
+            return result
+
+        raise ValueError("Profile not found")
 
     def delete(self, profile_id: int) -> bool:
         payload = self.load()

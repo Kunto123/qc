@@ -137,6 +137,38 @@ class HybridInspectionResultsRepository:
     def get_result(self, result_id: int) -> dict[str, Any] | None:
         return self._local_repo.get_result(result_id)
 
+    def update_result(self, result_id: int, patch: dict[str, Any], *, requeue_mirror: bool = False) -> dict[str, Any]:
+        result = self._local_repo.update_result(result_id, patch)
+        if self._sql_mirror_repo is not None and requeue_mirror:
+            result = self._local_repo.update_result(
+                result_id,
+                {
+                    "push_status": "pending",
+                    "retry_count": 0,
+                    "last_push_error": None,
+                },
+            )
+        return result
+
+    def delete_result(self, result_id: int) -> dict[str, Any]:
+        existing = self._local_repo.get_result(result_id)
+        deleted = self._local_repo.delete_result(result_id)
+
+        if existing is None or self._sql_mirror_repo is None:
+            return deleted
+
+        mirror_id = existing.get("sql_mirror_id")
+        delete_mirror = getattr(self._sql_mirror_repo, "delete_result", None)
+        if mirror_id is None or not callable(delete_mirror):
+            return deleted
+
+        try:
+            delete_mirror(int(mirror_id))
+        except Exception:  # noqa: BLE001
+            # Mirror cleanup is best-effort; local source of truth is already deleted.
+            pass
+        return deleted
+
     def summary(
         self,
         *,

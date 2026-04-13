@@ -18,6 +18,21 @@ class WorkstationRegistryRepository(JsonRepository):
     def list_workstations(self) -> list[dict[str, Any]]:
         return self._payload()["workstations"]
 
+    def delete_workstation(self, machine_id: str) -> bool:
+        normalized = str(machine_id or "").strip()
+        if not normalized:
+            return False
+        store = self._payload()
+        workstations = store["workstations"]
+        before = len(workstations)
+        store["workstations"] = [
+            item for item in workstations if str(item.get("machine_id") or "").strip() != normalized
+        ]
+        if len(store["workstations"]) == before:
+            return False
+        self.save(store)
+        return True
+
     def heartbeat(
         self,
         *,
