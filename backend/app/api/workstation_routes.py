@@ -8,6 +8,7 @@ from flask import Blueprint, g, jsonify, request, send_file
 
 from backend.app.core.config import MODELS_DIR, PROJECT_ROOT
 from backend.app.core.container import (
+    app_config,
     augment_repo,
     dataset_versions_repo,
     datasets_repo,
@@ -20,6 +21,11 @@ from backend.app.core.container import (
 )
 from backend.app.core.model_catalog import list_base_models, resolve_base_model
 from backend.app.core.http import require_auth, require_roles
+from shared.contracts.augment import (
+    GEOMETRIC_SAFE_TRANSFORMS,
+    PHOTOMETRIC_TRANSFORMS,
+    build_capabilities,
+)
 from shared.contracts.enums import UserRole
 
 
@@ -189,11 +195,13 @@ def list_dataset_versions(dataset_id: str):
     return jsonify(dataset_versions_repo.list_versions(dataset_id))
 
 
-_PHOTOMETRIC_TRANSFORMS = {"brightness", "contrast", "blur", "noise"}
-
-
 def _validate_augment_eligibility(job: dict, dataset_id: str) -> str | None:
-    """Return an actionable error string if the augment job is not eligible, else None."""
+    """Return an actionable error string if the augment job is not eligible, else None.
+
+    Photometric transforms are always allowed.
+    Geometric-safe transforms are allowed only when ``geometric_augment_enabled=True``.
+    Experimental transforms are never allowed.
+    """
     if str(job.get("status") or "") != "completed":
         return (
             f"Augment job '{job.get('id')}' is not completed "
@@ -205,13 +213,20 @@ def _validate_augment_eligibility(job: dict, dataset_id: str) -> str | None:
             f"not '{dataset_id}'."
         )
     transforms = list(job.get("transforms") or [])
-    non_photometric = [t for t in transforms if t not in _PHOTOMETRIC_TRANSFORMS]
-    if non_photometric:
+    geometric = [t for t in transforms if t in GEOMETRIC_SAFE_TRANSFORMS]
+    experimental = [t for t in transforms if t not in PHOTOMETRIC_TRANSFORMS and t not in GEOMETRIC_SAFE_TRANSFORMS]
+
+    if experimental:
+        return (
+            f"Augment job '{job.get('id')}' contains experimental transform(s) "
+            f"({', '.join(sorted(experimental))}) which are not yet supported in version snapshots."
+        )
+    if geometric and not app_config.geometric_augment_enabled:
         return (
             f"Augment job '{job.get('id')}' contains geometric transform(s) "
-            f"({', '.join(sorted(non_photometric))}) which cannot be included in a version snapshot "
-            "because they change object geometry and would invalidate bounding-box annotations. "
-            "Use photometric-only transforms: brightness, contrast, blur, noise."
+            f"({', '.join(sorted(geometric))}) which require QC_SUITE_GEOMETRIC_AUGMENT_ENABLED=1. "
+            "Use photometric-only transforms (brightness, contrast, blur, noise) "
+            "or enable geometric augmentation in the server configuration."
         )
     return None
 
@@ -359,6 +374,17 @@ def save_annotation(dataset_id: str, image_name: str):
     return jsonify(datasets_repo.save_annotation(dataset_id, image_name, labels))
 
 
+@workstation_blueprint.get("/augment/capabilities")
+@require_auth
+def get_augment_capabilities():
+    """Return the transform catalog and current feature-flag state.
+
+    The UI uses this to know which transforms are available, which need warnings,
+    and whether geometric augmentation is enabled on this server.
+    """
+    return jsonify(build_capabilities(geometric_augment_enabled=app_config.geometric_augment_enabled))
+
+
 @workstation_blueprint.get("/augment/jobs")
 @require_auth
 def list_augment_jobs():
@@ -377,6 +403,8 @@ def get_augment_job(job_id: str):
 @workstation_blueprint.post("/augment/jobs")
 @require_roles(UserRole.ADMIN)
 def create_augment_job():
+    from shared.contracts.augment import TRANSFORM_CATALOG as _TC, EXPERIMENTAL_TRANSFORMS  # lazy import
+
     payload = request.get_json(force=True) or {}
     dataset_id = str(payload.get("dataset_id") or "").strip()
     if not dataset_id:
@@ -385,8 +413,26 @@ def create_augment_job():
         return jsonify({"error": "Dataset not found"}), 404
 
     raw_transforms = payload.get("transforms")
-    transforms: list[str] = list(raw_transforms) if isinstance(raw_transforms, list) else ["flip_h", "brightness", "blur"]
+    transforms: list[str] = list(raw_transforms) if isinstance(raw_transforms, list) else ["brightness", "blur"]
     multiplier = max(1, min(10, int(payload.get("multiplier") or 2)))
+
+    # Reject unknown transform names.
+    unknown = [t for t in transforms if t not in _TC]
+    if unknown:
+        known = ", ".join(sorted(_TC.keys()))
+        return jsonify({
+            "error": f"Unknown transform(s): {', '.join(sorted(unknown))}. Known: {known}."
+        }), 400
+
+    # Warn that experimental transforms will not produce correct labels.
+    experimental_used = [t for t in transforms if t in EXPERIMENTAL_TRANSFORMS]
+    if experimental_used:
+        return jsonify({
+            "error": (
+                f"Experimental transform(s) ({', '.join(sorted(experimental_used))}) are not yet "
+                "supported. Use photometric or geometric_safe transforms."
+            )
+        }), 400
 
     job = augment_repo.create_job(
         dataset_id,

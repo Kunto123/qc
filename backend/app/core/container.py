@@ -41,7 +41,10 @@ templates_repo = TemplatesRepository()
 deployments_repo = DeploymentsRepository()
 profiles_repo = ProfilesRepository()
 datasets_repo = DatasetsRepository()
-dataset_versions_repo = DatasetVersionRepository(datasets_repo)
+dataset_versions_repo = DatasetVersionRepository(
+    datasets_repo,
+    geometric_augment_enabled=app_config.geometric_augment_enabled,
+)
 models_repo = ModelsRepository()
 training_repo = TrainingRepository()
 local_inspection_results_repo = InspectionResultsRepository()

@@ -83,9 +83,10 @@ def _split_items(items: list[Path], ratios: dict[str, float], seed: str) -> dict
 
 
 class DatasetVersionRepository(JsonRepository):
-    def __init__(self, datasets_repo: DatasetsRepository) -> None:
+    def __init__(self, datasets_repo: DatasetsRepository, *, geometric_augment_enabled: bool = False) -> None:
         super().__init__("dataset_versions.json", {"versions": []})
         self._datasets_repo = datasets_repo
+        self._geometric_augment_enabled = geometric_augment_enabled
 
     def list_versions(self, dataset_id: str | None = None) -> list[dict]:
         items = self.load()["versions"]
@@ -189,7 +190,9 @@ class DatasetVersionRepository(JsonRepository):
 
         source_stats = self._snapshot_source(dataset_id, source_images, source_images_dir, source_labels_dir)
 
-        # Integrate augmented images into the snapshot (photometric-only, annotation copied verbatim).
+        # Integrate augmented images into the snapshot.
+        # When geometric_augment_enabled=True, the label geometry engine transforms annotations
+        # for geometric transforms. Otherwise annotations are copied verbatim (photometric-safe).
         augmented_image_count = 0
         selected_augment_job_ids: list[str] = []
         if augment_jobs:
@@ -350,14 +353,22 @@ class DatasetVersionRepository(JsonRepository):
         source_images_dir: Path,
         source_labels_dir: Path,
     ) -> dict[str, int]:
-        """Copy augmented images and their original annotations into the version snapshot.
+        """Copy augmented images and their annotations into the version snapshot.
 
-        For each augmented image ``{stem}_augNNN{ext}`` the annotation from the
-        corresponding original image ``{stem}{ext}`` is copied verbatim (safe because
-        only photometric transforms preserve object geometry).
+        When ``geometric_augment_enabled=True`` (Phase 5):
+            If a ``.trace.json`` sidecar exists alongside the augmented image, the
+            label geometry engine transforms bbox/polygon coordinates to match the
+            spatial transform that was applied to the image.
+
+        When ``geometric_augment_enabled=False`` (default / flag OFF):
+            The original annotation is copied verbatim — correct for photometric
+            transforms; should not be used for geometric transforms via the API
+            (enforced by ``_validate_augment_eligibility``).
 
         Returns ``{"augmented_image_count": N}`` — the number of images actually copied.
         """
+        from backend.app.core.label_geometry import transform_labels  # lazy import
+
         augmented_count = 0
         for job in augment_jobs:
             output_dir_str = str(job.get("output_dataset_id") or "")
@@ -390,6 +401,23 @@ class DatasetVersionRepository(JsonRepository):
 
                 aug_annotation = dict(annotation)
                 aug_annotation["image_name"] = aug_file.name
+
+                # Apply label geometry transform when enabled and a trace is available.
+                if self._geometric_augment_enabled:
+                    trace_path = output_dir / f"{aug_file.stem}.trace.json"
+                    if trace_path.exists():
+                        try:
+                            trace_record = json.loads(trace_path.read_text(encoding="utf-8"))
+                            trace_transforms = trace_record.get("transforms") or []
+                            img_w = int(trace_record.get("image_width") or 0)
+                            img_h = int(trace_record.get("image_height") or 0)
+                            if trace_transforms and img_w > 0 and img_h > 0:
+                                original_labels = list(aug_annotation.get("labels") or [])
+                                aug_annotation["labels"] = transform_labels(
+                                    original_labels, trace_transforms, img_w, img_h
+                                )
+                        except Exception:  # noqa: BLE001
+                            pass  # Trace read/parse error: fall back to verbatim copy
 
                 (source_labels_dir / f"{aug_file.stem}.json").write_text(
                     json.dumps(aug_annotation, ensure_ascii=True, indent=2),

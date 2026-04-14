@@ -304,6 +304,9 @@ class ApiClient:
     def download_dataset_image(self, dataset_id: str, image_name: str) -> bytes:
         return self.download_dataset_file(dataset_id, "images", image_name)
 
+    def get_augment_capabilities(self) -> dict:
+        return self._get("/augment/capabilities")
+
     def list_augment_jobs(self) -> list[dict]:
         return self._get("/augment/jobs")
 

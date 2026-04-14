@@ -662,7 +662,8 @@ class UiSmokeTest(unittest.TestCase):
 
             self.assertEqual(len(payloads), 1)
             self.assertEqual(payloads[0]["dataset_id"], "ds-1")
-            self.assertEqual(payloads[0]["transforms"], ["rotate", "noise"])
+            # Transforms are returned in catalog order (photometric before geometric).
+            self.assertEqual(sorted(payloads[0]["transforms"]), sorted(["rotate", "noise"]))
             self.assertEqual(payloads[0]["multiplier"], 2)
             screen.destroy()
 

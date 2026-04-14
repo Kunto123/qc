@@ -59,6 +59,12 @@ class AppConfig:
     # Templates that explicitly set part_ready_settle_ms (including 0 to bypass) ignore it.
     # Default 0 = no settle (backward compatible).
     part_ready_settle_ms_default: int = max(0, int(os.getenv("QC_SUITE_PART_READY_SETTLE_MS", "0")))
+    # Geometric augmentation feature flag.
+    # When 0 (default): geometric transforms (flip_h, flip_v, rotate) are rejected when
+    # including augment jobs in a version snapshot — label coords copied verbatim.
+    # When 1: geometric transforms are allowed in version snapshots and the label geometry
+    # engine transforms bbox/polygon annotations accordingly.
+    geometric_augment_enabled: bool = os.getenv("QC_SUITE_GEOMETRIC_AUGMENT_ENABLED", "0").strip() == "1"
 
     @property
     def sql_enabled(self) -> bool:

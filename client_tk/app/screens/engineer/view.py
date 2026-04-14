@@ -23,18 +23,13 @@ from client_tk.app.components.roi_picker_canvas import RoiPickerCanvas
 from client_tk.app.components.scrollable_frame import ScrollableFrame
 from client_tk.app.components.template_forms import JsonEditor, LabeledValuePanel
 from client_tk.app.theme import APP_BG, BORDER
+from shared.contracts.augment import TRANSFORM_CATALOG as _TRANSFORM_CATALOG
 
 
-_AUGMENT_TRANSFORM_OPTIONS = (
-    "flip_h",
-    "flip_v",
-    "brightness",
-    "contrast",
-    "blur",
-    "rotate",
-    "noise",
-)
-_AUGMENT_DEFAULT_TRANSFORMS = ("flip_h", "brightness", "blur")
+# All transforms in catalog order (photometric first, then geometric_safe).
+_AUGMENT_TRANSFORM_OPTIONS: tuple[str, ...] = tuple(_TRANSFORM_CATALOG.keys())
+# Default selection: safe photometric-only transforms.
+_AUGMENT_DEFAULT_TRANSFORMS = ("brightness", "blur")
 _TRAINING_AUTO_REFRESH_MS = 1500
 _TRAINING_FILTER_OPTIONS = ("All", "Active", "Failed", "Completed")
 _TRAINING_STATUS_COLORS = {
@@ -120,6 +115,7 @@ class EngineerScreen(ctk.CTkFrame):
         self._responsive_layout_job: str | None = None
         self._training_auto_refresh_job: str | None = None
         self._augment_selected_transforms: list[str] = list(_AUGMENT_DEFAULT_TRANSFORMS)
+        self._augment_capabilities: dict | None = None  # cached from /augment/capabilities
 
         notebook = ctk.CTkTabview(self, fg_color=APP_BG, corner_radius=0, command=self._on_notebook_tab_changed)
         notebook.pack(fill="both", expand=True, padx=8, pady=8)
@@ -308,6 +304,8 @@ class EngineerScreen(ctk.CTkFrame):
                 self.train_dataset.insert(0, current_dataset_id)
             if not self._base_model_cache or not self.train_base_model["values"]:
                 self.refresh_base_models()
+            if self._augment_capabilities is None:
+                self.refresh_augment_capabilities()
             self.refresh_augment_jobs()
             self.refresh_training_jobs()
             self.refresh_workstations()
@@ -468,7 +466,7 @@ class EngineerScreen(ctk.CTkFrame):
         self.version_augment_selector.pack(fill="x")
         ttk.Label(
             version_augment_frame,
-            text="Ctrl+click untuk multi-select. Hanya augment job photometric (brightness/contrast/blur/noise) yang dapat dimasukkan.",
+            text="Ctrl+click untuk multi-select. Photometric jobs selalu tersedia. Geometric jobs (flip_h, flip_v, rotate) tersedia bila QC_SUITE_GEOMETRIC_AUGMENT_ENABLED=1.",
             foreground="#475569",
             wraplength=500,
             justify="left",
@@ -612,21 +610,47 @@ class EngineerScreen(ctk.CTkFrame):
         ttk.Label(augment_form, text="Multiplier").grid(row=0, column=2, sticky="w", padx=(0, 8), pady=4)
         self.augment_multiplier.grid(row=0, column=3, sticky="w", pady=4)
 
-        ttk.Label(augment_form, text="Transforms").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Label(augment_form, text="Transforms").grid(row=1, column=0, sticky="nw", padx=(0, 8), pady=4)
         transform_picker_frame = ttk.Frame(augment_form)
         transform_picker_frame.grid(row=1, column=1, columnspan=3, sticky="ew", pady=4)
-        for col in range(3):
+        for col in range(4):
             transform_picker_frame.columnconfigure(col, weight=1)
         self._augment_transform_vars: dict[str, tk.BooleanVar] = {}
-        for index, transform_name in enumerate(_AUGMENT_TRANSFORM_OPTIONS):
+
+        from shared.contracts.augment import TRANSFORM_CATALOG as _TC  # local import for widget build
+        # Group transforms by category for display; skip experimental.
+        _PHOTO = [k for k, v in _TC.items() if v.category == "photometric"]
+        _GEO   = [k for k, v in _TC.items() if v.category == "geometric_safe"]
+
+        ttk.Label(transform_picker_frame, text="Photometric:", foreground="#475569").grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 2))
+        for col_idx, transform_name in enumerate(_PHOTO):
             var = tk.BooleanVar(value=transform_name in self._augment_selected_transforms)
             self._augment_transform_vars[transform_name] = var
             ttk.Checkbutton(
-                transform_picker_frame,
-                text=transform_name,
-                variable=var,
+                transform_picker_frame, text=transform_name, variable=var,
                 command=self._on_augment_transform_selection_changed,
-            ).grid(row=index // 3, column=index % 3, sticky="w", padx=(0, 8), pady=2)
+            ).grid(row=1, column=col_idx, sticky="w", padx=(0, 8), pady=2)
+
+        ttk.Label(transform_picker_frame, text="Geometric (requires flag):", foreground="#475569").grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(4, 2))
+        for col_idx, transform_name in enumerate(_GEO):
+            var = tk.BooleanVar(value=transform_name in self._augment_selected_transforms)
+            self._augment_transform_vars[transform_name] = var
+            ttk.Checkbutton(
+                transform_picker_frame, text=transform_name, variable=var,
+                command=self._on_augment_transform_selection_changed,
+            ).grid(row=3, column=col_idx, sticky="w", padx=(0, 8), pady=2)
+
+        self._augment_geo_warning_var = tk.StringVar(value="")
+        self._augment_geo_warning = ttk.Label(
+            transform_picker_frame,
+            textvariable=self._augment_geo_warning_var,
+            foreground="#dc2626",
+            wraplength=300,
+            justify="left",
+        )
+        self._augment_geo_warning.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         self.augment_transforms_var = tk.StringVar(value=", ".join(self._augment_selected_transforms))
         ttk.Label(augment_form, text="Selected").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
@@ -2324,6 +2348,22 @@ class EngineerScreen(ctk.CTkFrame):
         else:
             self.annotation_canvas.request_redraw()
 
+    def refresh_augment_capabilities(self) -> None:
+        """Fetch /augment/capabilities from the server and cache the result."""
+        def _load():
+            return self.api.get_augment_capabilities()
+
+        def _done(result, error):
+            if not self.winfo_exists():
+                return
+            if error or not isinstance(result, dict):
+                return
+            self._augment_capabilities = result
+            self._refresh_augment_geo_warning()
+            self._refresh_version_augment_selector()
+
+        run_async(self, _load, callback=_done)
+
     def refresh_augment_jobs(self):
         self._augment_jobs_refresh_sequence += 1
         refresh_sequence = self._augment_jobs_refresh_sequence
@@ -2355,16 +2395,29 @@ class EngineerScreen(ctk.CTkFrame):
         self._refresh_version_augment_selector()
 
     def _refresh_version_augment_selector(self) -> None:
-        """Populate the version-creation augment selector with completed photometric jobs for the current dataset."""
+        """Populate the version-creation augment selector with eligible completed jobs.
+
+        Photometric-only jobs are always eligible.
+        Geometric-safe jobs are eligible when the server capability flag is ON.
+        Experimental transform jobs are never eligible.
+        """
         if not hasattr(self, "version_augment_selector"):
             return
         dataset_id = self._current_dataset_id()
-        _PHOTOMETRIC = {"brightness", "contrast", "blur", "noise"}
+        from shared.contracts.augment import PHOTOMETRIC_TRANSFORMS, GEOMETRIC_SAFE_TRANSFORMS
+        geo_enabled = bool(
+            self._augment_capabilities and self._augment_capabilities.get("geometric_augment_enabled")
+        )
+        def _is_eligible(job: dict) -> bool:
+            transforms = set(job.get("transforms") or [])
+            allowed = PHOTOMETRIC_TRANSFORMS | (GEOMETRIC_SAFE_TRANSFORMS if geo_enabled else set())
+            return not (transforms - allowed)
+
         eligible = [
             j for j in self._augment_jobs
             if str(j.get("status") or "") == "completed"
             and str(j.get("dataset_id") or "") == dataset_id
-            and all(t in _PHOTOMETRIC for t in (j.get("transforms") or []))
+            and _is_eligible(j)
         ] if dataset_id else []
 
         self._version_augment_job_ids = [str(j.get("id") or "") for j in eligible]
@@ -2534,6 +2587,34 @@ class EngineerScreen(ctk.CTkFrame):
             if bool(var.get())
         ]
         self._set_augment_selected_transforms(selected)
+        self._refresh_augment_geo_warning()
+
+    def _refresh_augment_geo_warning(self) -> None:
+        """Show or hide the geometric transform warning based on selection + capability."""
+        if not hasattr(self, "_augment_geo_warning_var"):
+            return
+        from shared.contracts.augment import GEOMETRIC_SAFE_TRANSFORMS
+        selected = set(self._augment_selected_transforms)
+        geo_selected = selected & GEOMETRIC_SAFE_TRANSFORMS
+        if not geo_selected:
+            self._augment_geo_warning_var.set("")
+            return
+        caps = self._augment_capabilities
+        if caps is None:
+            # Capabilities not yet fetched — show a neutral note.
+            self._augment_geo_warning_var.set(
+                f"Geometric transforms selected ({', '.join(sorted(geo_selected))}). "
+                "Capability status unknown — refresh the Training tab to check."
+            )
+            return
+        if caps.get("geometric_augment_enabled"):
+            self._augment_geo_warning_var.set("")
+        else:
+            self._augment_geo_warning_var.set(
+                f"\u26A0 Geometric transforms ({', '.join(sorted(geo_selected))}) require "
+                "QC_SUITE_GEOMETRIC_AUGMENT_ENABLED=1 on the server. "
+                "Jobs will be created but cannot be included in a version snapshot until the flag is set."
+            )
 
     def _reset_augment_transforms(self) -> None:
         self._set_augment_selected_transforms(list(_AUGMENT_DEFAULT_TRANSFORMS))

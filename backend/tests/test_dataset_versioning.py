@@ -302,3 +302,467 @@ class AugmentIntegrationVersioningTest(unittest.TestCase):
         # No augmented images should be added
         self.assertEqual(version["augmented_image_count_in_version"], 0)
         self.assertEqual(version["image_count"], 2)
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 — Baseline Freeze
+# ---------------------------------------------------------------------------
+
+class Phase0BaselineTest(unittest.TestCase):
+    """Baseline freeze: lock current behavior before geometric label transforms are added.
+
+    These tests define the expected behavior when ``geometric_augment_enabled=False``
+    (the default that will be introduced in Phase 1).  They must continue to pass
+    unchanged throughout all subsequent phases.
+    """
+
+    def setUp(self) -> None:
+        self.datasets_repo = DatasetsRepository()
+        self.versions_repo = DatasetVersionRepository(self.datasets_repo)
+        self.dataset = self.datasets_repo.create_dataset("phase0-baseline-ds", "phase0")
+        # One annotated source image (320×240 px solid colour).
+        self.datasets_repo.save_file(
+            self.dataset["id"], "images", "src.jpg", _sample_image_bytes((128, 64, 32))
+        )
+        self.datasets_repo.save_annotation(
+            self.dataset["id"],
+            "src.jpg",
+            [{"type": "bbox", "class": "obj", "bbox": {"x": 10, "y": 20, "w": 40, "h": 30}}],
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _write_aug_output(self, transforms: list[str], multiplier: int = 1, *, job_id: str = "p0-aug-001") -> dict:
+        """Apply ``_apply_transforms`` and write output files; return a completed job stub."""
+        import cv2
+        from backend.app.workers.augment_worker import _apply_transforms
+
+        ds_dir = self.datasets_repo.dataset_dir(self.dataset["id"])
+        output_dir = ds_dir / "augmented" / job_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        src = cv2.imread(str(ds_dir / "images" / "src.jpg"))
+        for i in range(1, multiplier + 1):
+            out = _apply_transforms(src.copy(), transforms)
+            cv2.imwrite(str(output_dir / f"src_aug{i:03d}.jpg"), out)
+        return {
+            "id": job_id,
+            "dataset_id": self.dataset["id"],
+            "status": "completed",
+            "transforms": transforms,
+            "multiplier": multiplier,
+            "output_dataset_id": str(output_dir),
+            "augmented_image_count": multiplier,
+        }
+
+    # ------------------------------------------------------------------
+    # _apply_transforms — image-level invariants
+    # ------------------------------------------------------------------
+
+    def test_apply_transforms_preserves_shape_for_all_transforms(self) -> None:
+        """Every supported transform must preserve image height×width×channels."""
+        import cv2
+        from backend.app.workers.augment_worker import _apply_transforms
+
+        ds_dir = self.datasets_repo.dataset_dir(self.dataset["id"])
+        src = cv2.imread(str(ds_dir / "images" / "src.jpg"))
+        original_shape = src.shape
+        all_transforms = ["flip_h", "flip_v", "brightness", "contrast", "blur", "rotate", "noise"]
+        for t in all_transforms:
+            out = _apply_transforms(src.copy(), [t])
+            self.assertEqual(
+                out.shape, original_shape,
+                f"_apply_transforms changed image shape for transform '{t}': "
+                f"{original_shape} → {out.shape}",
+            )
+
+    def test_apply_transforms_flip_h_mirrors_image(self) -> None:
+        """flip_h must produce the horizontally mirrored image (cv2.flip axis=1)."""
+        import cv2
+        from backend.app.workers.augment_worker import _apply_transforms
+
+        ds_dir = self.datasets_repo.dataset_dir(self.dataset["id"])
+        src = cv2.imread(str(ds_dir / "images" / "src.jpg"))
+        out = _apply_transforms(src.copy(), ["flip_h"])
+        expected = cv2.flip(src, 1)
+        self.assertTrue(
+            (out == expected).all(),
+            "flip_h output does not match cv2.flip(img, 1)",
+        )
+
+    def test_apply_transforms_flip_v_mirrors_image(self) -> None:
+        """flip_v must produce the vertically mirrored image (cv2.flip axis=0)."""
+        import cv2
+        from backend.app.workers.augment_worker import _apply_transforms
+
+        ds_dir = self.datasets_repo.dataset_dir(self.dataset["id"])
+        src = cv2.imread(str(ds_dir / "images" / "src.jpg"))
+        out = _apply_transforms(src.copy(), ["flip_v"])
+        expected = cv2.flip(src, 0)
+        self.assertTrue(
+            (out == expected).all(),
+            "flip_v output does not match cv2.flip(img, 0)",
+        )
+
+    # ------------------------------------------------------------------
+    # Snapshot annotation behaviour — flag OFF (verbatim copy)
+    # ------------------------------------------------------------------
+
+    def _read_aug_label(self, version: dict, aug_name: str = "src_aug001.json") -> dict:
+        import json as _json
+        label_path = Path(version["source_root"]) / "labels" / aug_name
+        self.assertTrue(label_path.exists(), f"Expected label file {label_path}")
+        return _json.loads(label_path.read_text(encoding="utf-8"))
+
+    def test_photometric_augment_copies_annotation_verbatim(self) -> None:
+        """Photometric transforms (brightness/contrast/blur/noise) → annotation coords unchanged."""
+        job = self._write_aug_output(["brightness", "contrast", "blur", "noise"])
+        version = self.versions_repo.create_version(self.dataset["id"], augment_jobs=[job])
+        payload = self._read_aug_label(version)
+        labels = payload.get("labels") or []
+        self.assertEqual(len(labels), 1)
+        bbox = labels[0].get("bbox") or {}
+        self.assertEqual(bbox.get("x"), 10)
+        self.assertEqual(bbox.get("y"), 20)
+        self.assertEqual(bbox.get("w"), 40)
+        self.assertEqual(bbox.get("h"), 30)
+
+    def test_geometric_flip_h_copies_annotation_verbatim_when_flag_off(self) -> None:
+        """flip_h with no label-transform engine → annotation copied verbatim (flag OFF baseline).
+
+        When the geometric_augment feature flag is OFF (default), this verbatim-copy
+        behaviour is preserved — the snapshot does NOT attempt to mirror the bbox.
+        """
+        job = self._write_aug_output(["flip_h"], job_id="p0-flip-h-001")
+        version = self.versions_repo.create_version(self.dataset["id"], augment_jobs=[job])
+        payload = self._read_aug_label(version)
+        labels = payload.get("labels") or []
+        self.assertEqual(len(labels), 1)
+        bbox = labels[0].get("bbox") or {}
+        # Verbatim: coords must equal original, NOT mirror-transformed
+        self.assertEqual(bbox.get("x"), 10)
+        self.assertEqual(bbox.get("y"), 20)
+        self.assertEqual(bbox.get("w"), 40)
+        self.assertEqual(bbox.get("h"), 30)
+
+    def test_geometric_flip_v_copies_annotation_verbatim_when_flag_off(self) -> None:
+        """flip_v with no label-transform engine → annotation copied verbatim (flag OFF baseline)."""
+        job = self._write_aug_output(["flip_v"], job_id="p0-flip-v-001")
+        version = self.versions_repo.create_version(self.dataset["id"], augment_jobs=[job])
+        payload = self._read_aug_label(version)
+        labels = payload.get("labels") or []
+        self.assertEqual(len(labels), 1)
+        bbox = labels[0].get("bbox") or {}
+        self.assertEqual(bbox.get("x"), 10)
+        self.assertEqual(bbox.get("y"), 20)
+        self.assertEqual(bbox.get("w"), 40)
+        self.assertEqual(bbox.get("h"), 30)
+
+    def test_geometric_rotate_copies_annotation_verbatim_when_flag_off(self) -> None:
+        """rotate with no label-transform engine → annotation copied verbatim (flag OFF baseline)."""
+        job = self._write_aug_output(["rotate"], job_id="p0-rotate-001")
+        version = self.versions_repo.create_version(self.dataset["id"], augment_jobs=[job])
+        payload = self._read_aug_label(version)
+        labels = payload.get("labels") or []
+        self.assertEqual(len(labels), 1)
+        bbox = labels[0].get("bbox") or {}
+        self.assertEqual(bbox.get("x"), 10)
+        self.assertEqual(bbox.get("y"), 20)
+        self.assertEqual(bbox.get("w"), 40)
+        self.assertEqual(bbox.get("h"), 30)
+
+    # ------------------------------------------------------------------
+    # Version metrics invariants
+    # ------------------------------------------------------------------
+
+    def test_no_augment_version_metrics_unchanged(self) -> None:
+        """create_version without augment_jobs: metrics identical to pre-augment baseline."""
+        version = self.versions_repo.create_version(self.dataset["id"])
+        self.assertEqual(version["image_count"], 1)
+        self.assertEqual(version["annotated_image_count"], 1)
+        self.assertEqual(version["label_count"], 1)
+        self.assertEqual(version["annotation_coverage"], 1.0)
+        self.assertEqual(version["selected_augment_job_ids"], [])
+        self.assertEqual(version["augmented_image_count_in_version"], 0)
+
+    def test_photometric_augment_version_metrics_correct(self) -> None:
+        """Photometric augment: image_count = original + augmented; annotation_coverage correct."""
+        job = self._write_aug_output(["brightness"], multiplier=2, job_id="p0-photo-metrics")
+        version = self.versions_repo.create_version(self.dataset["id"], augment_jobs=[job])
+        # 1 original + 2 augmented
+        self.assertEqual(version["image_count"], 3)
+        self.assertEqual(version["annotated_image_count"], 3)
+        self.assertEqual(version["label_count"], 3)
+        self.assertEqual(version["augmented_image_count_in_version"], 2)
+        self.assertEqual(version["total_source_image_count"], 1)
+
+    def test_photometric_augment_export_contains_augmented_images(self) -> None:
+        """YOLO export must include both original and augmented images for photometric transforms."""
+        job = self._write_aug_output(["blur"], multiplier=1, job_id="p0-export-check")
+        version = self.versions_repo.create_version(self.dataset["id"], augment_jobs=[job])
+        export_root = Path(version["export_root"])
+        exported = {p.name for p in (export_root / "images").rglob("*.jpg")}
+        self.assertIn("src.jpg", exported)
+        self.assertIn("src_aug001.jpg", exported)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 — Verification Matrix
+# ---------------------------------------------------------------------------
+
+class Phase8VerificationTest(unittest.TestCase):
+    """Verification matrix: dual-mode ON/OFF flag, per-transform label correctness, mixed chains."""
+
+    # Image is 320×240 px.  Bbox is at (10, 20, 40, 30) → right edge at 50, bottom edge at 50.
+    _IMG_W = 320
+    _IMG_H = 240
+    _ORIG_X = 10.0
+    _ORIG_Y = 20.0
+    _ORIG_W = 40.0
+    _ORIG_H = 30.0
+
+    def setUp(self) -> None:
+        self.datasets_repo = DatasetsRepository()
+        self.versions_repo_off = DatasetVersionRepository(
+            self.datasets_repo, geometric_augment_enabled=False
+        )
+        self.versions_repo_on = DatasetVersionRepository(
+            self.datasets_repo, geometric_augment_enabled=True
+        )
+        self.dataset = self.datasets_repo.create_dataset("p8-verify-ds", "phase8")
+        self.datasets_repo.save_file(
+            self.dataset["id"], "images", "src.jpg",
+            _sample_image_bytes((100, 150, 200)),
+        )
+        self.datasets_repo.save_annotation(
+            self.dataset["id"],
+            "src.jpg",
+            [{
+                "type": "bbox",
+                "class": "obj",
+                "bbox": {
+                    "x": self._ORIG_X, "y": self._ORIG_Y,
+                    "w": self._ORIG_W, "h": self._ORIG_H,
+                },
+            }],
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _write_aug_with_trace(self, transforms: list[str], job_id: str) -> dict:
+        """Apply transforms, write image + trace sidecar; return completed job stub."""
+        import cv2
+        from backend.app.workers.augment_worker import _apply_transforms_traced
+
+        ds_dir = self.datasets_repo.dataset_dir(self.dataset["id"])
+        output_dir = ds_dir / "augmented" / job_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        src = cv2.imread(str(ds_dir / "images" / "src.jpg"))
+        h, w = src.shape[:2]
+
+        import json as _json
+        out_img, trace = _apply_transforms_traced(src.copy(), transforms)
+        cv2.imwrite(str(output_dir / "src_aug001.jpg"), out_img)
+        (_json.dumps({
+            "source_image": "src.jpg",
+            "aug_index": 1,
+            "image_width": w,
+            "image_height": h,
+            "transforms": trace,
+        }, ensure_ascii=True, indent=2))
+        trace_path = output_dir / "src_aug001.trace.json"
+        trace_path.write_text(
+            _json.dumps({
+                "source_image": "src.jpg",
+                "aug_index": 1,
+                "image_width": w,
+                "image_height": h,
+                "transforms": trace,
+            }, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+        return {
+            "id": job_id,
+            "dataset_id": self.dataset["id"],
+            "status": "completed",
+            "transforms": transforms,
+            "multiplier": 1,
+            "output_dataset_id": str(output_dir),
+            "augmented_image_count": 1,
+        }
+
+    def _read_aug_bbox(self, version: dict, aug_stem: str = "src_aug001") -> dict:
+        import json as _json
+        label_path = Path(version["source_root"]) / "labels" / f"{aug_stem}.json"
+        payload = _json.loads(label_path.read_text(encoding="utf-8"))
+        labels = payload.get("labels") or []
+        self.assertEqual(len(labels), 1)
+        return labels[0].get("bbox") or {}
+
+    # ------------------------------------------------------------------
+    # Compatibility: flag OFF preserves baseline (verbatim copy)
+    # ------------------------------------------------------------------
+
+    def test_flag_off_flip_h_annotation_verbatim(self) -> None:
+        """flag=OFF + flip_h → annotation verbatim (baseline compat)."""
+        job = self._write_aug_with_trace(["flip_h"], "p8-off-flip-h")
+        version = self.versions_repo_off.create_version(self.dataset["id"], augment_jobs=[job])
+        bbox = self._read_aug_bbox(version)
+        self.assertAlmostEqual(bbox["x"], self._ORIG_X, places=3)
+        self.assertAlmostEqual(bbox["y"], self._ORIG_Y, places=3)
+
+    def test_flag_off_rotate_annotation_verbatim(self) -> None:
+        """flag=OFF + rotate → annotation verbatim (baseline compat)."""
+        job = self._write_aug_with_trace(["rotate"], "p8-off-rotate")
+        version = self.versions_repo_off.create_version(self.dataset["id"], augment_jobs=[job])
+        bbox = self._read_aug_bbox(version)
+        self.assertAlmostEqual(bbox["x"], self._ORIG_X, places=3)
+
+    def test_flag_off_photometric_annotation_verbatim(self) -> None:
+        """flag=OFF + brightness → annotation verbatim (correct for photometric)."""
+        job = self._write_aug_with_trace(["brightness"], "p8-off-brightness")
+        version = self.versions_repo_off.create_version(self.dataset["id"], augment_jobs=[job])
+        bbox = self._read_aug_bbox(version)
+        self.assertAlmostEqual(bbox["x"], self._ORIG_X, places=3)
+
+    # ------------------------------------------------------------------
+    # Geometry math: flag ON, per-transform label correctness
+    # ------------------------------------------------------------------
+
+    def test_flag_on_flip_h_transforms_bbox_correctly(self) -> None:
+        """flag=ON + flip_h → x' = W - x - w; y/w/h unchanged."""
+        job = self._write_aug_with_trace(["flip_h"], "p8-on-flip-h")
+        version = self.versions_repo_on.create_version(self.dataset["id"], augment_jobs=[job])
+        bbox = self._read_aug_bbox(version)
+        expected_x = self._IMG_W - self._ORIG_X - self._ORIG_W  # 320 - 10 - 40 = 270
+        self.assertAlmostEqual(bbox["x"], expected_x, places=2,
+            msg=f"flip_h x: expected {expected_x}, got {bbox['x']}")
+        self.assertAlmostEqual(bbox["y"], self._ORIG_Y, places=2)
+        self.assertAlmostEqual(bbox["w"], self._ORIG_W, places=2)
+        self.assertAlmostEqual(bbox["h"], self._ORIG_H, places=2)
+
+    def test_flag_on_flip_v_transforms_bbox_correctly(self) -> None:
+        """flag=ON + flip_v → y' = H - y - h; x/w/h unchanged."""
+        job = self._write_aug_with_trace(["flip_v"], "p8-on-flip-v")
+        version = self.versions_repo_on.create_version(self.dataset["id"], augment_jobs=[job])
+        bbox = self._read_aug_bbox(version)
+        expected_y = self._IMG_H - self._ORIG_Y - self._ORIG_H  # 240 - 20 - 30 = 190
+        self.assertAlmostEqual(bbox["x"], self._ORIG_X, places=2)
+        self.assertAlmostEqual(bbox["y"], expected_y, places=2,
+            msg=f"flip_v y: expected {expected_y}, got {bbox['y']}")
+        self.assertAlmostEqual(bbox["w"], self._ORIG_W, places=2)
+        self.assertAlmostEqual(bbox["h"], self._ORIG_H, places=2)
+
+    def test_flag_on_photometric_coords_unchanged(self) -> None:
+        """flag=ON + brightness → annotation coords unchanged (photometric regression)."""
+        job = self._write_aug_with_trace(["brightness"], "p8-on-brightness")
+        version = self.versions_repo_on.create_version(self.dataset["id"], augment_jobs=[job])
+        bbox = self._read_aug_bbox(version)
+        self.assertAlmostEqual(bbox["x"], self._ORIG_X, places=3)
+        self.assertAlmostEqual(bbox["y"], self._ORIG_Y, places=3)
+        self.assertAlmostEqual(bbox["w"], self._ORIG_W, places=3)
+        self.assertAlmostEqual(bbox["h"], self._ORIG_H, places=3)
+
+    def test_flag_on_rotate_bbox_stays_within_image(self) -> None:
+        """flag=ON + rotate → transformed bbox clipped inside image bounds."""
+        job = self._write_aug_with_trace(["rotate"], "p8-on-rotate")
+        version = self.versions_repo_on.create_version(self.dataset["id"], augment_jobs=[job])
+        bbox = self._read_aug_bbox(version)
+        self.assertGreaterEqual(bbox["x"], 0.0)
+        self.assertGreaterEqual(bbox["y"], 0.0)
+        self.assertGreater(bbox["w"], 0.0)
+        self.assertGreater(bbox["h"], 0.0)
+        self.assertLessEqual(bbox["x"] + bbox["w"], self._IMG_W + 1e-3)
+        self.assertLessEqual(bbox["y"] + bbox["h"], self._IMG_H + 1e-3)
+
+    # ------------------------------------------------------------------
+    # Mixed chain: photometric + geometric
+    # ------------------------------------------------------------------
+
+    def test_flag_on_mixed_brightness_flip_h(self) -> None:
+        """flag=ON + [brightness, flip_h] → only the flip_h changes coords."""
+        job = self._write_aug_with_trace(["brightness", "flip_h"], "p8-on-mixed-bfh")
+        version = self.versions_repo_on.create_version(self.dataset["id"], augment_jobs=[job])
+        bbox = self._read_aug_bbox(version)
+        # brightness is photometric — no coord change; flip_h mirrors x
+        expected_x = self._IMG_W - self._ORIG_X - self._ORIG_W
+        self.assertAlmostEqual(bbox["x"], expected_x, places=2)
+        self.assertAlmostEqual(bbox["y"], self._ORIG_Y, places=2)
+
+    def test_flag_on_flip_h_then_flip_v_double_flip(self) -> None:
+        """flag=ON + [flip_h, flip_v] → both flips applied sequentially."""
+        job = self._write_aug_with_trace(["flip_h", "flip_v"], "p8-on-double-flip")
+        version = self.versions_repo_on.create_version(self.dataset["id"], augment_jobs=[job])
+        bbox = self._read_aug_bbox(version)
+        expected_x = self._IMG_W - self._ORIG_X - self._ORIG_W  # 270
+        expected_y = self._IMG_H - self._ORIG_Y - self._ORIG_H  # 190
+        self.assertAlmostEqual(bbox["x"], expected_x, places=2)
+        self.assertAlmostEqual(bbox["y"], expected_y, places=2)
+        self.assertAlmostEqual(bbox["w"], self._ORIG_W, places=2)
+        self.assertAlmostEqual(bbox["h"], self._ORIG_H, places=2)
+
+    # ------------------------------------------------------------------
+    # Snapshot / export integrity with geometric transforms
+    # ------------------------------------------------------------------
+
+    def test_flag_on_flip_h_version_metrics_consistent(self) -> None:
+        """flag=ON + flip_h: image_count, annotated_count, YOLO export all consistent."""
+        job = self._write_aug_with_trace(["flip_h"], "p8-on-metrics-flip")
+        version = self.versions_repo_on.create_version(self.dataset["id"], augment_jobs=[job])
+        self.assertEqual(version["image_count"], 2)
+        self.assertEqual(version["annotated_image_count"], 2)
+        self.assertEqual(version["annotation_coverage"], 1.0)
+        export_root = Path(version["export_root"])
+        all_labels = list((export_root / "labels").rglob("*.txt"))
+        # Both images must have a label file
+        self.assertEqual(len(all_labels), 2)
+
+    def test_flag_off_no_trace_file_still_works_verbatim(self) -> None:
+        """flag=OFF with no trace sidecar: annotation copied verbatim (safe fallback)."""
+        import cv2
+        ds_dir = self.datasets_repo.dataset_dir(self.dataset["id"])
+        job_id = "p8-no-trace"
+        output_dir = ds_dir / "augmented" / job_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        src = cv2.imread(str(ds_dir / "images" / "src.jpg"))
+        cv2.imwrite(str(output_dir / "src_aug001.jpg"), src)
+        # Deliberately do NOT write a .trace.json
+        job = {
+            "id": job_id,
+            "dataset_id": self.dataset["id"],
+            "status": "completed",
+            "transforms": ["brightness"],
+            "multiplier": 1,
+            "output_dataset_id": str(output_dir),
+            "augmented_image_count": 1,
+        }
+        version = self.versions_repo_off.create_version(self.dataset["id"], augment_jobs=[job])
+        bbox = self._read_aug_bbox(version)
+        self.assertAlmostEqual(bbox["x"], self._ORIG_X, places=3)
+
+    def test_flag_on_missing_trace_falls_back_to_verbatim(self) -> None:
+        """flag=ON but no .trace.json present: graceful fallback to verbatim copy (no crash)."""
+        import cv2
+        ds_dir = self.datasets_repo.dataset_dir(self.dataset["id"])
+        job_id = "p8-on-no-trace"
+        output_dir = ds_dir / "augmented" / job_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        src = cv2.imread(str(ds_dir / "images" / "src.jpg"))
+        cv2.imwrite(str(output_dir / "src_aug001.jpg"), src)
+        # No trace file
+        job = {
+            "id": job_id,
+            "dataset_id": self.dataset["id"],
+            "status": "completed",
+            "transforms": ["flip_h"],
+            "multiplier": 1,
+            "output_dataset_id": str(output_dir),
+            "augmented_image_count": 1,
+        }
+        # Should not raise; annotation is verbatim (no trace = no transform)
+        version = self.versions_repo_on.create_version(self.dataset["id"], augment_jobs=[job])
+        bbox = self._read_aug_bbox(version)
+        self.assertAlmostEqual(bbox["x"], self._ORIG_X, places=3)
