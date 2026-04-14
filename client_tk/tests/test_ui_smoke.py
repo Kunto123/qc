@@ -2377,6 +2377,46 @@ class UiSmokeTest(unittest.TestCase):
         self.assertIsNotNone(screen.calibration_crop_preview._photo)
         screen.destroy()
 
+    def test_engineer_calibration_roi_preview_shows_validation_message_for_invalid_bounds(self) -> None:
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        screen._ensure_calibration_tab_built()
+        screen.calibration_image = np.zeros((120, 200, 3), dtype=np.uint8)
+        for entry, value in (
+            (screen.calib_roi_x, "1"),
+            (screen.calib_roi_y, "1"),
+            (screen.calib_roi_w, "1"),
+            (screen.calib_roi_h, "1"),
+        ):
+            entry.delete(0, "end")
+            entry.insert(0, value)
+
+        screen._refresh_calibration_preview()
+
+        self.assertIn("rentang [0, 1)", screen.calibration_preview_info.get())
+        screen.destroy()
+
+    def test_engineer_calibration_roi_rejects_tiny_crop_before_compute(self) -> None:
+        screen = EngineerScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        screen._ensure_calibration_tab_built()
+        screen.calibration_image = np.zeros((120, 200, 3), dtype=np.uint8)
+        for entry, value in (
+            (screen.calib_roi_x, "0.99"),
+            (screen.calib_roi_y, "0.99"),
+            (screen.calib_roi_w, "0.01"),
+            (screen.calib_roi_h, "0.01"),
+        ):
+            entry.delete(0, "end")
+            entry.insert(0, value)
+
+        screen._refresh_calibration_preview()
+        self.assertIn("terlalu kecil", screen.calibration_preview_info.get().lower())
+
+        with self.assertRaisesRegex(ValueError, "terlalu kecil"):
+            screen._calibration_roi()
+        screen.destroy()
+
     def test_scrollable_frame_dispatches_to_nested_body(self) -> None:
         container = ttk.Frame(self.root, width=240, height=140)
         container.pack_propagate(False)

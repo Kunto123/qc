@@ -13,7 +13,7 @@ import customtkinter as ctk
 import cv2
 import numpy as np
 
-from backend.app.services.calibration import CalibrationService
+from backend.app.services.calibration import CalibrationService, MIN_CALIBRATION_PROFILE_PIXELS
 from backend.app.core.model_catalog import list_base_models as catalog_list_base_models
 from client_tk.app.api_client import ApiClient
 from client_tk.app.components.async_bridge import run_async
@@ -987,8 +987,15 @@ class EngineerScreen(ctk.CTkFrame):
         self._grid_entry(control, 2, 2, "ROI y", self.calib_roi_y)
         self._grid_entry(control, 3, 0, "ROI w", self.calib_roi_w)
         self._grid_entry(control, 3, 2, "ROI h", self.calib_roi_h)
+        ttk.Label(
+            control,
+            text="ROI pakai rasio 0..1. Gunakan x+w<=1 dan y+h<=1. Kosongkan semua field untuk full image.",
+            foreground="#475569",
+            wraplength=420,
+            justify="left",
+        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
         button_bar = ttk.Frame(control)
-        button_bar.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        button_bar.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         ttk.Button(button_bar, text="Compute", command=self.compute_profile).pack(side="left")
         ttk.Button(button_bar, text="Save Profile", command=self.save_profile).pack(side="left", padx=6)
 
@@ -3159,7 +3166,7 @@ class EngineerScreen(ctk.CTkFrame):
                 return
             self._refresh_calibration_preview()
 
-    def _calibration_roi(self) -> dict | None:
+    def _calibration_roi_preview_payload(self) -> tuple[dict | None, str | None]:
         values = {
             "x": self.calib_roi_x.get().strip(),
             "y": self.calib_roi_y.get().strip(),
@@ -3167,35 +3174,63 @@ class EngineerScreen(ctk.CTkFrame):
             "h": self.calib_roi_h.get().strip(),
         }
         if not any(values.values()):
-            return None
-        try:
-            return {key: float(value) for key, value in values.items() if value}
-        except ValueError as exc:
-            raise ValueError("Calibration ROI harus numerik.") from exc
+            return None, None
 
-    def _calibration_roi_preview_payload(self) -> dict | None:
-        values = {
-            "x": self.calib_roi_x.get().strip(),
-            "y": self.calib_roi_y.get().strip(),
-            "w": self.calib_roi_w.get().strip(),
-            "h": self.calib_roi_h.get().strip(),
-        }
-        if not any(values.values()):
-            return None
+        missing = [key for key, raw in values.items() if not raw]
+        if missing:
+            missing_text = ", ".join(missing)
+            return None, f"Field ROI belum lengkap ({missing_text}). Isi x/y/w/h semua atau kosongkan semuanya."
+
         parsed: dict[str, float] = {}
         for key, raw in values.items():
-            if not raw:
-                return None
             try:
-                value = float(raw)
+                parsed[key] = float(raw)
             except ValueError:
-                return None
-            if key in {"x", "y"} and not 0.0 <= value <= 1.0:
-                return None
-            if key in {"w", "h"} and not 0.0 < value <= 1.0:
-                return None
-            parsed[key] = value
-        return parsed
+                return None, "Calibration ROI harus numerik."
+
+        x = parsed["x"]
+        y = parsed["y"]
+        w = parsed["w"]
+        h = parsed["h"]
+        if not 0.0 <= x < 1.0:
+            return None, "ROI x harus di rentang [0, 1)."
+        if not 0.0 <= y < 1.0:
+            return None, "ROI y harus di rentang [0, 1)."
+        if not 0.0 < w <= 1.0:
+            return None, "ROI w harus di rentang (0, 1]."
+        if not 0.0 < h <= 1.0:
+            return None, "ROI h harus di rentang (0, 1]."
+        if x + w > 1.0:
+            return None, "ROI tidak valid: x + w harus <= 1."
+        if y + h > 1.0:
+            return None, "ROI tidak valid: y + h harus <= 1."
+
+        return parsed, None
+
+    def _calibration_roi_pixel_count(self, roi: dict) -> int:
+        if self.calibration_image is None:
+            return 0
+        height, width = self.calibration_image.shape[:2]
+        x = max(0, min(width - 1, int(float(roi.get("x", 0.0)) * width)))
+        y = max(0, min(height - 1, int(float(roi.get("y", 0.0)) * height)))
+        roi_w = max(1, int(float(roi.get("w", 1.0)) * width))
+        roi_h = max(1, int(float(roi.get("h", 1.0)) * height))
+        x2 = min(width, x + roi_w)
+        y2 = min(height, y + roi_h)
+        return max(0, int(x2 - x)) * max(0, int(y2 - y))
+
+    def _calibration_roi(self) -> dict | None:
+        roi, error = self._calibration_roi_preview_payload()
+        if error:
+            raise ValueError(error)
+        if roi:
+            pixel_count = self._calibration_roi_pixel_count(roi)
+            if pixel_count < MIN_CALIBRATION_PROFILE_PIXELS:
+                raise ValueError(
+                    "Calibration ROI terlalu kecil. "
+                    f"Minimum {MIN_CALIBRATION_PROFILE_PIXELS} piksel, saat ini {pixel_count}."
+                )
+        return roi
 
     def _on_calibration_roi_changed(self, _event=None) -> None:
         self.after_idle(self._refresh_calibration_preview)
@@ -3209,7 +3244,13 @@ class EngineerScreen(ctk.CTkFrame):
 
         overlay = self.calibration_image.copy()
         height, width = overlay.shape[:2]
-        roi = self._calibration_roi_preview_payload()
+        roi, roi_error = self._calibration_roi_preview_payload()
+        if roi_error:
+            self.calibration_source_preview.update_bgr(overlay)
+            self.calibration_crop_preview.reset()
+            self.calibration_preview_info.set(roi_error)
+            return
+
         if not roi:
             self.calibration_source_preview.update_bgr(overlay)
             self.calibration_crop_preview.reset()
@@ -3245,6 +3286,13 @@ class EngineerScreen(ctk.CTkFrame):
             return
 
         self.calibration_crop_preview.update_bgr(cropped)
+        pixel_count = int(cropped.shape[1] * cropped.shape[0])
+        if pixel_count < MIN_CALIBRATION_PROFILE_PIXELS:
+            self.calibration_preview_info.set(
+                f"Preview memakai ROI yang sama dengan request backend. Source {width}x{height} -> crop {cropped.shape[1]}x{cropped.shape[0]} "
+                f"({pixel_count} px). ROI terlalu kecil untuk compute (minimum {MIN_CALIBRATION_PROFILE_PIXELS} px)."
+            )
+            return
         self.calibration_preview_info.set(
             f"Preview memakai ROI yang sama dengan request backend. Source {width}x{height} -> crop {cropped.shape[1]}x{cropped.shape[0]}."
         )
