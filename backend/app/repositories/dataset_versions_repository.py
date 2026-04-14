@@ -205,7 +205,10 @@ class DatasetVersionRepository(JsonRepository):
             seed=f"{dataset_id}:{version_number}:{version_id}",
         )
 
-        total_image_count = source_stats["image_count"] + augmented_image_count
+        snapshot_stats = self._snapshot_annotation_stats(
+            source_images_dir=source_images_dir,
+            source_labels_dir=source_labels_dir,
+        )
 
         now = datetime.now(UTC).isoformat()
         record = {
@@ -218,10 +221,10 @@ class DatasetVersionRepository(JsonRepository):
             "status": "ready" if export_stats["class_names"] else "draft",
             "ready_for_training": bool(export_stats["class_names"]),
             "split_ratios": split_ratios,
-            "image_count": total_image_count,
-            "label_count": source_stats["label_count"],
-            "annotated_image_count": source_stats["annotated_image_count"],
-            "annotation_coverage": source_stats["annotation_coverage"],
+            "image_count": snapshot_stats["image_count"],
+            "label_count": snapshot_stats["label_count"],
+            "annotated_image_count": snapshot_stats["annotated_image_count"],
+            "annotation_coverage": snapshot_stats["annotation_coverage"],
             "class_names": export_stats["class_names"],
             "skipped_label_count": export_stats["skipped_label_count"],
             "split_counts": export_stats["split_counts"],
@@ -395,6 +398,42 @@ class DatasetVersionRepository(JsonRepository):
                 augmented_count += 1
 
         return {"augmented_image_count": augmented_count}
+
+    def _snapshot_annotation_stats(self, *, source_images_dir: Path, source_labels_dir: Path) -> dict[str, Any]:
+        source_images = [
+            item
+            for item in sorted(source_images_dir.iterdir())
+            if item.is_file() and item.suffix.lower() in _IMAGE_EXTS
+        ]
+        image_count = len(source_images)
+        label_count = 0
+        annotated_image_count = 0
+
+        for image_path in source_images:
+            annotation_path = source_labels_dir / f"{image_path.stem}.json"
+            if not annotation_path.exists():
+                continue
+
+            try:
+                annotation_payload = json.loads(annotation_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+
+            labels = annotation_payload.get("labels") if isinstance(annotation_payload, dict) else []
+            if not isinstance(labels, list):
+                labels = []
+
+            label_count += len(labels)
+            if labels:
+                annotated_image_count += 1
+
+        annotation_coverage = round(annotated_image_count / image_count, 4) if image_count else 0.0
+        return {
+            "image_count": image_count,
+            "label_count": label_count,
+            "annotated_image_count": annotated_image_count,
+            "annotation_coverage": annotation_coverage,
+        }
 
     def _build_export_from_snapshot(
         self,

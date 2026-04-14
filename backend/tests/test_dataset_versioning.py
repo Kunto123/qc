@@ -129,16 +129,17 @@ class AugmentIntegrationVersioningTest(unittest.TestCase):
             [{"type": "bbox", "class": "obj", "bbox": {"x": 10, "y": 10, "w": 20, "h": 20}}],
         )
 
-    def _make_augment_job_stub(self, multiplier: int = 2) -> dict:
+    def _make_augment_job_stub(self, multiplier: int = 2, *, source_image: str = "img1.jpg") -> dict:
         """Create a synthetic completed augment job with photometric output files."""
         from backend.app.repositories.datasets_repository import DatasetsRepository as _DR
         ds_dir = _DR().dataset_dir(self.dataset["id"])
         job_id = "augtest001"
         output_dir = ds_dir / "augmented" / job_id
         output_dir.mkdir(parents=True, exist_ok=True)
-        # Write augmented copies of img1.jpg: img1_aug001.jpg, img1_aug002.jpg
+        source_stem = Path(source_image).stem
+        # Write augmented copies like img1_aug001.jpg, img1_aug002.jpg.
         for i in range(1, multiplier + 1):
-            shutil.copy2(ds_dir / "images" / "img1.jpg", output_dir / f"img1_aug{i:03d}.jpg")
+            shutil.copy2(ds_dir / "images" / source_image, output_dir / f"{source_stem}_aug{i:03d}.jpg")
         return {
             "id": job_id,
             "dataset_id": self.dataset["id"],
@@ -153,9 +154,13 @@ class AugmentIntegrationVersioningTest(unittest.TestCase):
         """create_version with no augment_jobs behaves identically to before."""
         version = self.versions_repo.create_version(self.dataset["id"])
         self.assertEqual(version["image_count"], 2)
+        self.assertEqual(version["label_count"], 1)
+        self.assertEqual(version["annotated_image_count"], 1)
+        self.assertEqual(version["annotation_coverage"], 0.5)
         self.assertEqual(version["selected_augment_job_ids"], [])
         self.assertEqual(version["augmented_image_count_in_version"], 0)
         self.assertEqual(version["total_source_image_count"], 2)
+        self.assertIn("1/2 ann", version["display_label"])
 
     def test_create_version_with_augment_increases_image_count(self) -> None:
         """image_count in version record = original + augmented when augment_jobs are provided."""
@@ -163,9 +168,23 @@ class AugmentIntegrationVersioningTest(unittest.TestCase):
         version = self.versions_repo.create_version(self.dataset["id"], augment_jobs=[job])
         # 2 original + 2 augmented copies of img1
         self.assertEqual(version["image_count"], 4)
+        self.assertEqual(version["label_count"], 3)
+        self.assertEqual(version["annotated_image_count"], 3)
+        self.assertEqual(version["annotation_coverage"], 0.75)
         self.assertEqual(version["augmented_image_count_in_version"], 2)
         self.assertEqual(version["total_source_image_count"], 2)
         self.assertIn(job["id"], version["selected_augment_job_ids"])
+        self.assertIn("3/4 ann", version["display_label"])
+
+    def test_create_version_augmenting_unannotated_image_keeps_annotation_counts(self) -> None:
+        """Augmenting an unannotated source image must not inflate annotated-image metrics."""
+        job = self._make_augment_job_stub(multiplier=1, source_image="img2.jpg")
+        version = self.versions_repo.create_version(self.dataset["id"], augment_jobs=[job])
+        self.assertEqual(version["image_count"], 3)
+        self.assertEqual(version["label_count"], 1)
+        self.assertEqual(version["annotated_image_count"], 1)
+        self.assertEqual(version["annotation_coverage"], round(1 / 3, 4))
+        self.assertIn("1/3 ann", version["display_label"])
 
     def test_create_version_augment_export_includes_augmented_images(self) -> None:
         """The YOLO export must contain original + augmented images in its splits."""
