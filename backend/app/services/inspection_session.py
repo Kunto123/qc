@@ -35,6 +35,12 @@ COMMIT_COOLDOWN_MS = 800
 PRESENCE_MIN_AREA_RATIO = 0.01
 PRESENCE_MIN_STD = 8.0
 PRESENCE_MIN_MEAN = 6.0
+ROI_CLASS_VALIDATOR_MODES = {
+    "ml_roi_class",
+    "ml_roi_classification",
+    "roi_class",
+    "roi_partial",
+}
 
 
 def _decode_image(image_b64: str):
@@ -111,6 +117,9 @@ class InspectionSessionService:
     def update_roi(self, session_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         state = self._require_session(session_id)
         allowed = ("x", "y", "w", "h", "width", "height")
+        before_part_ready_signature = self._roi_signature(
+            self._merged_roi_payload(state.template.part_ready_roi, state.part_ready_roi_override)
+        )
 
         legacy_updates = {key: updates[key] for key in allowed if key in updates}
         legacy_nested = updates.get("roi") if isinstance(updates.get("roi"), dict) else None
@@ -131,6 +140,12 @@ class InspectionSessionService:
             state.sticker_roi_override.update(
                 {key: sticker_updates[key] for key in allowed if key in sticker_updates}
             )
+
+        after_part_ready_signature = self._roi_signature(
+            self._merged_roi_payload(state.template.part_ready_roi, state.part_ready_roi_override)
+        )
+        if after_part_ready_signature != before_part_ready_signature:
+            state.part_ready_ratio_history.clear()
         return self._session_payload(state)
 
     def get_latest_preview(self) -> dict[str, Any] | None:
@@ -191,9 +206,53 @@ class InspectionSessionService:
         )
         timings["sticker_roi_crop_ms"] = _elapsed_ms(roi_crop_started)
 
+        # ------------------------------------------------------------------
+        # Settle-time debounce
+        # Hold inference and commit for settle_ms after part_ready first
+        # transitions to True.  settle_ms = 0 restores legacy behaviour.
+        # ------------------------------------------------------------------
+        settle_ms = int(getattr(state.template.sticker, "part_ready_settle_ms", 0) or 0)
+        _settle_now = datetime.now(UTC)
+        _raw_part_ready = part_ready.get("part_ready", False)
+        if _raw_part_ready and presence.get("present", False):
+            if state.part_ready_settle_started_at is None:
+                state.part_ready_settle_started_at = _settle_now
+            _elapsed_settle_ms = (
+                (_settle_now - state.part_ready_settle_started_at).total_seconds() * 1000.0
+            )
+            part_ready_settled = settle_ms == 0 or _elapsed_settle_ms >= settle_ms
+            settle_remaining_ms = (
+                max(0.0, float(settle_ms) - _elapsed_settle_ms)
+                if not part_ready_settled
+                else 0.0
+            )
+        else:
+            state.part_ready_settle_started_at = None
+            part_ready_settled = False
+            settle_remaining_ms = 0.0
+
+        # Augment part_ready dict in-place with settle observability fields.
+        part_ready["part_ready_settled"] = part_ready_settled
+        part_ready["part_ready_settle_ms"] = settle_ms
+        part_ready["part_ready_settle_remaining_ms"] = round(settle_remaining_ms, 1)
+
+        # effective_part_ready is used for all downstream logic (validation,
+        # event state).  During settle it looks like part_not_ready to avoid
+        # premature commits, while the original part_ready dict is reported.
+        _effective_pr_ready = _raw_part_ready and part_ready_settled
+        if _raw_part_ready and not part_ready_settled:
+            effective_part_ready: dict[str, Any] = {
+                **part_ready,
+                "part_ready": False,
+                "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
+                "status": "settling",
+            }
+        else:
+            effective_part_ready = part_ready
+
         detections: list[dict[str, Any]] = []
         inference_ms = 0.0
-        if part_ready.get("part_ready", False):
+        if _effective_pr_ready:
             inference_started = time.perf_counter()
             inference_payload = self._run_sticker_inference(sticker_frame, state)
             inference_ms = _elapsed_ms(inference_started)
@@ -217,10 +276,15 @@ class InspectionSessionService:
                 }
             )
         else:
+            _skip_reason = (
+                "part_ready_settling"
+                if _raw_part_ready and not part_ready_settled
+                else (part_ready.get("reject_reason_code") or "part_not_ready")
+            )
             sticker_detection = self._build_sticker_detection_payload(
                 [],
                 skipped=True,
-                reason=part_ready.get("reject_reason_code") or "part_not_ready",
+                reason=_skip_reason,
                 backend="skipped",
                 model_path=state.template.vision.model_path,
                 meta_path=state.template.vision.model_meta_path,
@@ -234,7 +298,7 @@ class InspectionSessionService:
             state=state,
             detections=detections,
             detection_payload=sticker_detection,
-            part_ready_payload=part_ready,
+            part_ready_payload=effective_part_ready,
             username=username,
             user_id=user_id,
         )
@@ -249,7 +313,7 @@ class InspectionSessionService:
         event_state, event_id, count_committed = self._advance_event_state(
             state=state,
             validation=validation,
-            part_ready_payload=part_ready,
+            part_ready_payload=effective_part_ready,
             presence=presence,
             now=datetime.now(UTC),
         )
@@ -307,7 +371,7 @@ class InspectionSessionService:
 
         timings_payload = {
             **timings,
-            "inference_skipped": not part_ready.get("part_ready", False),
+            "inference_skipped": not _effective_pr_ready,
             "compact_response": compact_response,
             "total_ms": _elapsed_ms(total_started),
         }
@@ -376,6 +440,15 @@ class InspectionSessionService:
             "sticker_roi": sticker_roi,
             "roi": sticker_roi,
         }
+
+    @staticmethod
+    def _roi_signature(roi_payload: dict[str, Any]) -> tuple[float, float, float, float]:
+        return (
+            round(float(roi_payload.get("x", 0.0) or 0.0), 6),
+            round(float(roi_payload.get("y", 0.0) or 0.0), 6),
+            round(float(roi_payload.get("w", 1.0) or 1.0), 6),
+            round(float(roi_payload.get("h", 1.0) or 1.0), 6),
+        )
 
     def _counter_payload(self, state: SessionState) -> dict[str, Any]:
         breakdown = _empty_reject_breakdown()
@@ -609,6 +682,8 @@ class InspectionSessionService:
         user_id: int | None,
     ) -> dict[str, Any]:
         sticker = state.template.sticker
+        validator_mode = str(getattr(sticker, "validator_mode", "ml_detection") or "ml_detection").strip().lower()
+        position_gate_enabled = validator_mode not in ROI_CLASS_VALIDATOR_MODES
         line_id = state.line_id or sticker.line
         thresholds = {
             "min_roi_confidence": float(sticker.min_roi_confidence or 0.0),
@@ -617,6 +692,8 @@ class InspectionSessionService:
             ),
             "max_offset_x": None if sticker.max_offset_x is None else float(sticker.max_offset_x),
             "max_offset_y": None if sticker.max_offset_y is None else float(sticker.max_offset_y),
+            "validator_mode": validator_mode,
+            "position_gate_enabled": position_gate_enabled,
         }
         detection_context = {
             "backend": detection_payload.get("backend"),
@@ -761,9 +838,9 @@ class InspectionSessionService:
             reject_reason = RejectReasonCode.WRONG_TYPE.value
         elif thresholds["min_class_confidence"] is not None and float(selected_candidate.get("class_confidence") or 0.0) < float(thresholds["min_class_confidence"]):
             reject_reason = RejectReasonCode.LOW_CLASS_CONF.value
-        elif thresholds["max_offset_x"] is not None and abs(offset_x) > float(thresholds["max_offset_x"]):
+        elif position_gate_enabled and thresholds["max_offset_x"] is not None and abs(offset_x) > float(thresholds["max_offset_x"]):
             reject_reason = RejectReasonCode.OUT_OF_POSITION.value
-        elif thresholds["max_offset_y"] is not None and abs(offset_y) > float(thresholds["max_offset_y"]):
+        elif position_gate_enabled and thresholds["max_offset_y"] is not None and abs(offset_y) > float(thresholds["max_offset_y"]):
             reject_reason = RejectReasonCode.OUT_OF_POSITION.value
         decision = DecisionCode.ACCEPT.value if reject_reason is None else DecisionCode.REJECT.value
         status = "accepted" if reject_reason is None else reject_reason.lower()

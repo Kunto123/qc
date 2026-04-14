@@ -60,6 +60,9 @@ class StickerRule:
     expected_center_x: float | None = None
     expected_center_y: float | None = None
     commit_stable_frames: int = 1
+    # Settle-time debounce: inference and commit are held for this many ms after
+    # part_ready first becomes True.  0 = legacy behaviour (immediate).
+    part_ready_settle_ms: int = 0
 
 
 @dataclass(slots=True)

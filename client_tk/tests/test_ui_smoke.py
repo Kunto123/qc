@@ -376,6 +376,33 @@ class UiSmokeTest(unittest.TestCase):
         self.assertIn("UI render warning", screen.info_var.get())
         screen.destroy()
 
+    def test_operator_poll_ui_uses_second_frame_fetch_for_local_preview(self) -> None:
+        screen = OperatorScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        frame = np.zeros((180, 320, 3), dtype=np.uint8)
+        payload = {
+            "event_state": "idle",
+            "part_ready": {"part_ready": False, "match_ratio": 0.0},
+            "validation": {"decision": "REJECT", "detected_class": None},
+            "sticker_detection": {"backend": "skipped", "raw_detection_count": 0},
+            "db_write": {"written": False, "reason": "not_committed"},
+            "recent_events": [],
+            "response_mode": "compact",
+            "overlay_image_b64": None,
+            "part_ready_preview_image_b64": None,
+        }
+
+        with screen._lock:
+            screen._latest_payload = payload
+            screen._latest_error = None
+
+        with mock.patch.object(screen.capture, "get_latest_frame", side_effect=[None, frame, frame, frame]):
+            screen._poll_ui()
+
+        self.assertIsNotNone(screen.part_ready_preview._photo)
+        self.assertIsNotNone(screen.main_view._photo)
+        screen.destroy()
+
     def test_admin_screen_initializes(self) -> None:
         screen = AdminScreen(self.root, self.api, self.state)
         screen.update_idletasks()

@@ -980,6 +980,7 @@ class OperatorScreen(ctk.CTkFrame):
                 self._sync_recent_events(payload)
                 self._refresh_context_summary()
                 self._update_status_badges(payload)
+                display_frame = frame if frame is not None else self.capture.get_latest_frame()
                 timings = payload.get("timings") or {}
                 total_ms = timings.get("total_ms")
                 inference_ms = timings.get("inference_ms")
@@ -990,15 +991,15 @@ class OperatorScreen(ctk.CTkFrame):
                         timing_suffix += f" infer={float(inference_ms):.1f}ms"
                 if payload.get("part_ready_preview_image_b64"):
                     self.part_ready_preview.update_b64(payload.get("part_ready_preview_image_b64"))
-                elif frame is not None:
-                    local_part_ready = self._crop_local_roi(frame, self._read_roi_payload("part_ready"))
+                elif display_frame is not None:
+                    local_part_ready = self._crop_local_roi(display_frame, self._read_roi_payload("part_ready"))
                     if local_part_ready is not None:
                         self.part_ready_preview.update_bgr(local_part_ready)
                 if payload.get("overlay_image_b64"):
                     self.main_view.update_b64(payload.get("overlay_image_b64"))
                     self.display_source.set("Right View: Server ML Overlay")
-                elif frame is not None:
-                    local_scene = self._build_full_frame_with_roi(frame, "sticker", label="Sticker ROI", color=(255, 214, 10))
+                elif display_frame is not None:
+                    local_scene = self._build_full_frame_with_roi(display_frame, "sticker", label="Sticker ROI", color=(255, 214, 10))
                     if local_scene is not None:
                         self.main_view.update_bgr(local_scene)
                         self.display_source.set("Right View: Live Camera + Sticker ROI")

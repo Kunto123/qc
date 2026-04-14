@@ -705,6 +705,154 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(payload["validation"]["validation_details"]["candidate_source"], "expected_class")
         self.assertEqual(payload["validation"]["validation_details"]["status"], "out_of_position")
 
+    def test_04b_roi_class_validator_mode_ignores_position_gate(self) -> None:
+        from backend.app.core.container import inspection_session_service
+
+        template_response = self.client.post(
+            "/templates",
+            json={
+                "name": "ROI Class Validator",
+                "description": "Opt-in validator mode for ROI partial detection.",
+                "is_active": True,
+                "camera": {"camera_index": 0, "width": 640, "height": 480, "fps": 15},
+                "part_ready_roi": {"x": 0.09, "y": 0.12, "w": 0.19, "h": 0.22},
+                "sticker_roi": {"x": 0.35, "y": 0.3, "w": 0.3, "h": 0.32},
+                "vision": {"model_path": "models/dummy.pt", "classes": ["sample-sticker"]},
+                "part_ready": {
+                    "enabled": False,
+                    "color_profile_id": None,
+                    "colorspace": "LAB",
+                    "min_match_ratio": 0.7,
+                },
+                "sticker": {
+                    "part_name": "Sample Part",
+                    "expected_class": "sample-sticker",
+                    "line": "LINE-B",
+                    "enabled": True,
+                    "validator_mode": "ml_roi_class",
+                    "min_roi_confidence": 0.1,
+                    "min_class_confidence": 0.1,
+                    "max_offset_x": 5,
+                    "max_offset_y": 5,
+                    "expected_center_x": 0.5,
+                    "expected_center_y": 0.5,
+                },
+                "persistence": {"write_to_db": True},
+                "metadata": {"scenario": "roi-class-validator"},
+            },
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(template_response.status_code, 201, template_response.get_json())
+        version_id = int(template_response.get_json()["version_id"])
+
+        session_response = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "validator-roi-class",
+                "camera_index": 0,
+                "template_version_id": version_id,
+                "line_id": "LINE-B",
+                "station_id": "ST-04B",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_response.status_code, 201, session_response.get_json())
+        session_payload = session_response.get_json()
+
+        original_predict = inspection_session_service._sticker_inference.predict
+
+        def fake_predict(*_args, **_kwargs):
+            return {
+                "backend": "patched",
+                "model_path": "patched.pt",
+                "meta_path": "patched.meta.json",
+                "class_names": ["sample-sticker"],
+                "fallback_reason": None,
+                "detections": [
+                    {
+                        "label": "sample-sticker",
+                        "confidence": 0.92,
+                        "class_confidence": 0.92,
+                        "position": {"x1": 160.0, "y1": 8.0, "x2": 230.0, "y2": 86.0},
+                    }
+                ],
+            }
+
+        inspection_session_service._sticker_inference.predict = fake_predict
+        try:
+            frame_response = self.client.post(
+                f"/inspection/sessions/{session_payload['session_id']}/frame",
+                json={"image_b64": _presence_image_b64()},
+                headers=_headers(self.operator_token),
+            )
+        finally:
+            inspection_session_service._sticker_inference.predict = original_predict
+
+        self.assertEqual(frame_response.status_code, 200, frame_response.get_json())
+        payload = frame_response.get_json()
+        self.assertEqual(payload["validation"]["decision"], "ACCEPT")
+        self.assertIsNone(payload["validation"]["reject_reason_code"])
+        details = payload["validation"].get("validation_details") or {}
+        selected = details.get("selected_candidate") or {}
+        thresholds = details.get("thresholds") or {}
+        self.assertEqual(str(thresholds.get("validator_mode") or ""), "ml_roi_class")
+        self.assertFalse(bool(thresholds.get("position_gate_enabled")))
+        self.assertGreater(abs(float((selected.get("offset") or {}).get("x") or 0.0)), 5.0)
+
+    def test_04c_roi_update_sticker_only_keeps_part_ready_history(self) -> None:
+        from backend.app.core.container import inspection_session_service
+
+        session_response = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "roi-history-sticker-only",
+                "camera_index": 0,
+                "template_version_id": 1,
+                "line_id": "LINE-A",
+                "station_id": "ST-04C",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_response.status_code, 201, session_response.get_json())
+        session_payload = session_response.get_json()
+        state = inspection_session_service._require_session(str(session_payload["session_id"]))
+        state.part_ready_ratio_history[:] = [0.13, 0.44, 0.71]
+
+        roi_response = self.client.post(
+            f"/inspection/sessions/{session_payload['session_id']}/roi",
+            json={"sticker_roi": {"x": 0.19}},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(roi_response.status_code, 200, roi_response.get_json())
+        self.assertEqual(state.part_ready_ratio_history, [0.13, 0.44, 0.71])
+
+    def test_04d_roi_update_part_ready_clears_history(self) -> None:
+        from backend.app.core.container import inspection_session_service
+
+        session_response = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "roi-history-part-ready",
+                "camera_index": 0,
+                "template_version_id": 1,
+                "line_id": "LINE-A",
+                "station_id": "ST-04D",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_response.status_code, 201, session_response.get_json())
+        session_payload = session_response.get_json()
+        state = inspection_session_service._require_session(str(session_payload["session_id"]))
+        state.part_ready_ratio_history[:] = [0.13, 0.44, 0.71]
+
+        roi_response = self.client.post(
+            f"/inspection/sessions/{session_payload['session_id']}/roi",
+            json={"part_ready_roi": {"x": 0.21}},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(roi_response.status_code, 200, roi_response.get_json())
+        self.assertEqual(state.part_ready_ratio_history, [])
+
     def test_05_engineer_workstation_endpoints(self) -> None:
         dataset_name = f"dataset-{uuid4().hex[:8]}"
         dataset_response = self.client.post(
@@ -2170,4 +2318,290 @@ class ApiSmokeTest(unittest.TestCase):
             "not completed" in error_msg or "dataset" in error_msg,
             f"Unexpected error: {error_msg}",
         )
+
+    # ------------------------------------------------------------------
+    # Settle-time debounce regression tests (part_ready_settle_ms)
+    # ------------------------------------------------------------------
+
+    def _create_settle_template(self, settle_ms: int) -> dict:
+        """Helper: create a minimal template with a given settle_ms value."""
+        response = self.client.post(
+            "/templates",
+            json={
+                "name": f"Settle Test {settle_ms}ms",
+                "description": "Settle debounce regression fixture",
+                "is_active": True,
+                "camera": {"camera_index": 0, "width": 640, "height": 480, "fps": 15},
+                "part_ready_roi": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+                "sticker_roi": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+                "vision": {"model_path": "models/dummy.pt", "classes": ["K0W-HB0"]},
+                "part_ready": {
+                    "enabled": False,
+                    "color_profile_id": None,
+                    "colorspace": "LAB",
+                },
+                "sticker": {
+                    "part_name": "Settle Part",
+                    "expected_class": "K0W-HB0",
+                    "line": "LINE-SETTLE",
+                    "enabled": True,
+                    "validator_mode": "ml_detection",
+                    "min_roi_confidence": 0.0,
+                    "commit_stable_frames": 1,
+                    "part_ready_settle_ms": settle_ms,
+                },
+                "persistence": {"write_to_db": False},
+                "metadata": {"scenario": "settle-regression"},
+            },
+            headers=_headers(self.engineer_token),
+        )
+        assert response.status_code == 201, response.get_json()
+        return response.get_json()
+
+    def test_13a_settle_skips_inference_on_first_ready_frame(self) -> None:
+        """First frame while part_ready=True must be skipped when settle_ms is large."""
+        template = self._create_settle_template(settle_ms=5000)
+        session_resp = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "settle-skip",
+                "camera_index": 0,
+                "template_version_id": template["version_id"],
+                "line_id": "LINE-SETTLE",
+                "station_id": "ST-SETTLE-A",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_resp.status_code, 201, session_resp.get_json())
+        sid = session_resp.get_json()["session_id"]
+
+        frame_resp = self.client.post(
+            f"/inspection/sessions/{sid}/frame",
+            json={"image_b64": _sample_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(frame_resp.status_code, 200, frame_resp.get_json())
+        payload = frame_resp.get_json()
+
+        pr = payload["part_ready"]
+        # Raw part_ready is True (gate disabled) but not yet settled
+        self.assertTrue(pr["part_ready"], "part_ready raw should be True (gate disabled)")
+        self.assertFalse(pr["part_ready_settled"], "Should not be settled on first frame")
+        self.assertEqual(pr["part_ready_settle_ms"], 5000)
+        self.assertGreater(pr["part_ready_settle_remaining_ms"], 0)
+
+        # Inference must have been skipped
+        sd = payload["sticker_detection"]
+        self.assertEqual(sd["status"], "skipped")
+        self.assertEqual(sd["reason"], "part_ready_settling")
+
+        # Nothing should be committed
+        self.assertFalse(payload["count_committed"])
+        self.assertEqual(payload["counters"]["session_total"], 0)
+        self.assertEqual(payload["counters"]["session_accept"], 0)
+        self.assertEqual(payload["counters"]["session_reject"], 0)
+
+    def test_13b_settle_zero_bypasses_debounce(self) -> None:
+        """settle_ms=0 must behave identically to the legacy flow (immediate inference)."""
+        template = self._create_settle_template(settle_ms=0)
+        session_resp = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "settle-zero",
+                "camera_index": 0,
+                "template_version_id": template["version_id"],
+                "line_id": "LINE-SETTLE",
+                "station_id": "ST-SETTLE-B",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_resp.status_code, 201, session_resp.get_json())
+        sid = session_resp.get_json()["session_id"]
+
+        frame_resp = self.client.post(
+            f"/inspection/sessions/{sid}/frame",
+            json={"image_b64": _sample_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(frame_resp.status_code, 200, frame_resp.get_json())
+        payload = frame_resp.get_json()
+
+        pr = payload["part_ready"]
+        self.assertTrue(pr["part_ready"])
+        self.assertTrue(pr["part_ready_settled"], "settle_ms=0 must be settled immediately")
+        self.assertEqual(pr["part_ready_settle_remaining_ms"], 0)
+
+        # Inference must have run (not skipped)
+        sd = payload["sticker_detection"]
+        self.assertNotEqual(sd["reason"], "part_ready_settling")
+
+        # Decision committed
+        self.assertTrue(payload["count_committed"])
+        self.assertEqual(payload["counters"]["session_total"], 1)
+
+    def test_13c_settle_elapsed_allows_inference(self) -> None:
+        """After settle_ms has elapsed, inference must run normally."""
+        template = self._create_settle_template(settle_ms=80)
+        session_resp = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "settle-elapsed",
+                "camera_index": 0,
+                "template_version_id": template["version_id"],
+                "line_id": "LINE-SETTLE",
+                "station_id": "ST-SETTLE-C",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_resp.status_code, 201, session_resp.get_json())
+        sid = session_resp.get_json()["session_id"]
+
+        # Frame 1: blank → presence absent → settle timer NOT started
+        blank_resp = self.client.post(
+            f"/inspection/sessions/{sid}/frame",
+            json={"image_b64": _blank_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(blank_resp.status_code, 200)
+        self.assertFalse(blank_resp.get_json()["part_ready"]["part_ready_settled"])
+
+        # Frame 2: sample image → settle timer starts (t≈0)
+        first_ready = self.client.post(
+            f"/inspection/sessions/{sid}/frame",
+            json={"image_b64": _sample_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(first_ready.status_code, 200)
+        first_pr = first_ready.get_json()["part_ready"]
+        self.assertTrue(first_pr["part_ready"])
+        # settle_ms=80 — might or might not be settled depending on timing,
+        # so we only check that the settle metadata fields are present.
+        self.assertIn("part_ready_settled", first_pr)
+        self.assertIn("part_ready_settle_remaining_ms", first_pr)
+
+        # Wait for settle period to expire
+        time.sleep(0.12)
+
+        # Frame 3: sample image → settle timer expired → inference must run
+        settled_resp = self.client.post(
+            f"/inspection/sessions/{sid}/frame",
+            json={"image_b64": _sample_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(settled_resp.status_code, 200, settled_resp.get_json())
+        settled_payload = settled_resp.get_json()
+        settled_pr = settled_payload["part_ready"]
+
+        self.assertTrue(settled_pr["part_ready_settled"], "Settle period must be elapsed")
+        self.assertEqual(settled_pr["part_ready_settle_remaining_ms"], 0)
+        self.assertNotEqual(settled_payload["sticker_detection"]["reason"], "part_ready_settling")
+
+    def test_13d_settle_reset_on_blank_frame(self) -> None:
+        """Settle timer must reset when a blank (presence-absent) frame arrives."""
+        template = self._create_settle_template(settle_ms=5000)
+        session_resp = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "settle-reset",
+                "camera_index": 0,
+                "template_version_id": template["version_id"],
+                "line_id": "LINE-SETTLE",
+                "station_id": "ST-SETTLE-D",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_resp.status_code, 201, session_resp.get_json())
+        sid = session_resp.get_json()["session_id"]
+
+        # Start settle timer with a ready frame
+        r1 = self.client.post(
+            f"/inspection/sessions/{sid}/frame",
+            json={"image_b64": _sample_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(r1.status_code, 200)
+        self.assertFalse(r1.get_json()["part_ready"]["part_ready_settled"])
+
+        # Blank frame resets presence and settle timer
+        r2 = self.client.post(
+            f"/inspection/sessions/{sid}/frame",
+            json={"image_b64": _blank_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(r2.status_code, 200)
+        # After blank, settle should not be True
+        self.assertFalse(r2.get_json()["part_ready"]["part_ready_settled"])
+
+        # Next ready frame after blank → settle starts fresh (still not settled)
+        r3 = self.client.post(
+            f"/inspection/sessions/{sid}/frame",
+            json={"image_b64": _sample_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(r3.status_code, 200)
+        r3_pr = r3.get_json()["part_ready"]
+        self.assertTrue(r3_pr["part_ready"])
+        self.assertFalse(r3_pr["part_ready_settled"], "Settle must restart after blank frame")
+        self.assertFalse(r3.get_json()["count_committed"])
+
+    def test_13e_policy_counters_unaffected_during_settle(self) -> None:
+        """Counters must not increment while the system is still settling."""
+        template = self._create_settle_template(settle_ms=5000)
+        session_resp = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "settle-counters",
+                "camera_index": 0,
+                "template_version_id": template["version_id"],
+                "line_id": "LINE-SETTLE",
+                "station_id": "ST-SETTLE-E",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_resp.status_code, 201, session_resp.get_json())
+        sid = session_resp.get_json()["session_id"]
+
+        for _ in range(3):
+            r = self.client.post(
+                f"/inspection/sessions/{sid}/frame",
+                json={"image_b64": _sample_image_b64()},
+                headers=_headers(self.operator_token),
+            )
+            self.assertEqual(r.status_code, 200)
+            counters = r.get_json()["counters"]
+            self.assertEqual(counters["session_total"], 0, "session_total must stay 0 during settle")
+            self.assertEqual(counters["session_accept"], 0)
+            self.assertEqual(counters["session_reject"], 0)
+
+    def test_13f_settle_metadata_present_in_response(self) -> None:
+        """settle metadata keys must always appear in part_ready regardless of state."""
+        # Use default template (settle_ms=0 → settled immediately) to verify keys
+        session_resp = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "settle-meta-check",
+                "camera_index": 0,
+                "template_version_id": 1,
+                "line_id": "LINE-META",
+                "station_id": "ST-META",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_resp.status_code, 201, session_resp.get_json())
+        sid = session_resp.get_json()["session_id"]
+
+        frame_resp = self.client.post(
+            f"/inspection/sessions/{sid}/frame",
+            json={"image_b64": _sample_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(frame_resp.status_code, 200, frame_resp.get_json())
+        pr = frame_resp.get_json()["part_ready"]
+        self.assertIn("part_ready_settled", pr)
+        self.assertIn("part_ready_settle_ms", pr)
+        self.assertIn("part_ready_settle_remaining_ms", pr)
+        # Default template has settle_ms=0 → always settled
+        self.assertTrue(pr["part_ready_settled"])
+        self.assertEqual(pr["part_ready_settle_ms"], 0)
+        self.assertEqual(pr["part_ready_settle_remaining_ms"], 0)
 

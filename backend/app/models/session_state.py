@@ -39,3 +39,7 @@ class SessionState:
     last_committed_result: dict[str, Any] | None = None
     part_ready_ratio_history: list[float] = field(default_factory=list)
     last_overlay_b64: str | None = None
+    # Settle-time debounce: timestamp of the first frame where part_ready was True
+    # in the current ready-run.  Reset to None whenever part_ready becomes False or
+    # presence is lost.
+    part_ready_settle_started_at: datetime | None = None
