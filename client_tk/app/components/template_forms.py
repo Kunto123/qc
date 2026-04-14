@@ -217,7 +217,7 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.sticker_expected_center_x_var = tk.StringVar(value="")
         self.sticker_expected_center_y_var = tk.StringVar(value="")
         self.sticker_commit_stable_frames_var = tk.StringVar(value="5")
-        self.sticker_settle_ms_var = tk.StringVar(value="1500")
+        self.sticker_settle_ms_var = tk.StringVar(value="")
         self._api_client_ref = None  # set from outside for "Load from Session"
 
         self.write_to_db_var = tk.BooleanVar(value=True)
@@ -328,7 +328,7 @@ class TemplateEditorForm(ctk.CTkFrame):
         self._entry(sticker_config, 7, 2, "Part Ready Settle (ms)", self.sticker_settle_ms_var)
         ctk.CTkLabel(sticker_config, text="Jumlah frame stabil berurutan sebelum keputusan dikunci (default 5).", text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(
             row=8, column=2, columnspan=2, sticky="w", padx=(0, 8))
-        ctk.CTkLabel(sticker_config, text="Waktu settle part-ready sebelum inference dimulai (ms). 0 = nonaktif. Rekomendasi: 1500.", text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(
+        ctk.CTkLabel(sticker_config, text="Settle (ms): kosong = ikuti env QC_SUITE_PART_READY_SETTLE_MS. 0 = nonaktif.", text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(
             row=8, column=0, columnspan=2, sticky="w", padx=(10, 8))
         ctk.CTkLabel(sticker_config, text="Kosong = auto center (0.5). Gunakan Visual Picker di bawah.", text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(
             row=9, column=0, columnspan=4, sticky="w", pady=(0, 4), padx=10
@@ -709,7 +709,8 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.sticker_expected_center_x_var.set("" if sticker.get("expected_center_x") is None else str(sticker.get("expected_center_x")))
         self.sticker_expected_center_y_var.set("" if sticker.get("expected_center_y") is None else str(sticker.get("expected_center_y")))
         self.sticker_commit_stable_frames_var.set(str(sticker.get("commit_stable_frames") or "5"))
-        self.sticker_settle_ms_var.set(str(sticker.get("part_ready_settle_ms", 1500)))
+        _settle = sticker.get("part_ready_settle_ms")
+        self.sticker_settle_ms_var.set("" if _settle is None else str(_settle))
         self.after_idle(self._sync_picker)
 
         persistence = payload.get("persistence") or {}
@@ -787,7 +788,7 @@ class TemplateEditorForm(ctk.CTkFrame):
                 "expected_center_x": _float_or_none(self.sticker_expected_center_x_var.get()),
                 "expected_center_y": _float_or_none(self.sticker_expected_center_y_var.get()),
                 "commit_stable_frames": _int_or_none(self.sticker_commit_stable_frames_var.get()) or 5,
-                "part_ready_settle_ms": _int_or_none(self.sticker_settle_ms_var.get()) or 0,
+                "part_ready_settle_ms": _int_or_none(self.sticker_settle_ms_var.get()),
             },
             "persistence": {
                 "write_to_db": bool(self.write_to_db_var.get()),
@@ -831,7 +832,7 @@ class TemplateEditorForm(ctk.CTkFrame):
                     "min_class_confidence": None,
                     "max_offset_x": 80,
                     "max_offset_y": 80,
-                    "part_ready_settle_ms": 1500,
+                    "part_ready_settle_ms": None,
                 },
                 "persistence": {"write_to_db": True},
                 "metadata": {},

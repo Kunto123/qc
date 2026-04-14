@@ -10,6 +10,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from backend.app.core.config import AppConfig
 from backend.app.models.session_state import SessionState
 from backend.app.repositories.inspection_results_repository import InspectionResultsRepository
 from backend.app.repositories.profiles_repository import ProfilesRepository
@@ -81,6 +82,7 @@ class InspectionSessionService:
         profiles_repo: ProfilesRepository,
         results_repo: InspectionResultsRepository,
         sticker_inference: StickerInferenceService,
+        app_config: AppConfig | None = None,
     ) -> None:
         self._template_runtime = template_runtime
         self._profiles_repo = profiles_repo
@@ -88,6 +90,12 @@ class InspectionSessionService:
         self._sticker_inference = sticker_inference
         self._sessions: dict[str, SessionState] = {}
         self._lock = threading.RLock()
+        # System-wide settle default: used when a template's part_ready_settle_ms is None.
+        self._default_settle_ms: int = (
+            max(0, int(app_config.part_ready_settle_ms_default))
+            if app_config is not None
+            else 0
+        )
 
     def start_session(
         self,
@@ -210,8 +218,14 @@ class InspectionSessionService:
         # Settle-time debounce
         # Hold inference and commit for settle_ms after part_ready first
         # transitions to True.  settle_ms = 0 restores legacy behaviour.
+        # Resolution priority: template (when not None) > env default > 0.
         # ------------------------------------------------------------------
-        settle_ms = int(getattr(state.template.sticker, "part_ready_settle_ms", 0) or 0)
+        _template_settle = getattr(state.template.sticker, "part_ready_settle_ms", None)
+        settle_ms = (
+            max(0, int(_template_settle))
+            if _template_settle is not None
+            else self._default_settle_ms
+        )
         _settle_now = datetime.now(UTC)
         _raw_part_ready = part_ready.get("part_ready", False)
         if _raw_part_ready and presence.get("present", False):

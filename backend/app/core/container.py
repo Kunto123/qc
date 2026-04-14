@@ -64,6 +64,7 @@ inspection_session_service = InspectionSessionService(
     profiles_repo,
     inspection_results_repo,
     sticker_inference_service,
+    app_config=app_config,
 )
 training_service = TrainingService(training_repo, models_repo, device_runtime, app_config=app_config)
 workstation_registry_repo = WorkstationRegistryRepository()

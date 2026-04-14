@@ -54,6 +54,11 @@ class AppConfig:
     # if CUDA is unavailable instead of silently falling back to CPU.
     # Set to "0" to restore legacy silent-fallback behavior.
     gpu_fail_fast: bool = os.getenv("QC_SUITE_GPU_FAIL_FAST", "1").strip() != "0"
+    # Settle-time debounce system-wide default.
+    # Templates that do NOT set part_ready_settle_ms (= None) inherit this value.
+    # Templates that explicitly set part_ready_settle_ms (including 0 to bypass) ignore it.
+    # Default 0 = no settle (backward compatible).
+    part_ready_settle_ms_default: int = max(0, int(os.getenv("QC_SUITE_PART_READY_SETTLE_MS", "0")))
 
     @property
     def sql_enabled(self) -> bool:
