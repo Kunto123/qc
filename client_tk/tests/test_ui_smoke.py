@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import warnings
 from types import SimpleNamespace
 from unittest import mock
 
@@ -2463,6 +2464,26 @@ class UiSmokeTest(unittest.TestCase):
         self.root.update_idletasks()
 
         self.assertEqual((live_view.winfo_width(), live_view.winfo_height()), initial_size)
+
+    def test_live_view_reset_does_not_emit_ctkimage_warning(self) -> None:
+        container = ttk.Frame(self.root, width=360, height=260)
+        container.pack_propagate(False)
+        container.pack(fill="both", expand=False)
+
+        live_view = LiveView(container, "Preview", size=(320, 200))
+        live_view.pack(fill="both", expand=False)
+        self.root.update_idletasks()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            live_view.reset()
+
+        ctk_warnings = [
+            warning
+            for warning in caught
+            if "Given image is not CTkImage" in str(warning.message)
+        ]
+        self.assertFalse(ctk_warnings)
 
     # ------------------------------------------------------------------
     # Training summary formatter regression tests

@@ -492,6 +492,10 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertIsNone(frame_payload["preview_image_b64"])
         self.assertIsNone(frame_payload["part_ready_preview_image_b64"])
         self.assertIsNone(frame_payload["sticker_preview_image_b64"])
+        timings = frame_payload.get("timings") or {}
+        self.assertIn("total_ms", timings)
+        self.assertIn("inference_ms", timings)
+        self.assertGreaterEqual(float(timings.get("total_ms") or 0.0), 0.0)
 
     def test_02_part_ready_color_gate_blocks_commit_until_match(self) -> None:
         calibration_response = self.client.post(

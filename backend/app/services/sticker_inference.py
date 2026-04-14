@@ -90,6 +90,7 @@ class StickerInferenceService:
         result,
         names: dict[int, str] | dict[Any, Any],
         allowed_labels: set[str] | None,
+        allowed_label_keys: set[str] | None,
     ) -> list[dict[str, Any]]:
         detections: list[dict[str, Any]] = []
         if result.boxes is None:
@@ -99,8 +100,13 @@ class StickerInferenceService:
             class_id = int(box.cls[0].item())
             confidence = float(box.conf[0].item())
             label = str(names.get(class_id, class_id))
-            if allowed_labels is not None and label.lower() not in allowed_labels:
-                continue
+            if allowed_labels is not None:
+                normalized_label = label.strip().lower()
+                normalized_key = self._normalize_label_key(label)
+                if normalized_label not in allowed_labels and (
+                    allowed_label_keys is None or normalized_key not in allowed_label_keys
+                ):
+                    continue
             detections.append(
                 {
                     "label": label,
@@ -116,6 +122,11 @@ class StickerInferenceService:
                 }
             )
         return detections
+
+    @staticmethod
+    def _normalize_label_key(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        return "".join(ch for ch in text if ch.isalnum())
 
     def _predict_ultralytics(self, image, vision: VisionConfig, device_resolution: DeviceResolution) -> dict[str, Any]:
         model_path = self._resolve_model_path(vision)
@@ -137,7 +148,16 @@ class StickerInferenceService:
         names = result.names or {}
         raw_box_count = int(len(result.boxes)) if result.boxes is not None else 0
         allowed_labels = {str(label).strip().lower() for label in (vision.classes or [])} or None
-        detections = self._normalize_detections(result=result, names=names, allowed_labels=allowed_labels)
+        allowed_label_keys = (
+            {self._normalize_label_key(label) for label in (vision.classes or []) if self._normalize_label_key(label)}
+            or None
+        )
+        detections = self._normalize_detections(
+            result=result,
+            names=names,
+            allowed_labels=allowed_labels,
+            allowed_label_keys=allowed_label_keys,
+        )
         return {
             "backend": "ultralytics",
             "mode": "ultralytics",

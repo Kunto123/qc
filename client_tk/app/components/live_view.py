@@ -63,4 +63,4 @@ class LiveView(ctk.CTkFrame):
 
     def reset(self) -> None:
         self._photo = None
-        self._label.configure(image="", text="No frame", fg_color="#0f172a")
+        self._label.configure(image=None, text="No frame", fg_color="#0f172a")

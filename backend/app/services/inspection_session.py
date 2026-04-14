@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import threading
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -159,10 +160,20 @@ class InspectionSessionService:
         username: str | None = None,
         user_id: int | None = None,
     ) -> dict[str, Any]:
+        total_started = time.perf_counter()
+        timings: dict[str, float] = {}
+
+        def _elapsed_ms(started_at: float) -> float:
+            return round((time.perf_counter() - started_at) * 1000.0, 2)
+
         state = self._require_session(session_id)
         state.frame_index += 1
-        frame = _decode_image(image_b64)
 
+        decode_started = time.perf_counter()
+        frame = _decode_image(image_b64)
+        timings["decode_ms"] = _elapsed_ms(decode_started)
+
+        part_ready_started = time.perf_counter()
         part_ready_frame, part_ready_roi_meta = self._crop_stage_roi(
             frame,
             state.template.part_ready_roi,
@@ -170,15 +181,22 @@ class InspectionSessionService:
         )
         part_ready = self._evaluate_part_ready(part_ready_frame, state)
         presence = self._detect_part_presence(part_ready_frame)
+        timings["part_ready_eval_ms"] = _elapsed_ms(part_ready_started)
 
+        roi_crop_started = time.perf_counter()
         sticker_frame, sticker_roi_meta = self._crop_stage_roi(
             frame,
             state.template.sticker_roi,
             state.sticker_roi_override,
         )
+        timings["sticker_roi_crop_ms"] = _elapsed_ms(roi_crop_started)
+
         detections: list[dict[str, Any]] = []
+        inference_ms = 0.0
         if part_ready.get("part_ready", False):
+            inference_started = time.perf_counter()
             inference_payload = self._run_sticker_inference(sticker_frame, state)
+            inference_ms = _elapsed_ms(inference_started)
             detections = list(inference_payload.get("detections") or [])
             sticker_detection = self._build_sticker_detection_payload(
                 detections,
@@ -208,7 +226,9 @@ class InspectionSessionService:
                 meta_path=state.template.vision.model_meta_path,
                 class_names=state.template.vision.classes,
             )
+        timings["inference_ms"] = round(inference_ms, 2)
 
+        validation_started = time.perf_counter()
         validation = self._validate_sticker(
             roi_frame=sticker_frame,
             state=state,
@@ -218,11 +238,14 @@ class InspectionSessionService:
             username=username,
             user_id=user_id,
         )
+        timings["validation_ms"] = _elapsed_ms(validation_started)
         validation_details = validation.get("validation_details") or {}
         if validation_details:
             sticker_detection["selected_candidate"] = validation_details.get("selected_candidate")
             sticker_detection["candidate_source"] = validation_details.get("candidate_source")
             sticker_detection["matching_candidate_count"] = validation_details.get("matching_candidate_count")
+
+        event_state_started = time.perf_counter()
         event_state, event_id, count_committed = self._advance_event_state(
             state=state,
             validation=validation,
@@ -230,7 +253,9 @@ class InspectionSessionService:
             presence=presence,
             now=datetime.now(UTC),
         )
+        timings["event_state_ms"] = _elapsed_ms(event_state_started)
 
+        persistence_started = time.perf_counter()
         db_write = {"written": False, "reason": "not_committed"}
         if count_committed:
             db_write = self._maybe_persist(
@@ -251,7 +276,9 @@ class InspectionSessionService:
                 sticker_roi_meta=sticker_roi_meta,
                 committed_at=datetime.now(UTC),
             )
+        timings["persistence_ms"] = _elapsed_ms(persistence_started)
 
+        overlay_started = time.perf_counter()
         overlay = self._compose_overlay(
             full_frame=frame,
             part_ready_roi_meta=part_ready_roi_meta,
@@ -262,9 +289,12 @@ class InspectionSessionService:
             event_state=event_state,
             state=state,
         )
+        timings["overlay_compose_ms"] = _elapsed_ms(overlay_started)
 
         normalized_response_mode = str(response_mode or "").strip().lower()
         compact_response = normalized_response_mode in {"compact", "minimal", "overlay"}
+
+        encode_started = time.perf_counter()
         overlay_image_b64 = _encode_image(overlay)
         preview_image_b64 = None
         part_ready_preview_image_b64 = None
@@ -273,6 +303,14 @@ class InspectionSessionService:
             preview_image_b64 = _encode_image(sticker_frame)
             part_ready_preview_image_b64 = _encode_image(part_ready_frame)
             sticker_preview_image_b64 = preview_image_b64
+        timings["encode_ms"] = _elapsed_ms(encode_started)
+
+        timings_payload = {
+            **timings,
+            "inference_skipped": not part_ready.get("part_ready", False),
+            "compact_response": compact_response,
+            "total_ms": _elapsed_ms(total_started),
+        }
 
         payload = {
             "session": self._session_payload(state),
@@ -292,6 +330,7 @@ class InspectionSessionService:
             "last_committed_result": state.last_committed_result,
             "recent_events": list(state.recent_events),
             "db_write": db_write,
+            "timings": timings_payload,
             "response_mode": "compact" if compact_response else "full",
             "overlay_image_b64": overlay_image_b64,
             "preview_image_b64": preview_image_b64,

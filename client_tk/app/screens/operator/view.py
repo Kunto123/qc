@@ -979,6 +979,14 @@ class OperatorScreen(ctk.CTkFrame):
             self._sync_recent_events(payload)
             self._refresh_context_summary()
             self._update_status_badges(payload)
+            timings = payload.get("timings") or {}
+            total_ms = timings.get("total_ms")
+            inference_ms = timings.get("inference_ms")
+            timing_suffix = ""
+            if isinstance(total_ms, (int, float)):
+                timing_suffix = f" | latency={float(total_ms):.1f}ms"
+                if isinstance(inference_ms, (int, float)):
+                    timing_suffix += f" infer={float(inference_ms):.1f}ms"
             if payload.get("part_ready_preview_image_b64"):
                 self.part_ready_preview.update_b64(payload.get("part_ready_preview_image_b64"))
             elif frame is not None:
@@ -997,20 +1005,27 @@ class OperatorScreen(ctk.CTkFrame):
                 committed = payload.get("last_committed_result") or {}
                 validation = committed.get("validation") or {}
                 part_ready = committed.get("part_ready") or {}
+                detection = committed.get("sticker_detection") or {}
                 self.info_var.set(
                     f"Committed {validation.get('decision')} | "
                     f"Part gate={'READY' if part_ready.get('part_ready') else 'BLOCK'} | "
                     f"{validation.get('part_name') or '-'} | "
-                    f"{validation.get('reject_reason_code') or 'OK'}."
+                    f"{validation.get('reject_reason_code') or 'OK'} | "
+                    f"backend={detection.get('backend') or '-'} raw={detection.get('raw_detection_count') if detection.get('raw_detection_count') is not None else '-'}"
+                    f"{timing_suffix}."
                 )
             else:
                 live_validation = payload.get("validation") or {}
                 live_part_ready = payload.get("part_ready") or {}
+                live_detection = payload.get("sticker_detection") or {}
                 self.info_var.set(
                     f"Gate={'READY' if live_part_ready.get('part_ready') else 'BLOCK'} "
                     f"(ratio {live_part_ready.get('match_ratio') if live_part_ready.get('match_ratio') is not None else '-'}) | "
                     f"Live decision: {live_validation.get('decision') or '-'} | "
-                    f"Detected: {live_validation.get('detected_class') or '-'}"
+                    f"Detected: {live_validation.get('detected_class') or '-'} | "
+                    f"Reject: {live_validation.get('reject_reason_code') or 'OK'} | "
+                    f"backend={live_detection.get('backend') or '-'} raw={live_detection.get('raw_detection_count') if live_detection.get('raw_detection_count') is not None else '-'}"
+                    f"{timing_suffix}"
                 )
         elif error:
             self.state.latest_error = error

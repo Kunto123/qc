@@ -24,28 +24,40 @@ class FrameUploadService:
     ) -> None:
         self.stop()
         self._running = True
+        target_interval_s = max(0.1, interval_ms / 1000.0)
 
         def _loop():
             while self._running:
+                started_at = time.perf_counter()
                 try:
                     frame = get_frame()
                     if frame is None:
-                        time.sleep(max(0.1, interval_ms / 1000.0))
-                        continue
-                    ok, encoded = cv2.imencode(".jpg", frame)
-                    if not ok:
-                        raise RuntimeError("Failed to encode frame.")
-                    image_b64 = base64.b64encode(encoded.tobytes()).decode("ascii")
-                    result = send_frame(image_b64)
-                    on_result(result)
+                        pass
+                    else:
+                        ok, encoded = cv2.imencode(".jpg", frame)
+                        if not ok:
+                            raise RuntimeError("Failed to encode frame.")
+                        image_b64 = base64.b64encode(encoded.tobytes()).decode("ascii")
+                        result = send_frame(image_b64)
+                        on_result(result)
                 except Exception as exc:  # noqa: BLE001
                     on_error(str(exc))
-                time.sleep(max(0.1, interval_ms / 1000.0))
+
+                if not self._running:
+                    break
+
+                elapsed_s = time.perf_counter() - started_at
+                sleep_s = target_interval_s - elapsed_s
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
 
         self._thread = threading.Thread(target=_loop, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._running = False
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=0.3)
         self._thread = None
 

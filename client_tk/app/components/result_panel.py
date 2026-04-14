@@ -85,6 +85,8 @@ class ResultPanel(ctk.CTkFrame):
         self.model_path_var = self._build_field(self.debug_frame, 3, "Model Path")
         self.device_var = self._build_field(self.debug_frame, 4, "Effective Device")
         self.response_mode_var = self._build_field(self.debug_frame, 5, "Response Mode")
+        self.latency_total_var = self._build_field(self.debug_frame, 6, "Latency Total")
+        self.latency_inference_var = self._build_field(self.debug_frame, 7, "Inference Time")
 
         self.commit_frame = self._build_section("Commit Details")
         self.reason_var = self._build_field(self.commit_frame, 0, "Reason")
@@ -149,6 +151,7 @@ class ResultPanel(ctk.CTkFrame):
         display_details = committed_details or live_details
         display_candidate = committed_candidate or live_candidate
         display_sticker_detection = committed_sticker_detection or live_sticker_detection
+        timings = payload.get("timings") or {}
 
         decision = display_validation.get("decision") or "WAITING"
         reason = display_validation.get("reject_reason_code") or ("OK" if decision == "ACCEPT" else "-")
@@ -235,12 +238,18 @@ class ResultPanel(ctk.CTkFrame):
         if display_sticker_detection.get("device_fallback_reason"):
             device_text = f"{device_text} | fallback: {display_sticker_detection.get('device_fallback_reason')}"
         response_mode = str(payload.get("response_mode") or "-")
+        total_latency = timings.get("total_ms")
+        inference_latency = timings.get("inference_ms")
+        total_latency_text = f"{_format_metric(total_latency, precision=1)} ms" if total_latency is not None else "-"
+        inference_latency_text = f"{_format_metric(inference_latency, precision=1)} ms" if inference_latency is not None else "-"
         self.raw_detection_count_var.configure(text=raw_count_text)
         self.fallback_reason_var.configure(text=str(fallback_reason))
         self.classes_filter_var.configure(text=classes_filter_text)
         self.model_path_var.configure(text=str(model_path))
         self.device_var.configure(text=device_text)
         self.response_mode_var.configure(text=response_mode)
+        self.latency_total_var.configure(text=total_latency_text)
+        self.latency_inference_var.configure(text=inference_latency_text)
 
         self.reason_var.configure(text=str(reason))
         self.part_var.configure(text=str(display_validation.get("part_name") or "-"))
@@ -276,6 +285,8 @@ class ResultPanel(ctk.CTkFrame):
             self.model_path_var,
             self.device_var,
             self.response_mode_var,
+            self.latency_total_var,
+            self.latency_inference_var,
             self.reason_var,
             self.part_var,
             self.line_var,
