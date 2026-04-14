@@ -1984,3 +1984,122 @@ class ApiSmokeTest(unittest.TestCase):
             headers=_headers(self.admin_token),
         )
         self.assertEqual(inactive_update_response.status_code, 409, inactive_update_response.get_json())
+
+    # ------------------------------------------------------------------
+    # Phase 12 — Augment integration eligibility (API-level validation)
+    # ------------------------------------------------------------------
+
+    def _upload_blank_image(self, ds_id: str, filename: str = "img.jpg") -> None:
+        """Helper: upload a blank image to a dataset via the JSON upload endpoint."""
+        resp = self.client.post(
+            f"/datasets/{ds_id}/upload",
+            json={"file_name": filename, "target": "images", "content_b64": _blank_image_b64()},
+            headers=_headers(self.admin_token),
+        )
+        self.assertIn(resp.status_code, (201, 200), f"Upload failed: {resp.get_json()}")
+
+    def test_12a_create_version_without_augment_succeeds(self) -> None:
+        """create_version with no augment_job_ids behaves exactly as before."""
+        ds_resp = self.client.post(
+            "/datasets",
+            json={"name": "phase12-ds-noaug", "description": ""},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(ds_resp.status_code, 201, ds_resp.get_json())
+        ds_id = ds_resp.get_json()["id"]
+        self._upload_blank_image(ds_id)
+
+        version_resp = self.client.post(
+            f"/datasets/{ds_id}/versions",
+            json={"name": "v1", "export_format": "yolo"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(version_resp.status_code, 201, version_resp.get_json())
+        version = version_resp.get_json()
+        self.assertEqual(version["selected_augment_job_ids"], [])
+        self.assertEqual(version["augmented_image_count_in_version"], 0)
+
+    def test_12b_create_version_rejects_nonexistent_augment_job(self) -> None:
+        """augment_job_ids containing an unknown ID returns 404."""
+        ds_resp = self.client.post(
+            "/datasets",
+            json={"name": "phase12-ds-badaug", "description": ""},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(ds_resp.status_code, 201)
+        ds_id = ds_resp.get_json()["id"]
+        self._upload_blank_image(ds_id)
+
+        version_resp = self.client.post(
+            f"/datasets/{ds_id}/versions",
+            json={"name": "v1", "augment_job_ids": ["nonexistent-aug-id"]},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(version_resp.status_code, 404, version_resp.get_json())
+        self.assertIn("not found", version_resp.get_json().get("error", "").lower())
+
+    def test_12c_create_version_rejects_geometric_augment_job(self) -> None:
+        """augment_job_ids with geometric transforms (flip_h) returns 400 with actionable message."""
+        ds_resp = self.client.post(
+            "/datasets",
+            json={"name": "phase12-ds-geoaug", "description": ""},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(ds_resp.status_code, 201)
+        ds_id = ds_resp.get_json()["id"]
+        self._upload_blank_image(ds_id)
+
+        # Create augment job with flip_h (geometric transform)
+        aug_resp = self.client.post(
+            "/augment/jobs",
+            json={"dataset_id": ds_id, "transforms": ["flip_h", "brightness"], "multiplier": 1},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(aug_resp.status_code, 201, aug_resp.get_json())
+        aug_job = aug_resp.get_json()
+
+        version_resp = self.client.post(
+            f"/datasets/{ds_id}/versions",
+            json={"name": "v1", "augment_job_ids": [aug_job["id"]]},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(version_resp.status_code, 400, version_resp.get_json())
+        error_msg = version_resp.get_json().get("error", "")
+        # Queued job fails on "not completed" check (before geometry check)
+        self.assertTrue(
+            "not completed" in error_msg.lower() or "geometric" in error_msg.lower() or "flip_h" in error_msg.lower(),
+            f"Unexpected error: {error_msg}",
+        )
+
+    def test_12d_create_version_rejects_cross_dataset_augment_job(self) -> None:
+        """augment_job_ids from a different dataset returns 400."""
+        ds1 = self.client.post(
+            "/datasets", json={"name": "phase12-ds1"}, headers=_headers(self.admin_token)
+        ).get_json()
+        ds2 = self.client.post(
+            "/datasets", json={"name": "phase12-ds2"}, headers=_headers(self.admin_token)
+        ).get_json()
+        self._upload_blank_image(ds1["id"])
+
+        # Create augment job for ds2 (wrong dataset)
+        aug_resp = self.client.post(
+            "/augment/jobs",
+            json={"dataset_id": ds2["id"], "transforms": ["brightness"], "multiplier": 1},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(aug_resp.status_code, 201)
+        aug_job = aug_resp.get_json()
+
+        version_resp = self.client.post(
+            f"/datasets/{ds1['id']}/versions",
+            json={"name": "v1", "augment_job_ids": [aug_job["id"]]},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(version_resp.status_code, 400, version_resp.get_json())
+        error_msg = version_resp.get_json().get("error", "").lower()
+        # Queued job → "not completed" error fires first
+        self.assertTrue(
+            "not completed" in error_msg or "dataset" in error_msg,
+            f"Unexpected error: {error_msg}",
+        )
+

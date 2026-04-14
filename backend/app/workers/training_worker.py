@@ -586,6 +586,21 @@ class TrainingWorker:
 
         artifact_path: Path | None = None
         try:
+            # GPU fail-fast: fail the job immediately if GPU was explicitly requested
+            # but CUDA is unavailable, rather than silently falling back to CPU.
+            _CUDA_FAIL_FAST_REASONS = {"torch_not_installed", "cuda_unavailable", "cuda_device_count_zero"}
+            if (
+                resolution.requested_mode == "gpu"
+                and getattr(self._config, "gpu_fail_fast", True)
+                and resolution.fallback_reason in _CUDA_FAIL_FAST_REASONS
+            ):
+                raise RuntimeError(
+                    f"GPU requested (device=gpu) but CUDA is unavailable "
+                    f"({resolution.fallback_reason}). "
+                    "Set device_mode=auto or device_mode=cpu to allow CPU fallback, "
+                    "or verify the server GPU driver/CUDA setup."
+                )
+
             start_time = time.monotonic()
             timeout_seconds = max(60, int(self._config.training_timeout_minutes) * 60)
             path_prefix = f"{job['dataset_id']}__{base_model_fragment}"

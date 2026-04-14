@@ -439,6 +439,89 @@ class LegacyMetricsBackfillTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# H. GPU fail-fast — job must fail immediately when device=gpu + CUDA unavailable
+# ---------------------------------------------------------------------------
+
+class GpuFailFastTest(unittest.TestCase):
+    """Training jobs requesting device=gpu must fail when CUDA is unavailable (fail-fast=True)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.mkdtemp(prefix="qc-suite-gpufail-")
+        # Use real engine mode to bypass simulated-mode's special fallback reason.
+        os.environ["QC_SUITE_TRAINING_ENGINE_MODE"] = "real"
+        os.environ["QC_SUITE_GPU_FAIL_FAST"] = "1"
+        import importlib
+        import backend.app.core.config as _cfg_mod
+        importlib.reload(_cfg_mod)
+        from backend.app.core.config import AppConfig
+        from backend.app.repositories.training_repository import TrainingRepository
+        from backend.app.core.device_runtime import DeviceRuntimeResolver
+        self._cfg = AppConfig()
+        self._repo = TrainingRepository()
+        # Build a resolver that reports CUDA unavailable.
+        self._resolver = DeviceRuntimeResolver(self._cfg)
+        self._resolver._cuda_state = (False, 0, "cuda_unavailable")  # type: ignore[assignment]
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        os.environ.pop("QC_SUITE_GPU_FAIL_FAST", None)
+        os.environ["QC_SUITE_TRAINING_ENGINE_MODE"] = "simulated"
+        import importlib
+        import backend.app.core.config as _cfg_mod
+        importlib.reload(_cfg_mod)
+
+    def _make_worker(self) -> TrainingWorker:
+        return TrainingWorker(
+            self._repo,
+            device_runtime=self._resolver,
+            app_config=self._cfg,
+        )
+
+    def test_gpu_job_fails_immediately_when_cuda_unavailable(self) -> None:
+        job = self._repo.create_job(
+            dataset_id="ds-gpufail",
+            base_model="yolov5n",
+            params={"epochs": 1, "device_mode": "gpu"},
+        )
+        worker = self._make_worker()
+        worker._training_mode = "real"  # bypass simulated path so fail-fast fires
+        worker._run_job(job)
+
+        result = self._repo.get_job(job["id"])
+        self.assertEqual(result["status"], "failed")
+        error_msg = str(result.get("error") or "").lower()
+        self.assertIn("cuda", error_msg)
+        # Should NOT contain simulated fallback reason
+        self.assertNotIn("simulated", error_msg)
+
+    def test_gpu_job_does_not_fail_when_gpu_fail_fast_disabled(self) -> None:
+        os.environ["QC_SUITE_GPU_FAIL_FAST"] = "0"
+        import importlib
+        import backend.app.core.config as _cfg_mod
+        importlib.reload(_cfg_mod)
+        from backend.app.core.config import AppConfig
+        cfg = AppConfig()
+        self.assertFalse(cfg.gpu_fail_fast)
+
+        job = self._repo.create_job(
+            dataset_id="ds-gpufail-off",
+            base_model="yolov5n",
+            params={"epochs": 1, "device_mode": "gpu"},
+        )
+        worker = TrainingWorker(
+            self._repo,
+            device_runtime=self._resolver,
+            app_config=cfg,
+        )
+        worker._training_mode = "simulated"  # let it succeed via simulated path
+        worker._run_job(job)
+
+        result = self._repo.get_job(job["id"])
+        # With fail-fast disabled and simulated mode, it should complete (not fail due to GPU policy)
+        self.assertNotEqual(result["status"], "failed")
+
+
+# ---------------------------------------------------------------------------
 # G. Logging toggle — config defaults and quiet mode behaviour
 # ---------------------------------------------------------------------------
 

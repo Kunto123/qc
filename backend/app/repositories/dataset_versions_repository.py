@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import shutil
 import uuid
 from datetime import UTC, datetime
@@ -17,6 +18,15 @@ _DEFAULT_SPLIT_RATIOS = {"train": 0.7, "valid": 0.2, "test": 0.1}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 _MUTABLE_VERSION_STATUSES = {"draft", "ready", "archived"}
 _UNSET = object()
+
+# Regex to detect augmented filenames: must end with _augNNN (3 digits) before extension.
+_AUG_SUFFIX_RE = re.compile(r"_aug\d{3}$", re.IGNORECASE)
+
+
+def _original_stem(stem: str) -> str | None:
+    """Return the original image stem if *stem* carries an ``_augNNN`` suffix, else None."""
+    m = _AUG_SUFFIX_RE.search(stem)
+    return stem[: m.start()] if m else None
 
 
 def _coerce_ratio(value: Any, default: float) -> float:
@@ -144,7 +154,13 @@ class DatasetVersionRepository(JsonRepository):
 
         raise ValueError("Dataset version not found.")
 
-    def create_version(self, dataset_id: str, params: dict | None = None) -> dict:
+    def create_version(
+        self,
+        dataset_id: str,
+        params: dict | None = None,
+        *,
+        augment_jobs: list[dict] | None = None,
+    ) -> dict:
         if self._datasets_repo.get_dataset(dataset_id) is None:
             raise ValueError("Dataset not found.")
 
@@ -172,6 +188,15 @@ class DatasetVersionRepository(JsonRepository):
             shutil.rmtree(version_root, ignore_errors=True)
 
         source_stats = self._snapshot_source(dataset_id, source_images, source_images_dir, source_labels_dir)
+
+        # Integrate augmented images into the snapshot (photometric-only, annotation copied verbatim).
+        augmented_image_count = 0
+        selected_augment_job_ids: list[str] = []
+        if augment_jobs:
+            aug_stats = self._snapshot_augmented(dataset_id, augment_jobs, source_images_dir, source_labels_dir)
+            augmented_image_count = aug_stats["augmented_image_count"]
+            selected_augment_job_ids = [str(j.get("id") or "") for j in augment_jobs]
+
         export_stats = self._build_export_from_snapshot(
             source_images_dir=source_images_dir,
             source_labels_dir=source_labels_dir,
@@ -179,6 +204,8 @@ class DatasetVersionRepository(JsonRepository):
             split_ratios=split_ratios,
             seed=f"{dataset_id}:{version_number}:{version_id}",
         )
+
+        total_image_count = source_stats["image_count"] + augmented_image_count
 
         now = datetime.now(UTC).isoformat()
         record = {
@@ -191,7 +218,7 @@ class DatasetVersionRepository(JsonRepository):
             "status": "ready" if export_stats["class_names"] else "draft",
             "ready_for_training": bool(export_stats["class_names"]),
             "split_ratios": split_ratios,
-            "image_count": source_stats["image_count"],
+            "image_count": total_image_count,
             "label_count": source_stats["label_count"],
             "annotated_image_count": source_stats["annotated_image_count"],
             "annotation_coverage": source_stats["annotation_coverage"],
@@ -205,6 +232,10 @@ class DatasetVersionRepository(JsonRepository):
             "manifest_path": str(version_root / "manifest.json"),
             "created_at": now,
             "exported_at": now,
+            # Lineage metadata for augment integration
+            "selected_augment_job_ids": selected_augment_job_ids,
+            "augmented_image_count_in_version": augmented_image_count,
+            "total_source_image_count": source_stats["image_count"],
         }
 
         self._append_version(record)
@@ -308,6 +339,62 @@ class DatasetVersionRepository(JsonRepository):
             "annotation_coverage": annotation_coverage,
             "class_names": class_names,
         }
+
+    def _snapshot_augmented(
+        self,
+        dataset_id: str,
+        augment_jobs: list[dict],
+        source_images_dir: Path,
+        source_labels_dir: Path,
+    ) -> dict[str, int]:
+        """Copy augmented images and their original annotations into the version snapshot.
+
+        For each augmented image ``{stem}_augNNN{ext}`` the annotation from the
+        corresponding original image ``{stem}{ext}`` is copied verbatim (safe because
+        only photometric transforms preserve object geometry).
+
+        Returns ``{"augmented_image_count": N}`` — the number of images actually copied.
+        """
+        augmented_count = 0
+        for job in augment_jobs:
+            output_dir_str = str(job.get("output_dataset_id") or "")
+            if not output_dir_str:
+                continue
+            output_dir = Path(output_dir_str)
+            if not output_dir.exists() or not output_dir.is_dir():
+                continue
+
+            for aug_file in sorted(output_dir.iterdir()):
+                if not aug_file.is_file() or aug_file.suffix.lower() not in _IMAGE_EXTS:
+                    continue
+
+                orig_stem = _original_stem(aug_file.stem)
+                if orig_stem is None:
+                    continue  # not a recognized augmented filename
+
+                # Copy augmented image into the snapshot images dir.
+                dest_image = source_images_dir / aug_file.name
+                shutil.copy2(aug_file, dest_image)
+
+                # Retrieve the original annotation (try same extension first, then others).
+                annotation: dict = {}
+                for ext in (aug_file.suffix.lower(), ".jpg", ".jpeg", ".png", ".bmp", ".webp"):
+                    candidate_name = f"{orig_stem}{ext}"
+                    ann = self._datasets_repo.get_annotation(dataset_id, candidate_name)
+                    if isinstance(ann, dict) and ann.get("labels"):
+                        annotation = ann
+                        break
+
+                aug_annotation = dict(annotation)
+                aug_annotation["image_name"] = aug_file.name
+
+                (source_labels_dir / f"{aug_file.stem}.json").write_text(
+                    json.dumps(aug_annotation, ensure_ascii=True, indent=2),
+                    encoding="utf-8",
+                )
+                augmented_count += 1
+
+        return {"augmented_image_count": augmented_count}
 
     def _build_export_from_snapshot(
         self,

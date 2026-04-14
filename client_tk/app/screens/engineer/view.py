@@ -77,6 +77,7 @@ class EngineerScreen(ctk.CTkFrame):
         self._dataset_version_cache: list[dict] = []
         self._dataset_version_lookup: dict[str, dict] = {}
         self._augment_jobs: list[dict] = []
+        self._version_augment_job_ids: list[str] = []  # parallel list for version augment selector listbox
         self._training_jobs_all: list[dict] = []
         self._training_jobs: list[dict] = []
         self._training_status_filter = tk.StringVar(value="All")
@@ -457,8 +458,24 @@ class EngineerScreen(ctk.CTkFrame):
         self._grid_entry(version_form, 1, 2, "Train", self.version_train_ratio)
         self._grid_entry(version_form, 2, 0, "Valid", self.version_valid_ratio)
         self._grid_entry(version_form, 2, 2, "Test", self.version_test_ratio)
+        # Augment job selector for inclusion in the version snapshot (optional, photometric-only)
+        ttk.Label(version_form, text="Include Augment").grid(row=3, column=0, sticky="nw", padx=(0, 8), pady=(4, 0))
+        version_augment_frame = ttk.Frame(version_form)
+        version_augment_frame.grid(row=3, column=1, columnspan=3, sticky="ew", pady=(4, 0))
+        self.version_augment_selector = tk.Listbox(
+            version_augment_frame, height=3, selectmode="multiple", exportselection=False
+        )
+        self.version_augment_selector.pack(fill="x")
+        ttk.Label(
+            version_augment_frame,
+            text="Ctrl+click untuk multi-select. Hanya augment job photometric (brightness/contrast/blur/noise) yang dapat dimasukkan.",
+            foreground="#475569",
+            wraplength=500,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 0))
+
         version_btn_bar = ttk.Frame(version_form)
-        version_btn_bar.grid(row=3, column=0, columnspan=4, sticky="e", pady=(4, 0))
+        version_btn_bar.grid(row=4, column=0, columnspan=4, sticky="e", pady=(4, 0))
         ttk.Button(version_btn_bar, text="Create Version", command=self.create_dataset_version).pack(side="left")
         ttk.Button(version_btn_bar, text="Update Metadata", command=self.update_dataset_version_metadata).pack(side="left", padx=6)
         ttk.Button(version_btn_bar, text="Rebuild Export", command=self.rebuild_dataset_version_export).pack(side="left", padx=6)
@@ -1339,6 +1356,7 @@ class EngineerScreen(ctk.CTkFrame):
         self.refresh_dataset_files()
         self.refresh_annotation_images()
         self.refresh_dataset_versions()
+        self._refresh_version_augment_selector()
         self._sync_annotation_class_name()
 
     def refresh_datasets(self):
@@ -1663,6 +1681,15 @@ class EngineerScreen(ctk.CTkFrame):
         except ValueError:
             messagebox.showerror("Dataset Versions", "Split ratios harus numerik.")
             return
+
+        # Include selected augment jobs (multi-select).
+        selected_augment_indices = list(self.version_augment_selector.curselection())
+        if selected_augment_indices:
+            payload["augment_job_ids"] = [
+                self._version_augment_job_ids[i]
+                for i in selected_augment_indices
+                if i < len(self._version_augment_job_ids)
+            ]
 
         try:
             created = self.api.create_dataset_version(dataset_id, payload)
@@ -2318,6 +2345,30 @@ class EngineerScreen(ctk.CTkFrame):
             transforms = ", ".join(item.get("transforms") or [])
             multiplier = item.get("multiplier") or 1
             self.augment_jobs.insert("end", f"{item.get('id')} | {item.get('dataset_id')} | {item.get('status')} | x{multiplier} | {transforms}")
+        self._refresh_version_augment_selector()
+
+    def _refresh_version_augment_selector(self) -> None:
+        """Populate the version-creation augment selector with completed photometric jobs for the current dataset."""
+        if not hasattr(self, "version_augment_selector"):
+            return
+        dataset_id = self._current_dataset_id()
+        _PHOTOMETRIC = {"brightness", "contrast", "blur", "noise"}
+        eligible = [
+            j for j in self._augment_jobs
+            if str(j.get("status") or "") == "completed"
+            and str(j.get("dataset_id") or "") == dataset_id
+            and all(t in _PHOTOMETRIC for t in (j.get("transforms") or []))
+        ] if dataset_id else []
+
+        self._version_augment_job_ids = [str(j.get("id") or "") for j in eligible]
+        self.version_augment_selector.delete(0, "end")
+        for j in eligible:
+            transforms = ", ".join(j.get("transforms") or [])
+            aug_count = j.get("augmented_image_count") or 0
+            self.version_augment_selector.insert(
+                "end",
+                f"{j.get('id')} | x{j.get('multiplier', 1)} | +{aug_count} imgs | {transforms}",
+            )
 
     def refresh_workstations(self):
         self._workstations_refresh_sequence += 1

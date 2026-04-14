@@ -38,6 +38,7 @@ debug/
 Thumbs.db
 .idea/
 .vscode/
+.claude
 
 # Logs / temp files
 *.log

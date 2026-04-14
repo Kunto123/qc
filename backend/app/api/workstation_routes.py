@@ -189,12 +189,63 @@ def list_dataset_versions(dataset_id: str):
     return jsonify(dataset_versions_repo.list_versions(dataset_id))
 
 
+_PHOTOMETRIC_TRANSFORMS = {"brightness", "contrast", "blur", "noise"}
+
+
+def _validate_augment_eligibility(job: dict, dataset_id: str) -> str | None:
+    """Return an actionable error string if the augment job is not eligible, else None."""
+    if str(job.get("status") or "") != "completed":
+        return (
+            f"Augment job '{job.get('id')}' is not completed "
+            f"(current status: '{job.get('status')}')."
+        )
+    if str(job.get("dataset_id") or "") != str(dataset_id):
+        return (
+            f"Augment job '{job.get('id')}' belongs to dataset '{job.get('dataset_id')}', "
+            f"not '{dataset_id}'."
+        )
+    transforms = list(job.get("transforms") or [])
+    non_photometric = [t for t in transforms if t not in _PHOTOMETRIC_TRANSFORMS]
+    if non_photometric:
+        return (
+            f"Augment job '{job.get('id')}' contains geometric transform(s) "
+            f"({', '.join(sorted(non_photometric))}) which cannot be included in a version snapshot "
+            "because they change object geometry and would invalidate bounding-box annotations. "
+            "Use photometric-only transforms: brightness, contrast, blur, noise."
+        )
+    return None
+
+
 @workstation_blueprint.post("/datasets/<dataset_id>/versions")
 @require_roles(UserRole.ADMIN)
 def create_dataset_version(dataset_id: str):
     payload = request.get_json(force=True) or {}
+
+    # Extract and validate optional augment job selection.
+    raw_augment_ids = payload.pop("augment_job_ids", None)
+    validated_augment_jobs: list[dict] = []
+
+    if raw_augment_ids:
+        if not isinstance(raw_augment_ids, list):
+            return jsonify({"error": "augment_job_ids must be a list of job ID strings"}), 400
+        for job_id_raw in raw_augment_ids:
+            job_id = str(job_id_raw or "").strip()
+            job = augment_repo.get_job(job_id)
+            if job is None:
+                return jsonify({"error": f"Augment job '{job_id}' not found."}), 404
+            error = _validate_augment_eligibility(job, dataset_id)
+            if error:
+                return jsonify({"error": error}), 400
+            validated_augment_jobs.append(job)
+
     try:
-        return jsonify(dataset_versions_repo.create_version(dataset_id, payload)), 201
+        return jsonify(
+            dataset_versions_repo.create_version(
+                dataset_id,
+                payload,
+                augment_jobs=validated_augment_jobs or None,
+            )
+        ), 201
     except ValueError as exc:
         message = str(exc)
         status_code = 404 if "not found" in message.lower() else 400

@@ -50,6 +50,10 @@ class AppConfig:
     access_logs_enabled: bool = os.getenv("QC_SUITE_ACCESS_LOGS_ENABLED", "1").strip() != "0"
     # Set to "0" to raise werkzeug request logger to ERROR level (suppresses per-request lines).
     werkzeug_logs_enabled: bool = os.getenv("QC_SUITE_WERKZEUG_REQUEST_LOGS_ENABLED", "1").strip() != "0"
+    # GPU policy: when "1" (default), a training job requesting device=gpu will fail immediately
+    # if CUDA is unavailable instead of silently falling back to CPU.
+    # Set to "0" to restore legacy silent-fallback behavior.
+    gpu_fail_fast: bool = os.getenv("QC_SUITE_GPU_FAIL_FAST", "1").strip() != "0"
 
     @property
     def sql_enabled(self) -> bool:

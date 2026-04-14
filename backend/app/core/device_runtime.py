@@ -24,7 +24,7 @@ class DeviceRuntimeResolver:
     def __init__(self, app_config: AppConfig) -> None:
         self._config = app_config
         self._torch: object | None = None
-        self._cuda_state: tuple[bool, int] | None = None
+        self._cuda_state: tuple[bool, int, str | None] | None = None
 
     def _normalize_mode(self, value: str | None) -> str:
         mode = str(value or "auto").strip().lower() or "auto"
@@ -41,19 +41,33 @@ class DeviceRuntimeResolver:
             self._torch = torch
         return self._torch
 
-    def _cuda_status(self) -> tuple[bool, int]:
+    def _cuda_status(self) -> tuple[bool, int, str | None]:
+        """Return (available, device_count, unavail_reason).
+
+        ``unavail_reason`` is one of:
+        * ``None``                    — CUDA is available (no failure)
+        * ``"torch_not_installed"``   — torch package cannot be imported
+        * ``"cuda_unavailable"``      — torch imported but ``cuda.is_available()`` is False
+        * ``"cuda_device_count_zero"``— CUDA is available but no devices are visible
+        """
         if self._cuda_state is not None:
             return self._cuda_state
         torch = self._load_torch()
         if torch is False or torch is None:
-            self._cuda_state = (False, 0)
+            self._cuda_state = (False, 0, "torch_not_installed")
             return self._cuda_state
         try:
             available = bool(torch.cuda.is_available())
             count = int(torch.cuda.device_count()) if available else 0
+            if not available:
+                reason: str | None = "cuda_unavailable"
+            elif count == 0:
+                reason = "cuda_device_count_zero"
+            else:
+                reason = None
         except Exception:  # noqa: BLE001
-            available, count = False, 0
-        self._cuda_state = (available, count)
+            available, count, reason = False, 0, "cuda_unavailable"
+        self._cuda_state = (available, count, reason)
         return self._cuda_state
 
     def resolve(self, requested_mode: str | None = None) -> DeviceResolution:
@@ -69,7 +83,7 @@ class DeviceRuntimeResolver:
                 cuda_device_id=None,
             )
 
-        gpu_available, device_count = self._cuda_status()
+        gpu_available, device_count, unavail_reason = self._cuda_status()
         if not gpu_available or device_count <= 0:
             return DeviceResolution(
                 requested_mode=mode,
@@ -77,7 +91,7 @@ class DeviceRuntimeResolver:
                 backend="cpu",
                 gpu_available=False,
                 cuda_device_id=None,
-                fallback_reason="cuda_unavailable",
+                fallback_reason=unavail_reason or "cuda_unavailable",
             )
 
         effective_index = min(cuda_device_id, device_count - 1)
