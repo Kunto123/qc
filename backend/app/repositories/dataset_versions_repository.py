@@ -627,7 +627,9 @@ class DatasetVersionRepository(JsonRepository):
                 y /= float(image_height)
                 width /= float(image_width)
                 height /= float(image_height)
-            return self._format_yolo_line(class_id, x, y, width, height)
+            center_x = x + (width / 2.0)
+            center_y = y + (height / 2.0)
+            return self._format_yolo_line(class_id, center_x, center_y, width, height)
 
         raw_points = label.get("points")
         if not isinstance(raw_points, list) or len(raw_points) < 3:
@@ -659,7 +661,9 @@ class DatasetVersionRepository(JsonRepository):
         y = min(ys)
         width = max(xs) - x
         height = max(ys) - y
-        return self._format_yolo_line(class_id, x, y, width, height)
+        center_x = x + (width / 2.0)
+        center_y = y + (height / 2.0)
+        return self._format_yolo_line(class_id, center_x, center_y, width, height)
 
     @staticmethod
     def _format_yolo_line(class_id: int, x: float, y: float, width: float, height: float) -> str | None:

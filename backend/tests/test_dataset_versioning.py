@@ -33,6 +33,24 @@ def _sample_image_bytes(color: tuple[int, int, int]) -> bytes:
     return encoded.tobytes()
 
 
+def _find_exported_label_path(export_root: Path, image_name: str) -> Path:
+    label_name = f"{Path(image_name).stem}.txt"
+    matches = list((export_root / "labels").rglob(label_name))
+    if len(matches) != 1:
+        raise AssertionError(f"Expected exactly one exported label for {image_name}, found {len(matches)}")
+    return matches[0]
+
+
+def _read_single_yolo_row(label_path: Path) -> tuple[int, float, float, float, float]:
+    rows = [line.strip() for line in label_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(rows) != 1:
+        raise AssertionError(f"Expected exactly one YOLO row in {label_path}, found {len(rows)}")
+    parts = rows[0].split()
+    if len(parts) != 5:
+        raise AssertionError(f"Expected 5 YOLO columns in {label_path}, found {len(parts)}")
+    return int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+
+
 class DatasetVersioningTest(unittest.TestCase):
     def setUp(self) -> None:
         self.datasets_repo = DatasetsRepository()
@@ -104,9 +122,55 @@ class DatasetVersioningTest(unittest.TestCase):
         self.assertEqual(len(image_exports), 3)
         self.assertEqual(len(label_exports), 3)
 
+        # BBox labels in export must use YOLO center-based xywh, not top-left xywh.
+        bbox_class_id, bbox_x, bbox_y, bbox_w, bbox_h = _read_single_yolo_row(
+            _find_exported_label_path(export_root, "a.jpg")
+        )
+        self.assertEqual(bbox_class_id, 0)
+        self.assertAlmostEqual(bbox_x, 0.0625, places=4)
+        self.assertAlmostEqual(bbox_y, 0.083333, places=4)
+        self.assertAlmostEqual(bbox_w, 0.0625, places=4)
+        self.assertAlmostEqual(bbox_h, 0.083333, places=4)
+
+        # Polygon annotations are converted to a bbox and must also be center-based.
+        poly_class_id, poly_x, poly_y, poly_w, poly_h = _read_single_yolo_row(
+            _find_exported_label_path(export_root, "b.jpg")
+        )
+        self.assertEqual(poly_class_id, 1)
+        self.assertAlmostEqual(poly_x, 0.140625, places=4)
+        self.assertAlmostEqual(poly_y, 0.229167, places=4)
+        self.assertAlmostEqual(poly_w, 0.09375, places=4)
+        self.assertAlmostEqual(poly_h, 0.125, places=4)
+
         refreshed = self.versions_repo.export_version(dataset["id"], version["id"])
         self.assertEqual(refreshed["id"], version["id"])
         self.assertTrue(Path(refreshed["export_root"]).exists())
+
+    def test_create_version_converts_normalized_top_left_bbox_to_center(self) -> None:
+        dataset = self.datasets_repo.create_dataset("normalized-bbox-dataset", "normalized")
+        self.datasets_repo.save_file(dataset["id"], "images", "n.jpg", _sample_image_bytes((12, 34, 56)))
+        self.datasets_repo.save_annotation(
+            dataset["id"],
+            "n.jpg",
+            [
+                {
+                    "type": "bbox",
+                    "class": "normalized-class",
+                    "bbox": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+                    "normalized": True,
+                }
+            ],
+        )
+
+        version = self.versions_repo.create_version(dataset["id"])
+        export_root = Path(version["export_root"])
+        class_id, x, y, width, height = _read_single_yolo_row(_find_exported_label_path(export_root, "n.jpg"))
+
+        self.assertEqual(class_id, 0)
+        self.assertAlmostEqual(x, 0.25, places=4)
+        self.assertAlmostEqual(y, 0.4, places=4)
+        self.assertAlmostEqual(width, 0.3, places=4)
+        self.assertAlmostEqual(height, 0.4, places=4)
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +263,16 @@ class AugmentIntegrationVersioningTest(unittest.TestCase):
         self.assertIn("img2.jpg", exported_names)
         self.assertIn("img1_aug001.jpg", exported_names)
         self.assertIn("img1_aug002.jpg", exported_names)
+
+        # Inherited annotation on augmented images must be exported as center-based YOLO xywh.
+        class_id, x, y, width, height = _read_single_yolo_row(
+            _find_exported_label_path(export_root, "img1_aug001.jpg")
+        )
+        self.assertEqual(class_id, 0)
+        self.assertAlmostEqual(x, 0.0625, places=4)
+        self.assertAlmostEqual(y, 0.083333, places=4)
+        self.assertAlmostEqual(width, 0.0625, places=4)
+        self.assertAlmostEqual(height, 0.083333, places=4)
 
     def test_create_version_augmented_image_gets_original_annotation(self) -> None:
         """Augmented images inherit their original image's annotation in the snapshot labels dir."""
