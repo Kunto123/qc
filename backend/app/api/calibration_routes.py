@@ -45,14 +45,17 @@ def create_profile():
             expiry_days = max(1, int(expiry_raw))
         except (ValueError, TypeError):
             return jsonify({"error": "expiry_interval_days must be a positive integer"}), 400
-    record = profiles_repo.create(
-        str(payload.get("name") or "").strip() or "Unnamed Profile",
-        dict(payload.get("profile") or {}),
-        scope_line_id=str(payload.get("scope_line_id") or "").strip() or None,
-        scope_station_id=str(payload.get("scope_station_id") or "").strip() or None,
-        scope_part_name=str(payload.get("scope_part_name") or "").strip() or None,
-        expiry_interval_days=expiry_days,
-    )
+    try:
+        record = profiles_repo.create(
+            str(payload.get("name") or "").strip() or "Unnamed Profile",
+            dict(payload.get("profile") or {}),
+            scope_line_id=str(payload.get("scope_line_id") or "").strip() or None,
+            scope_station_id=str(payload.get("scope_station_id") or "").strip() or None,
+            scope_part_name=str(payload.get("scope_part_name") or "").strip() or None,
+            expiry_interval_days=expiry_days,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     return jsonify(record), 201
 
 

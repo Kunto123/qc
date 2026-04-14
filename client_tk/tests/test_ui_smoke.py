@@ -73,6 +73,62 @@ class _StubApi:
             "metadata": {},
         }
 
+    def get_template_version(self, version_id: int):
+        payload = self.get_template(1)
+        payload["version_id"] = int(version_id)
+        payload["version_number"] = int(version_id)
+        payload["camera"]["camera_index"] = 1
+        payload["sticker"]["line"] = "LINE-TEMPLATE"
+        return payload
+
+    def get_active_deployment(self, line_id: str, station_id: str):
+        return {
+            "deployment": {
+                "id": 1,
+                "template_id": 1,
+                "template_name": "QC Line A",
+                "template_version_id": 2,
+                "line_id": line_id,
+                "station_id": station_id,
+                "is_active": True,
+            }
+        }
+
+    def create_session(self, payload: dict):
+        return {
+            "session_id": "sess-ui-smoke",
+            "template_name": "QC Line A",
+            "template_version_id": int(payload.get("template_version_id") or 0),
+            "line_id": payload.get("line_id"),
+            "station_id": payload.get("station_id"),
+        }
+
+    def update_rois(self, _session_id: str, *, part_ready_roi=None, sticker_roi=None):
+        return {"ok": True, "part_ready_roi": part_ready_roi, "sticker_roi": sticker_roi}
+
+    def stop_session(self, _session_id: str):
+        return {"ok": True}
+
+    def push_frame(self, _session_id: str, _image_b64: str, *, response_mode: str | None = None):
+        return {
+            "event_state": "idle",
+            "part_ready": {"part_ready": False, "match_ratio": 0.0},
+            "validation": {"decision": "REJECT", "detected_class": None},
+            "sticker_detection": {"backend": "skipped"},
+            "db_write": {"written": False, "reason": "not_committed"},
+            "response_mode": response_mode or "full",
+            "recent_events": [],
+            "counters": {"session_total": 0, "session_accept": 0, "session_reject": 0},
+        }
+
+    def heartbeat(self, _machine_id: str, *, client_version=None, line_id=None, station_id=None):
+        return {
+            "ok": True,
+            "client_version": client_version,
+            "line_id": line_id,
+            "station_id": station_id,
+        }
+
     def list_models(self):
         return []
     def list_dataset_versions(self, dataset_id: str):
@@ -291,6 +347,19 @@ class UiSmokeTest(unittest.TestCase):
         self.assertIsNotNone(screen.part_ready_preview._photo)
         self.assertIsNotNone(screen.main_view._photo)
         self.assertIn("Sticker ROI", screen.display_source.get())
+        screen.destroy()
+
+    def test_operator_load_deployment_keeps_deployment_version(self) -> None:
+        screen = OperatorScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        screen.line_value.set("LINE-A")
+        screen.station_value.set("ST-01")
+
+        screen._load_deployment()
+
+        self.assertEqual(screen.template_version_value.get(), "2")
+        self.assertEqual(screen.line_value.get(), "LINE-A")
+        self.assertEqual(screen.station_value.get(), "ST-01")
         screen.destroy()
 
     def test_admin_screen_initializes(self) -> None:

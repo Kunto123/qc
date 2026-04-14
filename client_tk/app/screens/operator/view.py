@@ -48,8 +48,10 @@ class OperatorScreen(ctk.CTkFrame):
         self._settings_window: tk.Toplevel | None = None
         self._template_lookup: dict[str, dict] = {}
         self._template_detail_lookup: dict[int, dict] = {}
+        self._template_version_detail_lookup: dict[int, dict] = {}
         self._is_compact_layout: bool | None = None
         self._is_preview_compact: bool | None = None
+        self._auth_error_notified = False
 
         self.line_value = tk.StringVar()
         self.station_value = tk.StringVar()
@@ -457,6 +459,7 @@ class OperatorScreen(ctk.CTkFrame):
         values: list[str] = []
         self._template_lookup = {}
         self._template_detail_lookup = {}
+        self._template_version_detail_lookup = {}
         for item in items:
             label = f"{item['name']} | v{item.get('version_number')} | version_id={item.get('version_id')}"
             values.append(label)
@@ -471,6 +474,15 @@ class OperatorScreen(ctk.CTkFrame):
             return cached
         detail = self.api.get_template(template_id)
         self._template_detail_lookup[template_id] = detail
+        return detail
+
+    def _fetch_template_version_detail(self, version_id: int) -> dict:
+        version_id = int(version_id)
+        cached = self._template_version_detail_lookup.get(version_id)
+        if cached:
+            return cached
+        detail = self.api.get_template_version(version_id)
+        self._template_version_detail_lookup[version_id] = detail
         return detail
 
     def _roi_vars(self, kind: str) -> dict[str, tk.StringVar]:
@@ -506,6 +518,20 @@ class OperatorScreen(ctk.CTkFrame):
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    def _resolve_upload_interval_ms(self) -> int:
+        fallback = max(100, int(DEFAULT_UPLOAD_INTERVAL_MS))
+        detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
+        if not isinstance(detail, dict):
+            return fallback
+        vision = detail.get("vision") if isinstance(detail.get("vision"), dict) else {}
+        try:
+            inference_fps = float(vision.get("inference_fps") or 0.0)
+        except (TypeError, ValueError):
+            return fallback
+        if inference_fps <= 0.0:
+            return fallback
+        return max(100, int(round(1000.0 / inference_fps)))
 
     def _read_roi_payload(self, kind: str) -> dict[str, float]:
         variables = self._roi_vars(kind)
@@ -601,10 +627,16 @@ class OperatorScreen(ctk.CTkFrame):
                 return int(item["id"])
         return None
 
-    def _apply_template_detail(self, detail: dict | None) -> None:
+    def _apply_template_detail(
+        self,
+        detail: dict | None,
+        *,
+        lock_version_id: int | None = None,
+        keep_line_station: bool = False,
+    ) -> None:
         if not detail:
             return
-        version_id = detail.get("version_id") or detail.get("current_version_id")
+        version_id = lock_version_id or detail.get("version_id") or detail.get("current_version_id")
         if version_id:
             self.template_version_value.set(str(version_id))
         self._set_roi_values("part_ready", detail.get("part_ready_roi") or detail.get("roi") or {})
@@ -613,7 +645,7 @@ class OperatorScreen(ctk.CTkFrame):
         if camera_config.get("camera_index") is not None:
             self.camera_value.set(str(camera_config["camera_index"]))
         sticker_config = detail.get("sticker") or {}
-        if sticker_config.get("line"):
+        if not keep_line_station and sticker_config.get("line"):
             self.line_value.set(str(sticker_config["line"]))
         self.state.cache["selected_template_detail"] = detail
         self._refresh_context_summary()
@@ -733,14 +765,27 @@ class OperatorScreen(ctk.CTkFrame):
         self.state.active_deployment = deployment
         self.line_value.set(str(deployment.get("line_id") or line_id))
         self.station_value.set(str(deployment.get("station_id") or station_id))
-        self.template_version_value.set(str(deployment.get("template_version_id") or ""))
-        if deployment.get("template_id"):
+        deployment_version_id = int(deployment.get("template_version_id") or 0)
+        self.template_version_value.set(str(deployment_version_id or ""))
+        detail = None
+        if deployment_version_id:
+            try:
+                detail = self._fetch_template_version_detail(deployment_version_id)
+            except Exception as exc:  # noqa: BLE001
+                self.info_var.set(f"Deployment loaded, tapi detail template version gagal dibaca: {exc}")
+
+        if detail is None and deployment.get("template_id"):
             try:
                 detail = self._fetch_template_detail(int(deployment["template_id"]))
             except Exception as exc:  # noqa: BLE001
                 self.info_var.set(f"Deployment loaded, tapi detail template gagal dibaca: {exc}")
-            else:
-                self._apply_template_detail(detail)
+
+        if detail is not None:
+            self._apply_template_detail(
+                detail,
+                lock_version_id=deployment_version_id or None,
+                keep_line_station=True,
+            )
         self.info_var.set(f"Deployment loaded: {deployment.get('template_name')}")
         self._refresh_context_summary()
         self._update_status_badges()
@@ -796,6 +841,7 @@ class OperatorScreen(ctk.CTkFrame):
         self.state.cache["part_ready"] = None
         self.state.cache["sticker_detection"] = None
         self.state.cache["last_committed_result"] = None
+        self._auth_error_notified = False
         with self._lock:
             self._latest_payload = None
             self._latest_error = None
@@ -804,28 +850,41 @@ class OperatorScreen(ctk.CTkFrame):
         self.recent_list.delete(0, "end")
         self.part_ready_preview.reset()
         self.main_view.reset()
+        upload_interval_ms = self._resolve_upload_interval_ms()
         self.uploader.start(
-            interval_ms=DEFAULT_UPLOAD_INTERVAL_MS,
+            interval_ms=upload_interval_ms,
             get_frame=self.capture.get_latest_frame,
-            send_frame=lambda image_b64: self.api.push_frame(payload["session_id"], image_b64),
+            send_frame=lambda image_b64: self.api.push_frame(
+                payload["session_id"],
+                image_b64,
+                response_mode="compact",
+            ),
             on_result=self._set_result,
             on_error=self._set_error,
         )
-        self.info_var.set(f"Session running: {payload['session_id']}")
+        self.info_var.set(f"Session running: {payload['session_id']} (upload interval {upload_interval_ms} ms)")
         self._refresh_context_summary()
         self._update_status_badges()
 
     def _stop_session(self) -> None:
+        stop_message = "Session stopped."
         if self.state.active_session:
             try:
                 self.api.stop_session(self.state.active_session["session_id"])
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                message = str(exc)
+                if self._is_auth_error(message):
+                    stop_message = "Session lokal dihentikan, tapi stop di server gagal (401). Silakan login ulang."
+                    if not self._auth_error_notified:
+                        self._auth_error_notified = True
+                        messagebox.showwarning("Session", "Sesi server sudah tidak terotorisasi (401). Silakan login ulang.")
+                else:
+                    stop_message = f"Session lokal dihentikan. Warning server: {message}"
         self.uploader.stop()
         self.state.active_session = None
         self.state.cache["part_ready"] = None
         self.state.cache["sticker_detection"] = None
-        self.info_var.set("Session stopped.")
+        self.info_var.set(stop_message)
         self._refresh_context_summary()
         self._update_status_badges()
 
@@ -851,6 +910,12 @@ class OperatorScreen(ctk.CTkFrame):
         with self._lock:
             self._latest_payload = payload
             self._latest_error = None
+        self._auth_error_notified = False
+
+    @staticmethod
+    def _is_auth_error(message: str | None) -> bool:
+        text = str(message or "").strip().lower()
+        return "401" in text or "unauthorized" in text
 
     def _set_error(self, message: str) -> None:
         with self._lock:
@@ -949,8 +1014,21 @@ class OperatorScreen(ctk.CTkFrame):
                 )
         elif error:
             self.state.latest_error = error
+            if self._is_auth_error(error):
+                self.uploader.stop()
+                self.state.active_session = None
+                self.state.cache["part_ready"] = None
+                self.state.cache["sticker_detection"] = None
+                self._refresh_context_summary()
+                if not self._auth_error_notified:
+                    self._auth_error_notified = True
+                    messagebox.showwarning("Session", "Akses sesi ditolak (401). Silakan login ulang.")
+                self.info_var.set("Session dihentikan karena otorisasi gagal (401). Silakan login ulang.")
+                with self._lock:
+                    self._latest_error = None
             self._update_status_badges()
-            self.info_var.set(f"Upload error: {error}")
+            if not self._is_auth_error(error):
+                self.info_var.set(f"Upload error: {error}")
             if frame is not None:
                 self._update_local_roi_previews(frame)
         else:

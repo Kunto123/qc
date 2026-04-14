@@ -61,6 +61,7 @@ def push_frame(session_id: str):
         result = inspection_session_service.process_frame(
             session_id,
             image_b64=str(payload.get("image_b64") or ""),
+            response_mode=str(payload.get("response_mode") or "").strip() or None,
             username=g.current_user.username,
             user_id=g.current_user.id,
         )

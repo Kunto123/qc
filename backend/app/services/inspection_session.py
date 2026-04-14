@@ -155,6 +155,7 @@ class InspectionSessionService:
         session_id: str,
         *,
         image_b64: str,
+        response_mode: str | None = None,
         username: str | None = None,
         user_id: int | None = None,
     ) -> dict[str, Any]:
@@ -261,6 +262,18 @@ class InspectionSessionService:
             event_state=event_state,
             state=state,
         )
+
+        normalized_response_mode = str(response_mode or "").strip().lower()
+        compact_response = normalized_response_mode in {"compact", "minimal", "overlay"}
+        overlay_image_b64 = _encode_image(overlay)
+        preview_image_b64 = None
+        part_ready_preview_image_b64 = None
+        sticker_preview_image_b64 = None
+        if not compact_response:
+            preview_image_b64 = _encode_image(sticker_frame)
+            part_ready_preview_image_b64 = _encode_image(part_ready_frame)
+            sticker_preview_image_b64 = preview_image_b64
+
         payload = {
             "session": self._session_payload(state),
             "roi": sticker_roi_meta,
@@ -279,12 +292,13 @@ class InspectionSessionService:
             "last_committed_result": state.last_committed_result,
             "recent_events": list(state.recent_events),
             "db_write": db_write,
-            "overlay_image_b64": _encode_image(overlay),
-            "preview_image_b64": _encode_image(sticker_frame),
-            "part_ready_preview_image_b64": _encode_image(part_ready_frame),
-            "sticker_preview_image_b64": _encode_image(sticker_frame),
+            "response_mode": "compact" if compact_response else "full",
+            "overlay_image_b64": overlay_image_b64,
+            "preview_image_b64": preview_image_b64,
+            "part_ready_preview_image_b64": part_ready_preview_image_b64,
+            "sticker_preview_image_b64": sticker_preview_image_b64,
         }
-        state.last_overlay_b64 = payload["overlay_image_b64"]
+        state.last_overlay_b64 = overlay_image_b64
         state.latest_result = payload
         return payload
 

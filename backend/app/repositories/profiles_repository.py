@@ -6,6 +6,9 @@ from typing import Any
 from backend.app.repositories.base_json import JsonRepository
 
 
+MIN_PROFILE_PIXELS = 64
+
+
 def _is_expired(record: dict) -> bool:
     expires_at = record.get("expires_at")
     if not expires_at:
@@ -86,6 +89,24 @@ class ProfilesRepository(JsonRepository):
         result["is_expired"] = False
         return result
 
+    def _validate_profile_payload(self, profile: dict) -> None:
+        if not isinstance(profile, dict):
+            raise ValueError("profile must be an object")
+
+        sampling_meta = dict(profile.get("sampling_meta") or {})
+        raw_total_pixels = sampling_meta.get("total_pixels")
+        if raw_total_pixels is None:
+            raise ValueError("profile.sampling_meta.total_pixels is required")
+        try:
+            total_pixels = int(raw_total_pixels)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("profile.sampling_meta.total_pixels must be an integer") from exc
+        if total_pixels < MIN_PROFILE_PIXELS:
+            raise ValueError(
+                "profile.sampling_meta.total_pixels is too small for stable calibration. "
+                f"Minimum {MIN_PROFILE_PIXELS} pixels required, got {total_pixels}."
+            )
+
     def create(
         self,
         name: str,
@@ -107,6 +128,7 @@ class ProfilesRepository(JsonRepository):
             and item.get("scope_part_name") == scope_part_name
         ]
         version = max((int(item.get("version") or 1) for item in scope_items), default=0) + 1
+        self._validate_profile_payload(profile)
 
         now = datetime.now(UTC)
         expires_at: str | None = None
@@ -154,8 +176,7 @@ class ProfilesRepository(JsonRepository):
                 item["name"] = normalized_name
 
             if profile is not _UNSET:
-                if not isinstance(profile, dict):
-                    raise ValueError("profile must be an object")
+                self._validate_profile_payload(profile)
                 item["profile"] = profile
 
             if scope_line_id is not _UNSET:

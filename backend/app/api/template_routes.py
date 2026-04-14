@@ -25,6 +25,15 @@ def get_template(template_id: int):
     return jsonify(detail)
 
 
+@template_blueprint.get("/versions/<int:version_id>")
+@require_auth
+def get_template_version(version_id: int):
+    detail = templates_repo.get_version_detail(version_id)
+    if detail is None:
+        return jsonify({"error": "Template version not found"}), 404
+    return jsonify(detail)
+
+
 @template_blueprint.post("")
 @require_roles(UserRole.ADMIN)
 def create_template():

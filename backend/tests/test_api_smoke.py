@@ -98,6 +98,42 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(payload["sticker_roi"]["w"], 0.6)
         self.assertIn("model_meta_path", payload["vision"])
 
+    def test_00a_template_version_detail_endpoint_returns_requested_version(self) -> None:
+        response = self.client.get("/templates/versions/1", headers=_headers(self.admin_token))
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertEqual(int(payload["id"]), 1)
+        self.assertEqual(int(payload["version_id"]), 1)
+
+    def test_00a2_calibration_rejects_tiny_roi_profile(self) -> None:
+        response = self.client.post(
+            "/calibration/color-profile",
+            json={
+                "image_b64": _sample_image_b64(),
+                "roi": {"x": 0.0, "y": 0.0, "w": 0.001, "h": 0.001},
+                "colorspace": "LAB",
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(response.status_code, 400, response.get_json())
+        error = str((response.get_json() or {}).get("error") or "").lower()
+        self.assertIn("too small", error)
+
+    def test_00a3_profile_create_rejects_tiny_sampling_meta(self) -> None:
+        response = self.client.post(
+            "/calibration/profiles",
+            json={
+                "name": "too-small-profile",
+                "profile": {
+                    "sampling_meta": {"total_pixels": 1},
+                },
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(response.status_code, 400, response.get_json())
+        error = str((response.get_json() or {}).get("error") or "").lower()
+        self.assertIn("minimum", error)
+
     def test_00b_seeded_model_registry_contains_default_model(self) -> None:
         response = self.client.get("/models", headers=_headers(self.engineer_token))
         self.assertEqual(response.status_code, 200, response.get_json())
@@ -428,6 +464,34 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertTrue(buckets)
         self.assertIn("station_id", buckets[0])
         self.assertIn("backend_classic", buckets[0])
+
+    def test_01b_compact_response_mode_omits_preview_images(self) -> None:
+        session_response = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "operator-compact",
+                "camera_index": 0,
+                "template_version_id": 1,
+                "line_id": "LINE-A",
+                "station_id": "ST-01",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_response.status_code, 201, session_response.get_json())
+        session_payload = session_response.get_json()
+
+        frame_response = self.client.post(
+            f"/inspection/sessions/{session_payload['session_id']}/frame",
+            json={"image_b64": _sample_image_b64(), "response_mode": "compact"},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(frame_response.status_code, 200, frame_response.get_json())
+        frame_payload = frame_response.get_json()
+        self.assertEqual(frame_payload["response_mode"], "compact")
+        self.assertTrue(frame_payload["overlay_image_b64"])
+        self.assertIsNone(frame_payload["preview_image_b64"])
+        self.assertIsNone(frame_payload["part_ready_preview_image_b64"])
+        self.assertIsNone(frame_payload["sticker_preview_image_b64"])
 
     def test_02_part_ready_color_gate_blocks_commit_until_match(self) -> None:
         calibration_response = self.client.post(

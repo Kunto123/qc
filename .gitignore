@@ -32,6 +32,7 @@ dist/
 .eggs/
 pip-wheel-metadata/
 debug/
+debug_file_server/
 
 # IDE / OS noise
 .DS_Store

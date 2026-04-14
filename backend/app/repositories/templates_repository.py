@@ -170,6 +170,24 @@ class TemplatesRepository(JsonRepository):
         payload["is_active"] = bool(template.get("is_active", True))
         return payload
 
+    def get_version_detail(self, version_id: int) -> dict[str, Any] | None:
+        version = self.get_version(version_id)
+        if not version:
+            return None
+
+        raw_template = dict(version.get("template") or {})
+        payload = self._normalize_template_payload(raw_template)
+        template_id = int(payload.get("id") or raw_template.get("id") or 0)
+        template_record = self.get_template(template_id) if template_id else None
+
+        if template_id:
+            payload["id"] = template_id
+        if template_record is not None:
+            payload["is_active"] = bool(template_record.get("is_active", payload.get("is_active", True)))
+            payload["name"] = str(payload.get("name") or template_record.get("name") or "")
+            payload["description"] = str(payload.get("description") or template_record.get("description") or "")
+        return payload
+
     def get_by_version_id(self, version_id: int) -> InspectionTemplate | None:
         version = self.get_version(version_id)
         if not version:

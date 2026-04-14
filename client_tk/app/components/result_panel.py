@@ -60,6 +60,7 @@ class ResultPanel(ctk.CTkFrame):
         self.live_state_var = self._build_field(self.live_frame, 0, "Event State")
         self.live_decision_var = self._build_field(self.live_frame, 1, "Live Decision")
         self.live_reason_var = self._build_field(self.live_frame, 2, "Live Reason")
+        self.live_template_version_var = self._build_field(self.live_frame, 3, "Template Version")
 
         self.part_ready_frame = self._build_section("Part Ready Gate")
         self.part_ready_status_var = self._build_field(self.part_ready_frame, 0, "Status")
@@ -67,6 +68,7 @@ class ResultPanel(ctk.CTkFrame):
         self.part_ready_raw_ratio_var = self._build_field(self.part_ready_frame, 2, "Match Ratio (raw)")
         self.part_ready_distance_var = self._build_field(self.part_ready_frame, 3, "Mean Distance")
         self.part_ready_profile_var = self._build_field(self.part_ready_frame, 4, "Profile")
+        self.part_ready_threshold_var = self._build_field(self.part_ready_frame, 5, "Thresholds")
 
         self.sticker_frame = self._build_section("Sticker Validation")
         self.detected_class_var = self._build_field(self.sticker_frame, 0, "Detected Class")
@@ -80,6 +82,9 @@ class ResultPanel(ctk.CTkFrame):
         self.raw_detection_count_var = self._build_field(self.debug_frame, 0, "Raw Detections")
         self.fallback_reason_var = self._build_field(self.debug_frame, 1, "Fallback Reason")
         self.classes_filter_var = self._build_field(self.debug_frame, 2, "Classes Filter")
+        self.model_path_var = self._build_field(self.debug_frame, 3, "Model Path")
+        self.device_var = self._build_field(self.debug_frame, 4, "Effective Device")
+        self.response_mode_var = self._build_field(self.debug_frame, 5, "Response Mode")
 
         self.commit_frame = self._build_section("Commit Details")
         self.reason_var = self._build_field(self.commit_frame, 0, "Reason")
@@ -126,6 +131,7 @@ class ResultPanel(ctk.CTkFrame):
 
         live_validation = payload.get("validation") or {}
         live_part_ready = payload.get("part_ready") or {}
+        live_session = payload.get("session") or {}
         live_details = live_validation.get("validation_details") or {}
         live_candidate = live_details.get("selected_candidate") or {}
 
@@ -166,6 +172,7 @@ class ResultPanel(ctk.CTkFrame):
         self.live_state_var.configure(text=str(payload.get("event_state") or "-").upper())
         self.live_decision_var.configure(text=str(live_validation.get("decision") or "-"))
         self.live_reason_var.configure(text=str(live_reason))
+        self.live_template_version_var.configure(text=str(live_session.get("template_version_id") or "-"))
 
         part_ready_status = display_part_ready.get("status") or ("ready" if display_part_ready.get("part_ready") else "not_ready")
         if not display_part_ready.get("enabled", True):
@@ -182,6 +189,16 @@ class ResultPanel(ctk.CTkFrame):
         elif display_part_ready.get("enabled") is False:
             profile_text = "disabled"
         self.part_ready_profile_var.configure(text=profile_text)
+        threshold_text = "-"
+        if display_part_ready.get("enabled", True):
+            ratio_threshold = display_part_ready.get("min_match_ratio")
+            distance_threshold = display_part_ready.get("distance_threshold")
+            if ratio_threshold is not None or distance_threshold is not None:
+                threshold_text = (
+                    f"ratio>={_format_metric(ratio_threshold)} | "
+                    f"distance<={_format_metric(distance_threshold)}"
+                )
+        self.part_ready_threshold_var.configure(text=threshold_text)
 
         confidence = display_validation.get("sticker_confidence")
         if confidence is None:
@@ -207,9 +224,23 @@ class ResultPanel(ctk.CTkFrame):
         fallback_reason = display_sticker_detection.get("fallback_reason") or "-"
         allowed_labels = display_sticker_detection.get("allowed_labels_filter")
         classes_filter_text = ", ".join(allowed_labels) if allowed_labels is not None else "-"
+        model_path = (
+            display_sticker_detection.get("model_path")
+            or (display_details.get("model") or {}).get("model_path")
+            or "-"
+        )
+        effective_device = str(display_sticker_detection.get("effective_device") or "-")
+        device_backend = str(display_sticker_detection.get("device_backend") or "-")
+        device_text = f"{effective_device} ({device_backend})"
+        if display_sticker_detection.get("device_fallback_reason"):
+            device_text = f"{device_text} | fallback: {display_sticker_detection.get('device_fallback_reason')}"
+        response_mode = str(payload.get("response_mode") or "-")
         self.raw_detection_count_var.configure(text=raw_count_text)
         self.fallback_reason_var.configure(text=str(fallback_reason))
         self.classes_filter_var.configure(text=classes_filter_text)
+        self.model_path_var.configure(text=str(model_path))
+        self.device_var.configure(text=device_text)
+        self.response_mode_var.configure(text=response_mode)
 
         self.reason_var.configure(text=str(reason))
         self.part_var.configure(text=str(display_validation.get("part_name") or "-"))
@@ -226,11 +257,13 @@ class ResultPanel(ctk.CTkFrame):
             self.live_state_var,
             self.live_decision_var,
             self.live_reason_var,
+            self.live_template_version_var,
             self.part_ready_status_var,
             self.part_ready_ratio_var,
             self.part_ready_raw_ratio_var,
             self.part_ready_distance_var,
             self.part_ready_profile_var,
+            self.part_ready_threshold_var,
             self.detected_class_var,
             self.expected_class_var,
             self.sticker_confidence_var,
@@ -240,6 +273,9 @@ class ResultPanel(ctk.CTkFrame):
             self.raw_detection_count_var,
             self.fallback_reason_var,
             self.classes_filter_var,
+            self.model_path_var,
+            self.device_var,
+            self.response_mode_var,
             self.reason_var,
             self.part_var,
             self.line_var,

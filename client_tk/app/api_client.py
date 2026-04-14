@@ -94,6 +94,9 @@ class ApiClient:
     def get_template(self, template_id: int) -> dict:
         return self._get(f"/templates/{template_id}")
 
+    def get_template_version(self, version_id: int) -> dict:
+        return self._get(f"/templates/versions/{version_id}")
+
     def create_template(self, payload: dict) -> dict:
         return self._post("/templates", payload)
 
@@ -144,8 +147,11 @@ class ApiClient:
     def stop_session(self, session_id: str) -> dict:
         return self._post(f"/inspection/sessions/{session_id}/stop", {})
 
-    def push_frame(self, session_id: str, image_b64: str) -> dict:
-        return self._post(f"/inspection/sessions/{session_id}/frame", {"image_b64": image_b64})
+    def push_frame(self, session_id: str, image_b64: str, *, response_mode: str | None = None) -> dict:
+        payload: dict[str, object] = {"image_b64": image_b64}
+        if response_mode:
+            payload["response_mode"] = str(response_mode).strip()
+        return self._post(f"/inspection/sessions/{session_id}/frame", payload)
 
     def list_inspections(self, params: dict | None = None) -> list[dict]:
         return self._get("/inspections", params)

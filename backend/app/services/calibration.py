@@ -8,6 +8,9 @@ import cv2
 import numpy as np
 
 
+MIN_CALIBRATION_PROFILE_PIXELS = 64
+
+
 class CalibrationService:
     @staticmethod
     def decode_image(image_b64: str):
@@ -59,6 +62,11 @@ class CalibrationService:
         pixels, reference_rgb, labels = CalibrationService._convert_pixels(image, colorspace)
         height, width = image.shape[:2]
         total_pixels = int(height * width)
+        if total_pixels < MIN_CALIBRATION_PROFILE_PIXELS:
+            raise ValueError(
+                "Calibration ROI too small. "
+                f"Minimum {MIN_CALIBRATION_PROFILE_PIXELS} pixels required, got {total_pixels}."
+            )
 
         mean_vals = pixels.mean(axis=0)
         std_vals = pixels.std(axis=0)
