@@ -962,96 +962,101 @@ class OperatorScreen(ctk.CTkFrame):
     def _poll_ui(self) -> None:
         if self._closed:
             return
-        frame = self.capture.get_latest_frame()
+        try:
+            frame = self.capture.get_latest_frame()
 
-        with self._lock:
-            payload = self._latest_payload
-            error = self._latest_error
+            with self._lock:
+                payload = self._latest_payload
+                error = self._latest_error
 
-        if payload:
-            self.state.latest_result = payload
-            self.state.latest_error = None
-            self.state.cache["part_ready"] = payload.get("part_ready")
-            self.state.cache["sticker_detection"] = payload.get("sticker_detection")
-            self.state.cache["last_committed_result"] = payload.get("last_committed_result")
-            self.result_panel.update_payload(payload)
-            self.counter_panel.update_payload(payload)
-            self._sync_recent_events(payload)
-            self._refresh_context_summary()
-            self._update_status_badges(payload)
-            timings = payload.get("timings") or {}
-            total_ms = timings.get("total_ms")
-            inference_ms = timings.get("inference_ms")
-            timing_suffix = ""
-            if isinstance(total_ms, (int, float)):
-                timing_suffix = f" | latency={float(total_ms):.1f}ms"
-                if isinstance(inference_ms, (int, float)):
-                    timing_suffix += f" infer={float(inference_ms):.1f}ms"
-            if payload.get("part_ready_preview_image_b64"):
-                self.part_ready_preview.update_b64(payload.get("part_ready_preview_image_b64"))
-            elif frame is not None:
-                local_part_ready = self._crop_local_roi(frame, self._read_roi_payload("part_ready"))
-                if local_part_ready is not None:
-                    self.part_ready_preview.update_bgr(local_part_ready)
-            if payload.get("overlay_image_b64"):
-                self.main_view.update_b64(payload.get("overlay_image_b64"))
-                self.display_source.set("Right View: Server ML Overlay")
-            elif frame is not None:
-                local_scene = self._build_full_frame_with_roi(frame, "sticker", label="Sticker ROI", color=(255, 214, 10))
-                if local_scene is not None:
-                    self.main_view.update_bgr(local_scene)
-                    self.display_source.set("Right View: Live Camera + Sticker ROI")
-            if payload.get("count_committed"):
-                committed = payload.get("last_committed_result") or {}
-                validation = committed.get("validation") or {}
-                part_ready = committed.get("part_ready") or {}
-                detection = committed.get("sticker_detection") or {}
-                self.info_var.set(
-                    f"Committed {validation.get('decision')} | "
-                    f"Part gate={'READY' if part_ready.get('part_ready') else 'BLOCK'} | "
-                    f"{validation.get('part_name') or '-'} | "
-                    f"{validation.get('reject_reason_code') or 'OK'} | "
-                    f"backend={detection.get('backend') or '-'} raw={detection.get('raw_detection_count') if detection.get('raw_detection_count') is not None else '-'}"
-                    f"{timing_suffix}."
-                )
-            else:
-                live_validation = payload.get("validation") or {}
-                live_part_ready = payload.get("part_ready") or {}
-                live_detection = payload.get("sticker_detection") or {}
-                self.info_var.set(
-                    f"Gate={'READY' if live_part_ready.get('part_ready') else 'BLOCK'} "
-                    f"(ratio {live_part_ready.get('match_ratio') if live_part_ready.get('match_ratio') is not None else '-'}) | "
-                    f"Live decision: {live_validation.get('decision') or '-'} | "
-                    f"Detected: {live_validation.get('detected_class') or '-'} | "
-                    f"Reject: {live_validation.get('reject_reason_code') or 'OK'} | "
-                    f"backend={live_detection.get('backend') or '-'} raw={live_detection.get('raw_detection_count') if live_detection.get('raw_detection_count') is not None else '-'}"
-                    f"{timing_suffix}"
-                )
-        elif error:
-            self.state.latest_error = error
-            if self._is_auth_error(error):
-                self.uploader.stop()
-                self.state.active_session = None
-                self.state.cache["part_ready"] = None
-                self.state.cache["sticker_detection"] = None
+            if payload:
+                self.state.latest_result = payload
+                self.state.latest_error = None
+                self.state.cache["part_ready"] = payload.get("part_ready")
+                self.state.cache["sticker_detection"] = payload.get("sticker_detection")
+                self.state.cache["last_committed_result"] = payload.get("last_committed_result")
+                self.result_panel.update_payload(payload)
+                self.counter_panel.update_payload(payload)
+                self._sync_recent_events(payload)
                 self._refresh_context_summary()
-                if not self._auth_error_notified:
-                    self._auth_error_notified = True
-                    messagebox.showwarning("Session", "Akses sesi ditolak (401). Silakan login ulang.")
-                self.info_var.set("Session dihentikan karena otorisasi gagal (401). Silakan login ulang.")
-                with self._lock:
-                    self._latest_error = None
+                self._update_status_badges(payload)
+                timings = payload.get("timings") or {}
+                total_ms = timings.get("total_ms")
+                inference_ms = timings.get("inference_ms")
+                timing_suffix = ""
+                if isinstance(total_ms, (int, float)):
+                    timing_suffix = f" | latency={float(total_ms):.1f}ms"
+                    if isinstance(inference_ms, (int, float)):
+                        timing_suffix += f" infer={float(inference_ms):.1f}ms"
+                if payload.get("part_ready_preview_image_b64"):
+                    self.part_ready_preview.update_b64(payload.get("part_ready_preview_image_b64"))
+                elif frame is not None:
+                    local_part_ready = self._crop_local_roi(frame, self._read_roi_payload("part_ready"))
+                    if local_part_ready is not None:
+                        self.part_ready_preview.update_bgr(local_part_ready)
+                if payload.get("overlay_image_b64"):
+                    self.main_view.update_b64(payload.get("overlay_image_b64"))
+                    self.display_source.set("Right View: Server ML Overlay")
+                elif frame is not None:
+                    local_scene = self._build_full_frame_with_roi(frame, "sticker", label="Sticker ROI", color=(255, 214, 10))
+                    if local_scene is not None:
+                        self.main_view.update_bgr(local_scene)
+                        self.display_source.set("Right View: Live Camera + Sticker ROI")
+                if payload.get("count_committed"):
+                    committed = payload.get("last_committed_result") or {}
+                    validation = committed.get("validation") or {}
+                    part_ready = committed.get("part_ready") or {}
+                    detection = committed.get("sticker_detection") or {}
+                    self.info_var.set(
+                        f"Committed {validation.get('decision')} | "
+                        f"Part gate={'READY' if part_ready.get('part_ready') else 'BLOCK'} | "
+                        f"{validation.get('part_name') or '-'} | "
+                        f"{validation.get('reject_reason_code') or 'OK'} | "
+                        f"backend={detection.get('backend') or '-'} raw={detection.get('raw_detection_count') if detection.get('raw_detection_count') is not None else '-'}"
+                        f"{timing_suffix}."
+                    )
+                else:
+                    live_validation = payload.get("validation") or {}
+                    live_part_ready = payload.get("part_ready") or {}
+                    live_detection = payload.get("sticker_detection") or {}
+                    self.info_var.set(
+                        f"Gate={'READY' if live_part_ready.get('part_ready') else 'BLOCK'} "
+                        f"(ratio {live_part_ready.get('match_ratio') if live_part_ready.get('match_ratio') is not None else '-'}) | "
+                        f"Live decision: {live_validation.get('decision') or '-'} | "
+                        f"Detected: {live_validation.get('detected_class') or '-'} | "
+                        f"Reject: {live_validation.get('reject_reason_code') or 'OK'} | "
+                        f"backend={live_detection.get('backend') or '-'} raw={live_detection.get('raw_detection_count') if live_detection.get('raw_detection_count') is not None else '-'}"
+                        f"{timing_suffix}"
+                    )
+            elif error:
+                self.state.latest_error = error
+                if self._is_auth_error(error):
+                    self.uploader.stop()
+                    self.state.active_session = None
+                    self.state.cache["part_ready"] = None
+                    self.state.cache["sticker_detection"] = None
+                    self._refresh_context_summary()
+                    if not self._auth_error_notified:
+                        self._auth_error_notified = True
+                        messagebox.showwarning("Session", "Akses sesi ditolak (401). Silakan login ulang.")
+                    self.info_var.set("Session dihentikan karena otorisasi gagal (401). Silakan login ulang.")
+                    with self._lock:
+                        self._latest_error = None
+                self._update_status_badges()
+                if not self._is_auth_error(error):
+                    self.info_var.set(f"Upload error: {error}")
+                if frame is not None:
+                    self._update_local_roi_previews(frame)
+            else:
+                self._update_status_badges()
+                if frame is not None:
+                    self._update_local_roi_previews(frame)
+        except tk.TclError as exc:
+            self.state.latest_error = str(exc)
+            self.info_var.set(f"UI render warning: {exc}")
             self._update_status_badges()
-            if not self._is_auth_error(error):
-                self.info_var.set(f"Upload error: {error}")
-            if frame is not None:
-                self._update_local_roi_previews(frame)
-        else:
-            self._update_status_badges()
-            if frame is not None:
-                self._update_local_roi_previews(frame)
-
-        self._schedule_poll()
+        finally:
+            self._schedule_poll()
 
     def shutdown(self) -> None:
         if self._closed:

@@ -40,6 +40,8 @@ class LiveView(ctk.CTkFrame):
     def update_bgr(self, frame) -> None:
         if frame is None:
             return
+        if not self.winfo_exists() or not self._label.winfo_exists():
+            return
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(rgb)
         target_width = self._label.winfo_width()
@@ -50,7 +52,11 @@ class LiveView(ctk.CTkFrame):
             target_height = self._size[1]
         image = ImageOps.contain(image, (target_width, target_height))
         self._photo = ctk.CTkImage(light_image=image, dark_image=image, size=image.size)
-        self._label.configure(image=self._photo, text="", fg_color=PANEL_BG)
+        try:
+            self._label.configure(image=self._photo, text="", fg_color=PANEL_BG)
+        except tk.TclError:
+            # Widget can be in teardown state while a late frame arrives.
+            return
 
     def update_b64(self, image_b64: str | None) -> None:
         if not image_b64:
@@ -63,4 +69,12 @@ class LiveView(ctk.CTkFrame):
 
     def reset(self) -> None:
         self._photo = None
-        self._label.configure(image=None, text="No frame", fg_color="#0f172a")
+        if not self.winfo_exists() or not self._label.winfo_exists():
+            return
+        try:
+            self._label.configure(image=None, text="No frame", fg_color="#0f172a")
+            # CTkLabel keeps the previous tk image when image=None. Explicitly clear it.
+            if hasattr(self._label, "_label"):
+                self._label._label.configure(image="")
+        except tk.TclError:
+            return

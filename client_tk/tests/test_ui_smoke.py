@@ -363,6 +363,19 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(screen.station_value.get(), "ST-01")
         screen.destroy()
 
+    def test_operator_poll_ui_survives_tclerror(self) -> None:
+        screen = OperatorScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        frame = np.zeros((180, 320, 3), dtype=np.uint8)
+
+        with mock.patch.object(screen, "_update_local_roi_previews", side_effect=tk.TclError("image 'pyimage33' doesn't exist")):
+            with mock.patch.object(screen.capture, "get_latest_frame", return_value=frame):
+                screen._poll_ui()
+
+        self.assertIn("pyimage33", str(screen.state.latest_error or ""))
+        self.assertIn("UI render warning", screen.info_var.get())
+        screen.destroy()
+
     def test_admin_screen_initializes(self) -> None:
         screen = AdminScreen(self.root, self.api, self.state)
         screen.update_idletasks()
@@ -2473,6 +2486,8 @@ class UiSmokeTest(unittest.TestCase):
         live_view = LiveView(container, "Preview", size=(320, 200))
         live_view.pack(fill="both", expand=False)
         self.root.update_idletasks()
+        live_view.update_bgr(np.zeros((180, 240, 3), dtype=np.uint8))
+        self.root.update_idletasks()
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -2484,6 +2499,27 @@ class UiSmokeTest(unittest.TestCase):
             if "Given image is not CTkImage" in str(warning.message)
         ]
         self.assertFalse(ctk_warnings)
+
+    def test_live_view_reset_then_update_does_not_raise_tclerror(self) -> None:
+        container = ttk.Frame(self.root, width=360, height=260)
+        container.pack_propagate(False)
+        container.pack(fill="both", expand=False)
+
+        live_view = LiveView(container, "Preview", size=(320, 200))
+        live_view.pack(fill="both", expand=False)
+        self.root.update_idletasks()
+
+        frame = np.zeros((180, 240, 3), dtype=np.uint8)
+        live_view.update_bgr(frame)
+        self.root.update_idletasks()
+        live_view.reset()
+        self.root.update_idletasks()
+
+        try:
+            live_view.update_bgr(frame)
+            self.root.update_idletasks()
+        except tk.TclError as exc:
+            self.fail(f"LiveView update after reset raised TclError: {exc}")
 
     # ------------------------------------------------------------------
     # Training summary formatter regression tests
