@@ -533,7 +533,7 @@ class TemplateEditorForm(ctk.CTkFrame):
         values: list[str] = []
         combined_models: list[dict] = []
         seen_model_keys: set[tuple[str, str]] = set()
-        for source_item in list(models) + self._detect_model_file_options():
+        for source_item in list(models):
             item = dict(source_item)
             model_id = str(item.get("id") or "").strip().lower()
             model_path = str(item.get("path") or "").strip().lower()
@@ -567,6 +567,20 @@ class TemplateEditorForm(ctk.CTkFrame):
                 self.model_choice_var.set(label)
                 break
 
+    def _sync_model_selection(self) -> None:
+        """Re-select the correct dropdown entry based on the current model_path_var.
+
+        Called from set_payload so that loading a template re-highlights the right
+        registered model without rebuilding the entire dropdown from a stale cache.
+        """
+        current_path = self.model_path_var.get().strip().lower()
+        if not current_path:
+            return
+        for label, item in self._model_lookup.items():
+            if str(item.get("path") or "").strip().lower() == current_path:
+                self.model_choice_var.set(label)
+                return
+
     def set_profile_options(self, profiles: list[dict]) -> None:
         self._profile_lookup = {}
         values: list[str] = []
@@ -582,6 +596,20 @@ class TemplateEditorForm(ctk.CTkFrame):
             if str(item.get("id")) == current_id:
                 self.part_ready_profile_choice.set(label)
                 break
+
+    def _sync_profile_selection(self) -> None:
+        """Re-select the correct profile dropdown entry based on part_ready_profile_id_var.
+
+        Called from set_payload to restore the selection without repopulating options
+        from a stale cache.
+        """
+        current_id = self.part_ready_profile_id_var.get().strip()
+        if not current_id:
+            return
+        for label, item in self._profile_lookup.items():
+            if str(item.get("id")) == current_id:
+                self.part_ready_profile_choice.set(label)
+                return
 
     def _on_model_selected(self, _event=None) -> None:
         item = self._model_lookup.get(self.model_choice_var.get().strip())
@@ -686,8 +714,8 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.metadata_editor.delete("1.0", "end")
         self.metadata_editor.insert("1.0", json.dumps(metadata, ensure_ascii=True, indent=2))
 
-        self.set_model_options(list(self._model_lookup.values()))
-        self.set_profile_options(list(self._profile_lookup.values()))
+        self._sync_model_selection()
+        self._sync_profile_selection()
 
     def get_payload(self) -> dict:
         metadata_raw = self.metadata_editor.get("1.0", "end").strip() or "{}"

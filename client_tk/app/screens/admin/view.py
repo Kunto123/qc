@@ -193,6 +193,7 @@ class AdminScreen(ctk.CTkFrame):
         self._build_workstation_tools_tab()
 
         self._notebook = notebook
+        notebook.configure(command=self._on_tab_changed)
 
     def _build_workstation_tools_tab(self) -> None:
         host = ctk.CTkFrame(self.workstation_tools_tab, fg_color=APP_BG, corner_radius=0)
@@ -865,6 +866,19 @@ class AdminScreen(ctk.CTkFrame):
         self.refresh_users()
         self.refresh_results()
         self.refresh_dashboard()
+
+    def _on_tab_changed(self) -> None:
+        """Called by CTkTabview whenever the selected tab changes.
+
+        Refreshes template model/profile options automatically when the user
+        enters the Templates tab so the dropdown never shows stale data.
+        """
+        try:
+            current_tab = self._notebook.get()
+        except Exception:
+            return
+        if current_tab == "Templates":
+            self.refresh_template_dependencies()
 
     def refresh_template_dependencies(self) -> None:
         def _load():
