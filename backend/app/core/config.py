@@ -71,6 +71,12 @@ class AppConfig:
     # When 1: geometric transforms are allowed in version snapshots and the label geometry
     # engine transforms bbox/polygon annotations accordingly.
     geometric_augment_enabled: bool = os.getenv("QC_SUITE_GEOMETRIC_AUGMENT_ENABLED", "0").strip() == "1"
+    # WebSocket streaming sidecar.
+    # QC_SUITE_STREAM_PORT: port for the persistent-frame streaming server (default 8101).
+    # QC_SUITE_STREAM_HOST: bind address for the streaming server; empty string means
+    #   inherit QC_SUITE_HOST so the two servers share the same bind address.
+    stream_port: int = max(1, int(os.getenv("QC_SUITE_STREAM_PORT", "8101")))
+    stream_host: str = os.getenv("QC_SUITE_STREAM_HOST", "").strip()
 
     @property
     def sql_enabled(self) -> bool:

@@ -174,6 +174,11 @@ class InspectionSessionService:
             self._sessions.pop(session_id, None)
         return self._session_payload(state)
 
+    def has_session(self, session_id: str) -> bool:
+        """Return True if a session with this id is currently active."""
+        with self._lock:
+            return session_id in self._sessions
+
     def process_frame(
         self,
         session_id: str,
@@ -183,18 +188,43 @@ class InspectionSessionService:
         username: str | None = None,
         user_id: int | None = None,
     ) -> dict[str, Any]:
+        decode_started = time.perf_counter()
+        frame = _decode_image(image_b64)
+        decode_ms = round((time.perf_counter() - decode_started) * 1000.0, 2)
+        return self.process_frame_decoded(
+            session_id,
+            frame=frame,
+            decode_ms=decode_ms,
+            response_mode=response_mode,
+            username=username,
+            user_id=user_id,
+        )
+
+    def process_frame_decoded(
+        self,
+        session_id: str,
+        *,
+        frame,
+        decode_ms: float = 0.0,
+        response_mode: str | None = None,
+        username: str | None = None,
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Process a pre-decoded numpy BGR frame for the given session.
+
+        Called by ``process_frame`` (which decodes base64 first) and by the
+        WebSocket streaming handler (which receives raw JPEG bytes directly).
+        ``decode_ms`` carries the caller's decode timing so it is reflected in
+        the returned timings payload.
+        """
         total_started = time.perf_counter()
-        timings: dict[str, float] = {}
+        timings: dict[str, float] = {"decode_ms": float(decode_ms)}
 
         def _elapsed_ms(started_at: float) -> float:
             return round((time.perf_counter() - started_at) * 1000.0, 2)
 
         state = self._require_session(session_id)
         state.frame_index += 1
-
-        decode_started = time.perf_counter()
-        frame = _decode_image(image_b64)
-        timings["decode_ms"] = _elapsed_ms(decode_started)
 
         part_ready_started = time.perf_counter()
         part_ready_frame, part_ready_roi_meta = self._crop_stage_roi(

@@ -77,7 +77,7 @@ def create_app() -> Flask:
 
 
 def _register_worker_lifecycle(app: Flask) -> None:
-    """Start push worker on first request, stop it on teardown."""
+    """Start push worker and WebSocket streaming server on first request."""
     _started = [False]
 
     @app.before_request
@@ -92,7 +92,15 @@ def _register_worker_lifecycle(app: Flask) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning("[factory] push worker failed to start: %s", exc)
 
+        try:
+            from backend.app.streaming.server import start as start_stream_server
+            config = app.config["QC_SUITE"]
+            stream_host = config.stream_host or config.host
+            start_stream_server(host=stream_host, port=config.stream_port)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[factory] streaming server failed to start: %s", exc)
+
     @app.teardown_appcontext
     def _stop_workers(_exc=None):
-        pass  # daemon thread exits with process; explicit stop only needed in tests
+        pass  # daemon threads exit with process; explicit stop only needed in tests
 

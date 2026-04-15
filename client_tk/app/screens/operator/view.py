@@ -14,8 +14,9 @@ from client_tk.app.components.counter_panel import CounterPanel
 from client_tk.app.components.live_view import LiveView
 from client_tk.app.components.result_panel import ResultPanel
 from client_tk.app.components.scrollable_frame import ScrollableFrame
-from client_tk.app.config import DEFAULT_UPLOAD_INTERVAL_MS
+from client_tk.app.config import DEFAULT_STREAM_URL, DEFAULT_UPLOAD_INTERVAL_MS
 from client_tk.app.services.camera_capture import CameraCaptureService
+from client_tk.app.services.frame_stream import FrameStreamService
 from client_tk.app.services.frame_upload import FrameUploadService
 from client_tk.app.theme import APP_BG, BORDER, PANEL_BG, SHELL_BG, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, ACCENT_HOVER, TEXT_ON_ACCENT
 
@@ -37,7 +38,8 @@ class OperatorScreen(ctk.CTkFrame):
         self.api = api_client
         self.state = session_state
         self.capture = CameraCaptureService()
-        self.uploader = FrameUploadService()
+        self.streamer = FrameStreamService()
+        self.uploader = FrameUploadService()  # HTTP fallback when stream URL is empty
         self._latest_payload: dict | None = None
         self._latest_error: str | None = None
         self._lock = threading.Lock()
@@ -851,18 +853,37 @@ class OperatorScreen(ctk.CTkFrame):
         self.part_ready_preview.reset()
         self.main_view.reset()
         upload_interval_ms = self._resolve_upload_interval_ms()
-        self.uploader.start(
-            interval_ms=upload_interval_ms,
-            get_frame=self.capture.get_latest_frame,
-            send_frame=lambda image_b64: self.api.push_frame(
-                payload["session_id"],
-                image_b64,
-                response_mode="compact",
-            ),
-            on_result=self._set_result,
-            on_error=self._set_error,
-        )
-        self.info_var.set(f"Session running: {payload['session_id']} (upload interval {upload_interval_ms} ms)")
+        stream_url = DEFAULT_STREAM_URL.strip()
+        if stream_url:
+            stream_fps = max(1.0, 1000.0 / max(100, upload_interval_ms))
+            token = getattr(self.state, "token", None) or ""
+            self.streamer.start(
+                stream_url=stream_url,
+                token=token,
+                session_id=payload["session_id"],
+                get_frame=self.capture.get_latest_frame,
+                on_result=self._set_result,
+                on_error=self._set_error,
+                fps=stream_fps,
+            )
+            self.info_var.set(
+                f"Session running: {payload['session_id']} (WebSocket stream @ {stream_fps:.0f} fps)"
+            )
+        else:
+            self.uploader.start(
+                interval_ms=upload_interval_ms,
+                get_frame=self.capture.get_latest_frame,
+                send_frame=lambda image_b64: self.api.push_frame(
+                    payload["session_id"],
+                    image_b64,
+                    response_mode="compact",
+                ),
+                on_result=self._set_result,
+                on_error=self._set_error,
+            )
+            self.info_var.set(
+                f"Session running: {payload['session_id']} (HTTP upload interval {upload_interval_ms} ms)"
+            )
         self._refresh_context_summary()
         self._update_status_badges()
 
@@ -880,6 +901,7 @@ class OperatorScreen(ctk.CTkFrame):
                         messagebox.showwarning("Session", "Sesi server sudah tidak terotorisasi (401). Silakan login ulang.")
                 else:
                     stop_message = f"Session lokal dihentikan. Warning server: {message}"
+        self.streamer.stop()
         self.uploader.stop()
         self.state.active_session = None
         self.state.cache["part_ready"] = None
@@ -1032,6 +1054,7 @@ class OperatorScreen(ctk.CTkFrame):
             elif error:
                 self.state.latest_error = error
                 if self._is_auth_error(error):
+                    self.streamer.stop()
                     self.uploader.stop()
                     self.state.active_session = None
                     self.state.cache["part_ready"] = None
@@ -1079,6 +1102,7 @@ class OperatorScreen(ctk.CTkFrame):
             self.sidebar_canvas.unbind_all("<MouseWheel>")
         self._close_settings()
         self._stop_session()
+        self.streamer.stop()
         self.capture.stop()
 
     def destroy(self) -> None:
