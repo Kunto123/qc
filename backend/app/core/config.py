@@ -59,6 +59,12 @@ class AppConfig:
     # Templates that explicitly set part_ready_settle_ms (including 0 to bypass) ignore it.
     # Default 0 = no settle (backward compatible).
     part_ready_settle_ms_default: int = max(0, int(os.getenv("QC_SUITE_PART_READY_SETTLE_MS", "0")))
+    # Training weights resolution policy.
+    # When 1 (default): the worker will attempt to auto-download from Ultralytics Hub if the
+    # weights file is not found locally. Suitable for dev environments with internet access.
+    # When 0 (offline-strict): the worker fails immediately with an actionable error if the local
+    # weights file is missing. Use for air-gapped / production environments.
+    training_weights_download_allowed: bool = os.getenv("QC_SUITE_TRAINING_WEIGHTS_DOWNLOAD_ALLOWED", "1").strip() != "0"
     # Geometric augmentation feature flag.
     # When 0 (default): geometric transforms (flip_h, flip_v, rotate) are rejected when
     # including augment jobs in a version snapshot — label coords copied verbatim.

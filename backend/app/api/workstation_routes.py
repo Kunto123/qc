@@ -547,6 +547,20 @@ def create_training_job():
         payload["base_model_task"] = base_model_spec["task"]
         payload["base_model_source"] = base_model_spec["source"]
         payload["base_model_spec"] = base_model_spec
+        # Offline-strict preflight: fail fast before queuing when download is disabled
+        # and the weights file is not available locally.
+        if not app_config.training_weights_download_allowed:
+            weights_name = base_model_spec["weights_name"]
+            local_weights = MODELS_DIR / weights_name
+            if not local_weights.exists() or not local_weights.is_file():
+                return jsonify({
+                    "error": (
+                        f"Weights file '{weights_name}' is not available locally "
+                        f"({local_weights}) and download is disabled "
+                        "(QC_SUITE_TRAINING_WEIGHTS_DOWNLOAD_ALLOWED=0). "
+                        "Copy the weights file to MODELS_DIR or enable download."
+                    )
+                }), 400
     else:
         if base_model_family or base_model_variant:
             return jsonify({"error": "Unsupported base model family/variant"}), 400

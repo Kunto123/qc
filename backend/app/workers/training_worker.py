@@ -15,6 +15,7 @@ import logging
 import shutil
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,15 @@ from backend.app.core.device_runtime import DeviceResolution, DeviceRuntimeResol
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL = 1  # seconds between queue checks
+
+
+@dataclass
+class WeightsResolution:
+    """Result of the layered weights resolver."""
+    weights_input: str          # raw filename or path from the job
+    weights_source: str         # "absolute" | "local_cache" | "download"
+    resolved_path: str          # actual path or alias passed to YOLO()
+    resolution_attempts: list[str] = field(default_factory=list)
 _SIMULATED_TOTAL_SECONDS = 0.8
 _SIMULATED_STEP_SECONDS = 0.1
 
@@ -245,6 +255,68 @@ class TrainingWorker:
             raw_value = f"{raw_value}.pt"
         return raw_value
 
+    def _resolve_weights(self, job: dict) -> WeightsResolution:
+        """Form an ordered candidate list and return the first viable resolution.
+
+        Resolution order:
+        1. Absolute path (if weights_name is absolute and the file exists).
+        2. Local cache: MODELS_DIR / weights_name.
+        3. Auto-download alias (model name without .pt) — only when
+           ``training_weights_download_allowed`` is True.
+
+        Raises ``FileNotFoundError`` with an actionable message when all
+        candidates are exhausted.
+        """
+        weights_name = self._resolve_weights_name(job)
+        attempts: list[str] = []
+
+        # Candidate 1: absolute path supplied explicitly
+        candidate = Path(weights_name)
+        if candidate.is_absolute():
+            attempts.append(str(candidate))
+            if candidate.exists() and candidate.is_file():
+                return WeightsResolution(
+                    weights_input=weights_name,
+                    weights_source="absolute",
+                    resolved_path=str(candidate),
+                    resolution_attempts=attempts,
+                )
+            raise FileNotFoundError(
+                f"Weights file not found at absolute path: {candidate}. "
+                "Verify the path is correct and the file exists on this host."
+            )
+
+        # Candidate 2: local cache in MODELS_DIR
+        local_path = MODELS_DIR / weights_name
+        attempts.append(str(local_path))
+        if local_path.exists() and local_path.is_file():
+            return WeightsResolution(
+                weights_input=weights_name,
+                weights_source="local_cache",
+                resolved_path=str(local_path),
+                resolution_attempts=attempts,
+            )
+
+        # Candidate 3: auto-download via model alias (strip .pt)
+        alias = Path(weights_name).stem
+        if self._config.training_weights_download_allowed:
+            attempts.append(f"download:{alias}")
+            return WeightsResolution(
+                weights_input=weights_name,
+                weights_source="download",
+                resolved_path=alias,
+                resolution_attempts=attempts,
+            )
+
+        # All candidates exhausted, downloads disabled
+        raise FileNotFoundError(
+            f"Weights file '{weights_name}' not found locally and download is disabled "
+            f"(QC_SUITE_TRAINING_WEIGHTS_DOWNLOAD_ALLOWED=0). "
+            f"Checked: {', '.join(attempts)}. "
+            "Fix: copy the weights file to MODELS_DIR or set "
+            "QC_SUITE_TRAINING_WEIGHTS_DOWNLOAD_ALLOWED=1."
+        )
+
     def _resolve_train_hparams(self, job: dict) -> dict[str, Any]:
         params = job.get("params") if isinstance(job.get("params"), dict) else {}
 
@@ -392,13 +464,25 @@ class TrainingWorker:
         self._raise_if_cancelled(job_id)
         self._set_progress(job_id, percent=20, stage="preparing", message="Preparing YOLO training inputs.")
         data_yaml_path = self._resolve_training_source(job)
-        weights_name = self._resolve_weights_name(job)
+        weights_resolution = self._resolve_weights(job)
         hparams = self._resolve_train_hparams(job)
         run_project = artifact_path.parent / "training_runs"
         run_name = str(job.get("id") or datetime.now(UTC).strftime("%Y%m%d%H%M%S"))
 
         run_project.mkdir(parents=True, exist_ok=True)
-        model = YOLO(weights_name)
+        logger.info(
+            "[training-worker] weights resolved: input=%s, source=%s, path=%s",
+            weights_resolution.weights_input,
+            weights_resolution.weights_source,
+            weights_resolution.resolved_path,
+        )
+        self._repo.update_job(
+            job_id,
+            resolved_weights_input=weights_resolution.weights_input,
+            resolved_weights_source=weights_resolution.weights_source,
+            resolution_attempts=weights_resolution.resolution_attempts,
+        )
+        model = YOLO(weights_resolution.resolved_path)
 
         # Log hparams before training starts so log reflects what was actually requested.
         self._repo.update_job(
@@ -406,7 +490,8 @@ class TrainingWorker:
             log_line=(
                 f"Training started: epochs={hparams['epochs']}, imgsz={hparams['imgsz']}, "
                 f"batch={hparams['batch']}, patience={hparams['patience']}, "
-                f"workers={hparams['workers']}, weights={weights_name}, "
+                f"workers={hparams['workers']}, weights={weights_resolution.weights_input} "
+                f"(source={weights_resolution.weights_source}), "
                 f"device={resolution.effective_device}"
             ),
         )
