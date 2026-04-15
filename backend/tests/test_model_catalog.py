@@ -25,3 +25,19 @@ class ModelCatalogTest(unittest.TestCase):
 
     def test_get_base_model_returns_none_for_unknown_id(self) -> None:
         self.assertIsNone(get_base_model("does-not-exist"))
+
+    def test_yolo11_catalog_uses_canonical_weights_name(self) -> None:
+        """YOLO11 catalog entries must use 'yolo11' (not 'yolov11') as the weights prefix."""
+        for variant in ("n", "s", "m", "l", "x"):
+            with self.subTest(variant=variant):
+                item = get_base_model(f"yolov11{variant}")
+                self.assertIsNotNone(item)
+                self.assertEqual(item["weights_name"], f"yolo11{variant}.pt")
+
+    def test_yolov5_catalog_weights_name_unaffected(self) -> None:
+        """YOLOv5 weights names must stay as 'yolov5*.pt' — no unintended rename."""
+        for variant in ("n", "s", "m", "l", "x"):
+            with self.subTest(variant=variant):
+                item = get_base_model(f"yolov5{variant}")
+                self.assertIsNotNone(item)
+                self.assertEqual(item["weights_name"], f"yolov5{variant}.pt")

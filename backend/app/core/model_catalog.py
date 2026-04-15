@@ -32,6 +32,10 @@ def _build_catalog() -> list[dict[str, Any]]:
     catalog: list[dict[str, Any]] = []
     for family in ("yolov5", "yolov11"):
         family_label = _FAMILY_LABELS[family]
+        # Ultralytics YOLO11 uses "yolo11" (no 'v') as the weights prefix.
+        # The internal catalog ID keeps "yolov11" for backward compatibility with
+        # existing job records; only the weights_name changes.
+        weights_prefix = "yolo11" if family == "yolov11" else family
         for variant in ("n", "s", "m", "l", "x"):
             variant_label = _VARIANT_LABELS[variant]
             model_id = f"{family}{variant}"
@@ -46,7 +50,7 @@ def _build_catalog() -> list[dict[str, Any]]:
                     "display_label": f"{family_label} {variant_label} ({model_id})",
                     "runtime": "ultralytics",
                     "task": "detection",
-                    "weights_name": f"{model_id}.pt",
+                    "weights_name": f"{weights_prefix}{variant}.pt",
                     "source": "catalog",
                     "description": f"Ultralytics {family_label} {variant_label.lower()} detection base model.",
                 }

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import threading
 import time
@@ -255,19 +256,35 @@ class TrainingWorker:
             raw_value = f"{raw_value}.pt"
         return raw_value
 
+    @staticmethod
+    def _canonicalize_weights_name(weights_name: str) -> str:
+        """Map legacy ``yolov11*.pt`` names to the canonical Ultralytics ``yolo11*.pt`` format.
+
+        Ultralytics YOLO11 weights use the prefix ``yolo11`` (no ``v``).
+        Legacy job records or catalog entries that still carry ``yolov11`` are
+        transparently remapped so that download and local-cache lookups use the
+        correct filename.  YOLOv5 names are unaffected.
+        """
+        if re.match(r"^yolov11[a-z0-9]", weights_name, re.IGNORECASE):
+            # Replace leading "yolov11" with "yolo11"
+            return "yolo11" + weights_name[len("yolov11"):]
+        return weights_name
+
     def _resolve_weights(self, job: dict) -> WeightsResolution:
         """Form an ordered candidate list and return the first viable resolution.
 
         Resolution order:
         1. Absolute path (if weights_name is absolute and the file exists).
-        2. Local cache: MODELS_DIR / weights_name.
-        3. Auto-download alias (model name without .pt) — only when
+        2. Local cache — canonical name first (``MODELS_DIR/yolo11m.pt``), then
+           raw/legacy name (``MODELS_DIR/yolov11m.pt``) when they differ.
+        3. Auto-download via canonical alias (``yolo11m``) — only when
            ``training_weights_download_allowed`` is True.
 
         Raises ``FileNotFoundError`` with an actionable message when all
         candidates are exhausted.
         """
         weights_name = self._resolve_weights_name(job)
+        canonical_name = self._canonicalize_weights_name(weights_name)
         attempts: list[str] = []
 
         # Candidate 1: absolute path supplied explicitly
@@ -286,32 +303,45 @@ class TrainingWorker:
                 "Verify the path is correct and the file exists on this host."
             )
 
-        # Candidate 2: local cache in MODELS_DIR
-        local_path = MODELS_DIR / weights_name
-        attempts.append(str(local_path))
-        if local_path.exists() and local_path.is_file():
+        # Candidate 2a: local cache — canonical name (preferred)
+        canonical_local = MODELS_DIR / canonical_name
+        attempts.append(str(canonical_local))
+        if canonical_local.exists() and canonical_local.is_file():
             return WeightsResolution(
                 weights_input=weights_name,
                 weights_source="local_cache",
-                resolved_path=str(local_path),
+                resolved_path=str(canonical_local),
                 resolution_attempts=attempts,
             )
 
-        # Candidate 3: auto-download via model alias (strip .pt)
-        alias = Path(weights_name).stem
+        # Candidate 2b: local cache — raw/legacy name (backward compat)
+        if canonical_name != weights_name:
+            raw_local = MODELS_DIR / weights_name
+            attempts.append(str(raw_local))
+            if raw_local.exists() and raw_local.is_file():
+                return WeightsResolution(
+                    weights_input=weights_name,
+                    weights_source="local_cache",
+                    resolved_path=str(raw_local),
+                    resolution_attempts=attempts,
+                )
+
+        # Candidate 3: auto-download via canonical alias (strip .pt)
+        canonical_alias = Path(canonical_name).stem  # e.g. "yolo11m"
         if self._config.training_weights_download_allowed:
-            attempts.append(f"download:{alias}")
+            attempts.append(f"download:{canonical_alias}")
             return WeightsResolution(
                 weights_input=weights_name,
                 weights_source="download",
-                resolved_path=alias,
+                resolved_path=canonical_alias,
                 resolution_attempts=attempts,
             )
 
         # All candidates exhausted, downloads disabled
+        canonical_suffix = f" (canonical: '{canonical_name}')" if canonical_name != weights_name else ""
         raise FileNotFoundError(
-            f"Weights file '{weights_name}' not found locally and download is disabled "
-            f"(QC_SUITE_TRAINING_WEIGHTS_DOWNLOAD_ALLOWED=0). "
+            f"Weights file '{weights_name}'{canonical_suffix} not found locally "
+            f"and download is disabled (QC_SUITE_TRAINING_WEIGHTS_DOWNLOAD_ALLOWED=0). "
             f"Checked: {', '.join(attempts)}. "
             "Fix: copy the weights file to MODELS_DIR or set "
             "QC_SUITE_TRAINING_WEIGHTS_DOWNLOAD_ALLOWED=1."
