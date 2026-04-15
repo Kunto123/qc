@@ -159,6 +159,22 @@ class ModelsRepository(JsonRepository):
             return dict(item)
         raise ValueError(f"Model {model_id} not found.")
 
+    def update_model(self, model_id: int, *, name: str) -> dict:
+        name = str(name or "").strip()
+        if not name:
+            raise ValueError("Model name must not be empty.")
+        payload = self.load()
+        for item in payload["models"]:
+            if int(item["id"]) != int(model_id):
+                continue
+            if str(item.get("source") or "").strip().lower() == "seeded-default":
+                raise ValueError(f"Model {model_id} is a seeded-default and cannot be renamed.")
+            item["name"] = name
+            item["updated_at"] = datetime.now(UTC).isoformat()
+            self.save(payload)
+            return dict(item)
+        raise ValueError(f"Model {model_id} not found.")
+
     def delete_model(self, model_id: int) -> dict[str, Any]:
         payload = self.load()
         items = payload["models"]

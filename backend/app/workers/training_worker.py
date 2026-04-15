@@ -640,6 +640,7 @@ class TrainingWorker:
                     "base_model_display_name": job.get("base_model_display_name"),
                     "trained_model_path": trained_model_path,
                     "training_engine_mode": self._training_mode,
+                    "class_names": list(class_names),
                     "training_params": {
                         "epochs": params.get("epochs"),
                         "imgsz": params.get("imgsz"),
@@ -656,8 +657,10 @@ class TrainingWorker:
         )
         name = str(job.get("base_model_display_name") or job.get("base_model") or "trained model").strip()
         suffix = str(job.get("dataset_version_display_label") or job.get("dataset_version_name") or job.get("dataset_id") or "dataset").strip()
+        job_id_short = str(job.get("id") or "").replace("-", "")[:8]
+        display_name = f"{name} [{suffix}]" if not job_id_short else f"{name} [{suffix}] #{job_id_short}"
         return self._models_repo.add_model(
-            f"{name} [{suffix}]",
+            display_name,
             str(artifact_path),
             source="training",
             meta_path=str(meta_path),
@@ -721,7 +724,8 @@ class TrainingWorker:
             path_prefix = f"{job['dataset_id']}__{base_model_fragment}"
             if dataset_version_fragment:
                 path_prefix = f"{job['dataset_id']}__{dataset_version_fragment}__{base_model_fragment}"
-            trained_path = f"models/trained/{path_prefix}__{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}.pt"
+            job_id_short = str(job_id).replace("-", "")[:8]
+            trained_path = f"models/trained/{path_prefix}__{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}__{job_id_short}.pt"
             artifact_path = self._trained_artifact_path(trained_path)
             self._raise_if_cancelled(job_id)
 

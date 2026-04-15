@@ -341,6 +341,9 @@ class ApiClient:
     def upload_model_file(self, payload: dict) -> dict:
         return self._post("/models/upload", payload)
 
+    def update_model(self, model_id: int, payload: dict) -> dict:
+        return self._patch(f"/models/{model_id}", payload)
+
     def delete_model(self, model_id: int, *, purge_files: bool = False) -> dict:
         params = {"purge_files": "1"} if purge_files else None
         return self._request_json("DELETE", f"/models/{model_id}", params=params, timeout=20)

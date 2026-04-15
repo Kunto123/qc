@@ -6,7 +6,7 @@ import base64
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import customtkinter as ctk
 
@@ -911,13 +911,14 @@ class EngineerScreen(ctk.CTkFrame):
         self.models_right_panel = ctk.CTkFrame(self.models_container, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
 
         ttk.Label(self.models_left_panel, text="Model Registry", font=("Segoe UI", 11, "bold")).pack(anchor="w")
-        self.models_list = tk.Listbox(self.models_left_panel)
+        self.models_list = tk.Listbox(self.models_left_panel, exportselection=False)
         self.models_list.pack(fill="both", expand=True, pady=(8, 0))
         self.models_list.bind("<<ListboxSelect>>", lambda _event: self.on_model_selected())
         models_action_bar = ttk.Frame(self.models_left_panel)
         models_action_bar.pack(fill="x", pady=(8, 0))
         ttk.Button(models_action_bar, text="Refresh", command=self.refresh_models).pack(side="left")
-        ttk.Button(models_action_bar, text="Delete Selected", command=self.delete_selected_model).pack(side="left", padx=6)
+        ttk.Button(models_action_bar, text="Rename Selected", command=self.rename_selected_model).pack(side="left", padx=6)
+        ttk.Button(models_action_bar, text="Delete Selected", command=self.delete_selected_model).pack(side="left")
 
         ttk.Label(self.models_right_panel, text="Register Sticker Model", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
         ttk.Label(
@@ -3084,12 +3085,28 @@ class EngineerScreen(ctk.CTkFrame):
         run_async(self, _load, callback=_done)
 
     def _apply_models(self, items: list[dict]) -> None:
+        # Remember the selected model_id before wiping, so we can restore it.
+        prev_model_id: int | None = None
+        if hasattr(self, "models_list"):
+            prev_index = self._selected_listbox_index(self.models_list)
+            if prev_index is not None and prev_index < len(self._model_cache):
+                _mid = int(self._model_cache[prev_index].get("id") or 0)
+                prev_model_id = _mid if _mid > 0 else None
+
         self._model_cache = items
         if not hasattr(self, "models_list"):
             return
         self.models_list.delete(0, "end")
-        for item in items:
+        restore_index: int | None = None
+        for idx, item in enumerate(items):
             self.models_list.insert("end", f"{item['id']} | {item['name']} | {item['path']}")
+            if prev_model_id is not None and int(item.get("id") or 0) == prev_model_id:
+                restore_index = idx
+
+        if restore_index is not None:
+            self.models_list.selection_set(restore_index)
+            self.models_list.see(restore_index)
+            self.on_model_selected()
 
     def create_model(self):
         payload = {
@@ -3109,6 +3126,47 @@ class EngineerScreen(ctk.CTkFrame):
             messagebox.showerror("Models", str(exc))
             return
         self.model_detail.set_payload(created)
+        self.refresh_models()
+
+    def rename_selected_model(self):
+        index = self._selected_listbox_index(self.models_list)
+        if index is None or index >= len(self._model_cache):
+            messagebox.showwarning("Models", "Pilih model yang ingin di-rename.")
+            return
+
+        selected = self._model_cache[index]
+        model_id = int(selected.get("id") or 0)
+        if model_id <= 0:
+            return
+
+        if str(selected.get("source") or "").strip().lower() == "seeded-default":
+            messagebox.showwarning(
+                "Models",
+                "Model default (seeded-default) tidak dapat di-rename.\n"
+                "Hanya model hasil training atau upload yang bisa diganti namanya.",
+            )
+            return
+
+        old_name = str(selected.get("name") or "")
+        new_name = simpledialog.askstring(
+            "Rename Model",
+            f"Masukkan nama baru untuk model '{old_name}':",
+            initialvalue=old_name,
+            parent=self,
+        )
+        if not new_name or not new_name.strip():
+            return
+        new_name = new_name.strip()
+        if new_name == old_name:
+            return
+
+        try:
+            updated = self.api.update_model(model_id, {"name": new_name})
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Models", str(exc))
+            return
+
+        self.model_detail.set_payload(updated)
         self.refresh_models()
 
     def delete_selected_model(self):

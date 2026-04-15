@@ -226,6 +226,9 @@ class _StubApi:
     def delete_training_job(self, job_id: str):
         return {"deleted": True, "id": job_id}
     
+    def update_model(self, model_id: int, payload: dict):
+        return {"id": model_id, **payload}
+
     def delete_model(self, model_id: int, *, purge_files: bool = False):
         return {"deleted": True, "id": model_id, "purge_files": purge_files}
     
@@ -2641,3 +2644,148 @@ class UiSmokeTest(unittest.TestCase):
             "Active (running) job should be preferred over completed one",
         )
         screen.destroy()
+
+    def test_engineer_rename_selected_model_calls_api(self) -> None:
+        """rename_selected_model calls api.update_model with the new name and refreshes the list."""
+        models = [{"id": 7, "name": "Old Name", "path": "models/m7.pt", "source": "trained"}]
+        calls: list[tuple[int, dict]] = []
+
+        def update_model(model_id: int, payload: dict):
+            calls.append((model_id, dict(payload)))
+            return {"id": model_id, "name": payload.get("name"), "path": "models/m7.pt", "source": "trained"}
+
+        with mock.patch.object(self.api, "list_models", return_value=models), \
+             mock.patch.object(self.api, "update_model", side_effect=update_model), \
+             mock.patch("client_tk.app.screens.engineer.view.simpledialog.askstring", return_value="New Name"):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Models")
+            screen.models_list.selection_set(0)
+
+            screen.rename_selected_model()
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0], (7, {"name": "New Name"}))
+            screen.destroy()
+
+    def test_engineer_rename_seeded_default_shows_warning_not_api(self) -> None:
+        """rename_selected_model must show a warning and NOT call api.update_model for seeded-default."""
+        models = [{"id": 1, "name": "AKH Sticker Detector", "path": "models/default.pt", "source": "seeded-default"}]
+        api_calls: list = []
+
+        with mock.patch.object(self.api, "list_models", return_value=models), \
+             mock.patch.object(self.api, "update_model", side_effect=lambda *a, **kw: api_calls.append(a)), \
+             mock.patch("client_tk.app.screens.engineer.view.messagebox.showwarning") as mock_warn:
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Models")
+            screen.models_list.selection_set(0)
+
+            screen.rename_selected_model()
+
+            self.assertEqual(api_calls, [], "update_model must NOT be called for seeded-default")
+            mock_warn.assert_called_once()
+            screen.destroy()
+
+    def test_engineer_rename_no_selection_shows_warning(self) -> None:
+        """rename_selected_model without a selection shows a warning."""
+        with mock.patch.object(self.api, "list_models", return_value=[]), \
+             mock.patch("client_tk.app.screens.engineer.view.messagebox.showwarning") as mock_warn:
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Models")
+
+            screen.rename_selected_model()
+
+            mock_warn.assert_called_once()
+            screen.destroy()
+
+    # ------------------------------------------------------------------
+    # Phase 6: Model Registry selection stability
+    # ------------------------------------------------------------------
+
+    def test_engineer_models_list_exportselection_false(self) -> None:
+        """models_list must have exportselection=False so highlight persists when focus moves."""
+        with mock.patch.object(self.api, "list_models", return_value=[]):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Models")
+            # cget returns the configured value; False is stored as 0 in tkinter
+            value = screen.models_list.cget("exportselection")
+            self.assertFalse(bool(value), "models_list must use exportselection=False")
+            screen.destroy()
+
+    def test_engineer_apply_models_restores_selection_by_model_id(self) -> None:
+        """_apply_models must restore the previous selection when the same model_id is still present."""
+        models_v1 = [
+            {"id": 10, "name": "Model A", "path": "models/a.pt"},
+            {"id": 11, "name": "Model B", "path": "models/b.pt"},
+        ]
+        models_v2 = [
+            {"id": 10, "name": "Model A (renamed)", "path": "models/a.pt"},
+            {"id": 11, "name": "Model B", "path": "models/b.pt"},
+            {"id": 12, "name": "Model C", "path": "models/c.pt"},
+        ]
+        with mock.patch.object(self.api, "list_models", return_value=models_v1):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Models")
+            # Select item at index 1 (Model B, id=11)
+            screen.models_list.selection_set(1)
+            screen.on_model_selected()
+            self.assertEqual(len(screen._model_cache), 2)
+
+            # Simulate refresh with an updated list (Model A renamed, Model C added)
+            screen._apply_models(models_v2)
+            screen.update_idletasks()
+
+            # Selection must have been restored to the item with id=11 (now at index 1 still)
+            restored_index = screen.models_list.curselection()
+            self.assertTrue(restored_index, "Selection must be restored after _apply_models")
+            self.assertEqual(int(restored_index[0]), 1, "Model B (id=11) must still be at index 1")
+            # model_detail must also be updated to the restored item
+            self.assertEqual(screen._model_cache[restored_index[0]]["id"], 11)
+            screen.destroy()
+
+    def test_engineer_apply_models_clears_detail_when_selection_gone(self) -> None:
+        """When the previously selected model is removed from the list, detail is left as-is (no crash)."""
+        models_v1 = [{"id": 20, "name": "Ephemeral", "path": "models/e.pt"}]
+        models_v2 = [{"id": 21, "name": "New Model", "path": "models/n.pt"}]
+        with mock.patch.object(self.api, "list_models", return_value=models_v1):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Models")
+            screen.models_list.selection_set(0)
+            screen.on_model_selected()
+
+            # Refresh with a list that no longer contains id=20
+            screen._apply_models(models_v2)
+            screen.update_idletasks()
+
+            # No selection must remain (model is gone)
+            self.assertEqual(screen.models_list.curselection(), (), "No item must be selected when model is gone")
+            screen.destroy()
+
+    def test_engineer_delete_after_selection_uses_correct_item(self) -> None:
+        """delete_selected_model must use the item currently selected in the list, not a stale cache index."""
+        models = [
+            {"id": 30, "name": "Keep", "path": "models/keep.pt"},
+            {"id": 31, "name": "Delete Me", "path": "models/del.pt"},
+        ]
+        deleted_ids: list[int] = []
+
+        def delete_model(model_id: int, *, purge_files: bool = False):
+            deleted_ids.append(model_id)
+            return {"deleted": True, "id": model_id}
+
+        with mock.patch.object(self.api, "list_models", return_value=models), \
+             mock.patch.object(self.api, "delete_model", side_effect=delete_model), \
+             mock.patch("client_tk.app.screens.engineer.view.messagebox.askyesno", return_value=True):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            screen.select_tab("Models")
+            screen.models_list.selection_set(1)   # select "Delete Me" at index 1
+
+            screen.delete_selected_model()
+
+            self.assertEqual(deleted_ids, [31], "Must delete model id=31 (Delete Me), not id=30")

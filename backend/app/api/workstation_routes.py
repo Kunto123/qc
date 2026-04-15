@@ -698,6 +698,36 @@ def transition_model_lifecycle(model_id: int):
     return jsonify(result)
 
 
+@workstation_blueprint.patch("/models/<int:model_id>")
+@require_roles(UserRole.ADMIN)
+def rename_model(model_id: int):
+    payload = request.get_json(force=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Request body must be an object"}), 400
+
+    allowed_fields = {"name"}
+    extra_fields = set(payload.keys()) - allowed_fields
+    if extra_fields:
+        return jsonify({
+            "error": f"Only 'name' can be updated. Unexpected field(s): {', '.join(sorted(extra_fields))}"
+        }), 400
+
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name must be a non-empty string"}), 400
+
+    try:
+        record = models_repo.update_model(model_id, name=name)
+    except ValueError as exc:
+        message = str(exc)
+        if "not found" in message.lower():
+            return jsonify({"error": message}), 404
+        if "seeded-default" in message.lower():
+            return jsonify({"error": message}), 409
+        return jsonify({"error": message}), 400
+    return jsonify(record)
+
+
 @workstation_blueprint.delete("/models/<int:model_id>")
 @require_roles(UserRole.ADMIN)
 def delete_model(model_id: int):

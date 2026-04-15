@@ -279,6 +279,8 @@ class InspectionSessionService:
                 meta_path=inference_payload.get("meta_path"),
                 class_names=inference_payload.get("class_names") or [],
                 fallback_reason=inference_payload.get("fallback_reason"),
+                raw_detection_count=inference_payload.get("raw_detection_count"),
+                allowed_labels_filter=inference_payload.get("allowed_labels_filter"),
             )
             sticker_detection.update(
                 {
@@ -506,6 +508,8 @@ class InspectionSessionService:
         meta_path: str | None = None,
         class_names: list[str] | None = None,
         fallback_reason: str | None = None,
+        raw_detection_count: int | None = None,
+        allowed_labels_filter: list[str] | None = None,
     ) -> dict[str, Any]:
         best = max(detections, key=lambda item: float(item.get("confidence") or 0.0), default=None)
         return {
@@ -517,6 +521,8 @@ class InspectionSessionService:
             "class_names": list(class_names or []),
             "fallback_reason": fallback_reason,
             "count": len(detections),
+            "raw_detection_count": raw_detection_count,
+            "allowed_labels_filter": allowed_labels_filter,
             "items": detections,
             "best": best,
         }

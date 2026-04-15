@@ -33,6 +33,7 @@ dist/
 pip-wheel-metadata/
 debug/
 debug_file_server/
+yolo*.pt
 
 # IDE / OS noise
 .DS_Store

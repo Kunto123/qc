@@ -2605,3 +2605,137 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(pr["part_ready_settle_ms"], 0)
         self.assertEqual(pr["part_ready_settle_remaining_ms"], 0)
 
+    # ------------------------------------------------------------------
+    # Phase 14: model registry rename
+    # ------------------------------------------------------------------
+
+    def test_14a_admin_can_rename_trained_model(self) -> None:
+        """Admin can rename a non-seeded model via PATCH /models/<id>."""
+        create_response = self.client.post(
+            "/models",
+            json={"name": "Original Name", "path": "models/rename-test.pt", "source": "manual"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(create_response.status_code, 201, create_response.get_json())
+        model = create_response.get_json()
+        model_id = model["id"]
+
+        patch_response = self.client.patch(
+            f"/models/{model_id}",
+            json={"name": "Renamed Model v2"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(patch_response.status_code, 200, patch_response.get_json())
+        updated = patch_response.get_json()
+        self.assertEqual(updated["name"], "Renamed Model v2")
+        self.assertEqual(updated["path"], "models/rename-test.pt")
+        self.assertIn("updated_at", updated)
+
+        # Verify list reflects new name
+        list_response = self.client.get("/models", headers=_headers(self.admin_token))
+        names = [item["name"] for item in list_response.get_json() if int(item["id"]) == int(model_id)]
+        self.assertEqual(names, ["Renamed Model v2"])
+
+    def test_14b_rename_seeded_default_returns_409(self) -> None:
+        """Renaming a seeded-default model must be rejected with 409."""
+        list_response = self.client.get("/models", headers=_headers(self.admin_token))
+        self.assertEqual(list_response.status_code, 200)
+        seeded = next(
+            (item for item in list_response.get_json() if item.get("source") == "seeded-default"),
+            None,
+        )
+        if seeded is None:
+            self.skipTest("No seeded-default model in registry")
+        patch_response = self.client.patch(
+            f"/models/{seeded['id']}",
+            json={"name": "Attempted Rename"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(patch_response.status_code, 409, patch_response.get_json())
+
+    def test_14c_rename_with_empty_name_returns_400(self) -> None:
+        """Empty name must be rejected with 400."""
+        create_response = self.client.post(
+            "/models",
+            json={"name": "Temp Model", "path": "models/temp-rename.pt", "source": "manual"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(create_response.status_code, 201)
+        model_id = create_response.get_json()["id"]
+
+        for bad_name in ("", "   "):
+            patch_response = self.client.patch(
+                f"/models/{model_id}",
+                json={"name": bad_name},
+                headers=_headers(self.admin_token),
+            )
+            self.assertEqual(patch_response.status_code, 400, patch_response.get_json())
+
+    def test_14d_rename_nonexistent_model_returns_404(self) -> None:
+        """Renaming a model that does not exist must return 404."""
+        patch_response = self.client.patch(
+            "/models/99999",
+            json={"name": "Ghost Model"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(patch_response.status_code, 404, patch_response.get_json())
+
+    def test_14e_rename_with_extra_fields_returns_400(self) -> None:
+        """Payload containing fields other than 'name' must be rejected with 400."""
+        create_response = self.client.post(
+            "/models",
+            json={"name": "Extra Fields Test", "path": "models/extra.pt", "source": "manual"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(create_response.status_code, 201)
+        model_id = create_response.get_json()["id"]
+
+        patch_response = self.client.patch(
+            f"/models/{model_id}",
+            json={"name": "OK Name", "path": "models/hijack.pt"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(patch_response.status_code, 400, patch_response.get_json())
+        error_msg = str((patch_response.get_json() or {}).get("error") or "")
+        self.assertIn("path", error_msg)
+
+    def test_14f_non_admin_cannot_rename_model(self) -> None:
+        """Operator (non-admin) must be rejected with 403 when renaming a model."""
+        create_response = self.client.post(
+            "/models",
+            json={"name": "Non-Admin Guard", "path": "models/guard.pt", "source": "manual"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(create_response.status_code, 201)
+        model_id = create_response.get_json()["id"]
+
+        patch_response = self.client.patch(
+            f"/models/{model_id}",
+            json={"name": "Renamed By Operator"},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(patch_response.status_code, 403, patch_response.get_json())
+
+    def test_14g_rename_preserves_path_and_provenance(self) -> None:
+        """After rename, path, source, and provenance must remain unchanged."""
+        create_response = self.client.post(
+            "/models",
+            json={"name": "Provenance Test", "path": "models/provenance.pt", "source": "manual"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(create_response.status_code, 201)
+        original = create_response.get_json()
+        model_id = original["id"]
+
+        self.client.patch(
+            f"/models/{model_id}",
+            json={"name": "Provenance Test Renamed"},
+            headers=_headers(self.admin_token),
+        )
+
+        list_response = self.client.get("/models", headers=_headers(self.admin_token))
+        after = next(item for item in list_response.get_json() if int(item["id"]) == int(model_id))
+        self.assertEqual(after["path"], original["path"])
+        self.assertEqual(after["source"], original["source"])
+        self.assertEqual(after.get("provenance"), original.get("provenance"))
+
