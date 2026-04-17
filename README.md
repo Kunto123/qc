@@ -86,14 +86,16 @@ QC_SUITE_STICKER_INFERENCE_MODE=classic
 
 ### 4. Jalankan aplikasi
 
-Untuk desktop local-only, cukup jalankan client. Client akan memakai transport lokal embedded dan memuat backend di proses yang sama.
+Untuk sekali jalan yang langsung membuka backend dan frontend dalam satu perintah, pakai launcher desktop:
 
 ```powershell
 cd qc-suite-python
-py -3.11 scripts/run_client.py
+py -3.11 scripts/run_desktop.py
 ```
 
-Untuk mode split deployment atau remote client, jalankan backend di terminal lain:
+Mode default local-only akan memakai backend embedded di proses yang sama. Jika ingin memaksa backend terpisah pada mesin yang sama, gunakan `--split`.
+
+Untuk mode split deployment penuh atau remote client, jalankan backend di terminal lain:
 
 ```powershell
 cd qc-suite-python
