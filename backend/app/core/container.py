@@ -13,6 +13,10 @@ from backend.app.repositories.hybrid_inspection_results_repository import Hybrid
 from backend.app.repositories.inspection_results_repository import InspectionResultsRepository
 from backend.app.repositories.models_repository import ModelsRepository
 from backend.app.repositories.profiles_repository import ProfilesRepository
+from backend.app.repositories.postgres.auth_audit_repository import PostgresAuthAuditRepository
+from backend.app.repositories.postgres.inspection_mirror_repository import PostgresInspectionMirrorRepository
+from backend.app.repositories.postgres.session_store import PostgresTokenStore
+from backend.app.repositories.postgres.users_repository import PostgresUsersRepository
 from backend.app.repositories.sqlserver.auth_audit_repository import SqlServerAuthAuditRepository
 from backend.app.repositories.sqlserver.inspection_mirror_repository import SqlServerInspectionMirrorRepository
 from backend.app.repositories.sqlserver.session_store import SqlServerTokenStore
@@ -32,10 +36,19 @@ from backend.app.workers.push_worker import PushWorker
 app_config = AppConfig()
 device_runtime = DeviceRuntimeResolver(app_config)
 filesystem_storage_repo = FilesystemStorageRepository()
-users_repo = SqlServerUsersRepository(app_config) if app_config.sql_enabled else UsersRepository()
+database_backend = app_config.database_backend
+users_repo = (
+    PostgresUsersRepository(app_config)
+    if database_backend == "postgresql"
+    else SqlServerUsersRepository(app_config)
+    if database_backend == "sqlserver"
+    else UsersRepository()
+)
 audit_repo = (
-    SqlServerAuthAuditRepository(app_config)
-    if app_config.sql_enabled
+    PostgresAuthAuditRepository(app_config)
+    if database_backend == "postgresql"
+    else SqlServerAuthAuditRepository(app_config)
+    if database_backend == "sqlserver"
     else AuthAuditRepository()
 )
 templates_repo = TemplatesRepository()
@@ -49,15 +62,23 @@ dataset_versions_repo = DatasetVersionRepository(
 models_repo = ModelsRepository()
 training_repo = TrainingRepository()
 local_inspection_results_repo = InspectionResultsRepository()
-inspection_sql_mirror_repo = SqlServerInspectionMirrorRepository(app_config) if app_config.sql_enabled else None
+inspection_sql_mirror_repo = (
+    PostgresInspectionMirrorRepository(app_config)
+    if database_backend == "postgresql"
+    else SqlServerInspectionMirrorRepository(app_config)
+    if database_backend == "sqlserver"
+    else None
+)
 inspection_results_repo = HybridInspectionResultsRepository(
     local_inspection_results_repo,
     inspection_sql_mirror_repo,
 )
 
 token_store = (
-    SqlServerTokenStore(app_config, ttl_seconds=app_config.access_token_ttl_seconds)
-    if app_config.sql_enabled
+    PostgresTokenStore(app_config, ttl_seconds=app_config.access_token_ttl_seconds)
+    if database_backend == "postgresql"
+    else SqlServerTokenStore(app_config, ttl_seconds=app_config.access_token_ttl_seconds)
+    if database_backend == "sqlserver"
     else TokenStore(ttl_seconds=app_config.access_token_ttl_seconds)
 )
 

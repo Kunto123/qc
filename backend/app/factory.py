@@ -37,16 +37,24 @@ def create_app() -> Flask:
 
     @app.get("/health/detailed")
     def health_detailed():
-        from backend.app.core.container import inspection_results_repo, push_worker, token_store
+        from backend.app.core.container import app_config, inspection_results_repo, push_worker, token_store
         checks: dict[str, dict] = {}
+
+        backend_name = app_config.database_backend
 
         # SQL mirror
         sql_mirror_active = inspection_results_repo._sql_mirror_repo is not None  # noqa: SLF001
-        checks["sql_mirror"] = {"ok": sql_mirror_active, "note": "SQL Server push active" if sql_mirror_active else "local-only mode"}
+        mirror_note = {
+            "postgresql": "PostgreSQL mirror active",
+            "sqlserver": "SQL Server mirror active",
+        }.get(backend_name, "local-only mode")
+        checks["sql_mirror"] = {"ok": sql_mirror_active, "note": mirror_note if sql_mirror_active else "local-only mode"}
 
         # Session store
         store_type = type(token_store).__name__
-        checks["session_store"] = {"ok": True, "backend": store_type}
+        checks["session_store"] = {"ok": True, "backend": store_type, "mode": backend_name}
+
+        checks["database_backend"] = {"ok": True, "backend": backend_name}
 
         # Push worker
         worker_alive = push_worker._thread is not None and push_worker._thread.is_alive()  # noqa: SLF001

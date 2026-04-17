@@ -8,6 +8,8 @@ Greenfield QC suite in a separate folder, built as:
 - `docs/`: product, screens, API, and deployment notes
 - `scripts/`: run and smoke-test helpers
 
+Default runtime is local-first desktop: the client uses the embedded local transport by default, and split deployment is only needed for compatibility or remote access.
+
 Default seeded users:
 
 - `admin / admin123`
@@ -16,9 +18,9 @@ Default seeded users:
 
 ## Role Screens
 
-- `Operator`: login, local camera, active deployment lookup, ROI update, live decision, DB write status
+- `Operator`: login, local camera, active deployment lookup, ROI update, live decision, tilt hard-reject status, DB write status
 - `Admin`: templates, deployments, users, inspection results, dashboard
-- `Engineer`: dataset upload, annotations, augment jobs, training jobs, model registry, color calibration
+- `Engineer`: dataset upload, annotations, augment jobs, training jobs, model registry, portable model export/import, color calibration
 
 ## Cara Menjalankan
 
@@ -28,7 +30,9 @@ README ini memakai contoh Windows + PowerShell.
 
 - Install Python `3.11`
 - Pastikan `pip` aktif
-- Jika akan pakai SQL Server, install driver ODBC yang sesuai, default repo ini memakai `ODBC Driver 17 for SQL Server`
+- Untuk local-only desktop, tidak perlu database server tambahan
+- Jika akan pakai PostgreSQL, siapkan server PostgreSQL yang bisa dijangkau backend
+- Jika masih memakai SQL Server sebagai kompatibilitas sementara, install driver ODBC yang sesuai, default repo ini memakai `ODBC Driver 17 for SQL Server`
 
 ### 2. Install dependency project
 
@@ -41,14 +45,37 @@ py -3.11 -m pip install -e .
 
 Salin `deploy/.env.example` menjadi `.env`, lalu isi sesuai kebutuhan environment Anda.
 
-Minimal untuk local run:
+Minimal untuk local-only desktop:
 
 ```env
-QC_SUITE_HOST=127.0.0.1
-QC_SUITE_PORT=8100
-QC_SUITE_DEBUG=0
+QC_SUITE_LOCAL_ONLY=1
+QC_SUITE_DATABASE_BACKEND=local
+QC_SUITE_SERVER_URL=local://embedded
 QC_SUITE_SECRET_KEY=ganti-secret-anda
-QC_SUITE_SERVER_URL=http://127.0.0.1:8100
+```
+
+Jika ingin memakai PostgreSQL sebagai backend relasional:
+
+```env
+QC_SUITE_DATABASE_BACKEND=postgresql
+POSTGRESQL_HOST=127.0.0.1
+POSTGRESQL_PORT=5432
+POSTGRESQL_DATABASE=qc_suite
+POSTGRESQL_USERNAME=qc_suite_user
+POSTGRESQL_PASSWORD=secret
+POSTGRESQL_SCHEMA=public
+POSTGRESQL_SSLMODE=prefer
+```
+
+Jika masih perlu SQL Server untuk kompatibilitas sementara, isi juga:
+
+```env
+QC_SUITE_DATABASE_BACKEND=sqlserver
+MSSQL_SERVER=...
+MSSQL_DATABASE=...
+MSSQL_USERNAME=...
+MSSQL_PASSWORD=...
+MSSQL_DRIVER=ODBC Driver 17 for SQL Server
 ```
 
 Jika model production belum siap, untuk smoke test lokal Anda bisa memakai:
@@ -57,35 +84,25 @@ Jika model production belum siap, untuk smoke test lokal Anda bisa memakai:
 QC_SUITE_STICKER_INFERENCE_MODE=classic
 ```
 
-Jika ingin memakai SQL Server, isi juga:
+### 4. Jalankan aplikasi
 
-```env
-MSSQL_SERVER=...
-MSSQL_DATABASE=...
-MSSQL_USERNAME=...
-MSSQL_PASSWORD=...
-MSSQL_DRIVER=ODBC Driver 17 for SQL Server
-```
-
-### 4. Jalankan backend
-
-```powershell
-cd qc-suite-python
-py -3.11 scripts/run_backend.py
-```
-
-Backend default akan jalan di `http://127.0.0.1:8100`.
-
-### 5. Jalankan client
-
-Di terminal lain:
+Untuk desktop local-only, cukup jalankan client. Client akan memakai transport lokal embedded dan memuat backend di proses yang sama.
 
 ```powershell
 cd qc-suite-python
 py -3.11 scripts/run_client.py
 ```
 
-### 6. Login ke aplikasi
+Untuk mode split deployment atau remote client, jalankan backend di terminal lain:
+
+```powershell
+cd qc-suite-python
+py -3.11 scripts/run_backend.py
+```
+
+Lalu set `QC_SUITE_LOCAL_ONLY=0` dan `QC_SUITE_SERVER_URL=http://IP:8100` pada client sebelum menjalankan `scripts/run_client.py`.
+
+### 5. Login ke aplikasi
 
 Gunakan akun seed bawaan:
 
@@ -93,7 +110,7 @@ Gunakan akun seed bawaan:
 - `operator / operator123`
 - `engineer / engineer123`
 
-### 7. Smoke check lokal
+### 6. Smoke check lokal
 
 Smoke-check backend tanpa menyentuh runtime lama:
 
@@ -110,9 +127,9 @@ cd qc-suite-python
 py -3.11 -m unittest client_tk.tests.test_ui_smoke
 ```
 
-## Menjalankan Server dan Client di PC Berbeda
+## Mode Split Deployment
 
-Arsitektur aplikasi ini memang mendukung runtime split:
+Mode ini hanya diperlukan bila Anda ingin memisahkan backend dan client ke mesin berbeda.
 
 - backend berjalan di PC server
 - client Tkinter berjalan di PC operator/admin/engineer
@@ -124,6 +141,7 @@ Arsitektur aplikasi ini memang mendukung runtime split:
 Set environment backend di PC server:
 
 ```env
+QC_SUITE_LOCAL_ONLY=0
 QC_SUITE_HOST=0.0.0.0
 QC_SUITE_PORT=8100
 QC_SUITE_DEBUG=0
@@ -134,9 +152,23 @@ QC_SUITE_DEFAULT_STICKER_MODEL_PATH=D:\qc-suite-data\models\sticker.pt
 QC_SUITE_DEFAULT_STICKER_MODEL_META_PATH=D:\qc-suite-data\models\sticker.meta.json
 ```
 
+Jika PostgreSQL dipakai:
+
+```env
+QC_SUITE_DATABASE_BACKEND=postgresql
+POSTGRESQL_HOST=...
+POSTGRESQL_PORT=5432
+POSTGRESQL_DATABASE=...
+POSTGRESQL_USERNAME=...
+POSTGRESQL_PASSWORD=...
+POSTGRESQL_SCHEMA=public
+POSTGRESQL_SSLMODE=prefer
+```
+
 Jika SQL Server dipakai:
 
 ```env
+QC_SUITE_DATABASE_BACKEND=sqlserver
 MSSQL_SERVER=...
 MSSQL_DATABASE=...
 MSSQL_USERNAME=...
@@ -169,9 +201,10 @@ waitress-serve --host 0.0.0.0 --port 8100 backend.app.main:app
 
 ### 4. Siapkan PC client
 
-Set `QC_SUITE_SERVER_URL` di PC client agar mengarah ke IP server:
+Set `QC_SUITE_LOCAL_ONLY=0` dan `QC_SUITE_SERVER_URL` di PC client agar mengarah ke IP server:
 
 ```env
+QC_SUITE_LOCAL_ONLY=0
 QC_SUITE_SERVER_URL=http://192.168.1.10:8100
 ```
 
@@ -195,11 +228,14 @@ Setelah backend dan client aktif:
 ## Notes
 
 - Existing runtime in the repo is untouched.
-- This project uses JSON/file storage by default, with optional SQL Server persistence for inspection results when `MSSQL_*` env vars are configured.
+- This project uses JSON/file storage by default, with optional PostgreSQL or SQL Server persistence selected via `QC_SUITE_DATABASE_BACKEND`.
+- `local` is the default backend for desktop-only use, `postgresql` is the recommended relational backend for new deployments, and `sqlserver` is retained for compatibility.
 - Sticker inference Phase 3 is wired to `D:\ProjectMagang\akh.pt` with metadata from `D:\ProjectMagang\ds-43598c556c__yolov5mu__20260402-085412.meta.json`.
 - Runtime mode is controlled by `QC_SUITE_STICKER_INFERENCE_MODE`:
   - `auto`: try Ultralytics first, fallback to classic contour inference
   - `ultralytics`: require the YOLO runtime and fail if unavailable
   - `classic`: deterministic fallback for smoke tests and local debugging
+- The engineer screen now supports portable model export/import from the Model Registry.
+- Sticker tilt is a hard reject gate; when the configured threshold is exceeded, the operator sees `OUT_OF_ANGLE`.
 - Dashboard summary and time buckets now aggregate persisted Phase 5 fields, including `station_id`, `sticker_backend`, `total_part_ready`, `avg_sticker_confidence`, and `avg_part_ready_match_ratio`.
 - `GET /deployments/active` returns `{ "deployment": ... }` so the client can distinguish between no deployment and a valid deployment deterministically.

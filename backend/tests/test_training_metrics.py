@@ -629,5 +629,62 @@ class LoggingQuietModeTest(unittest.TestCase):
         self.assertIn("INFO", combined)
 
 
+class DatabaseBackendConfigTest(unittest.TestCase):
+    """Verify relational backend selection stays explicit and predictable."""
+
+    def _reload_app_config(self):
+        import importlib
+
+        import backend.app.core.config as config_module
+
+        importlib.reload(config_module)
+        return config_module.AppConfig
+
+    def test_defaults_to_local_without_relational_credentials(self) -> None:
+        for key in (
+            "QC_SUITE_DATABASE_BACKEND",
+            "QC_SUITE_SQL_ENABLED",
+            "MSSQL_SERVER",
+            "MSSQL_DATABASE",
+            "MSSQL_USERNAME",
+            "MSSQL_PASSWORD",
+            "POSTGRESQL_HOST",
+            "POSTGRESQL_DATABASE",
+            "POSTGRESQL_USERNAME",
+            "POSTGRESQL_PASSWORD",
+        ):
+            os.environ.pop(key, None)
+
+        AppConfig = self._reload_app_config()
+        cfg = AppConfig()
+        self.assertEqual(cfg.database_backend, "local")
+        self.assertFalse(cfg.sql_enabled)
+        self.assertFalse(cfg.postgresql_enabled)
+
+    def test_explicit_postgresql_backend_activates_postgresql(self) -> None:
+        os.environ["QC_SUITE_DATABASE_BACKEND"] = "postgresql"
+        os.environ["POSTGRESQL_HOST"] = "localhost"
+        os.environ["POSTGRESQL_PORT"] = "5432"
+        os.environ["POSTGRESQL_DATABASE"] = "qc_suite"
+        os.environ["POSTGRESQL_USERNAME"] = "qc_user"
+        os.environ["POSTGRESQL_PASSWORD"] = "secret"
+
+        AppConfig = self._reload_app_config()
+        cfg = AppConfig()
+        self.assertEqual(cfg.database_backend, "postgresql")
+        self.assertTrue(cfg.sql_enabled)
+        self.assertTrue(cfg.postgresql_enabled)
+
+        for key in (
+            "QC_SUITE_DATABASE_BACKEND",
+            "POSTGRESQL_HOST",
+            "POSTGRESQL_PORT",
+            "POSTGRESQL_DATABASE",
+            "POSTGRESQL_USERNAME",
+            "POSTGRESQL_PASSWORD",
+        ):
+            os.environ.pop(key, None)
+
+
 if __name__ == "__main__":
     unittest.main()

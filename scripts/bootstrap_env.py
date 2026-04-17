@@ -4,7 +4,7 @@
 Run this once before first launch, or after a fresh deploy, to ensure:
 - All required data directories exist
 - Default .env file is created if missing
-- SQL Server schema is up-to-date (if SQL mirroring is enabled and MSSQL_* env vars are set)
+- SQL Server or PostgreSQL schema is up-to-date when the relational backend is enabled
 
 Usage:
     py -3.11 scripts/bootstrap_env.py
@@ -63,7 +63,16 @@ QC_SUITE_STREAM_URL=
 QC_SUITE_ACCESS_LOGS_ENABLED=0
 QC_SUITE_WERKZEUG_REQUEST_LOGS_ENABLED=0
 
+QC_SUITE_DATABASE_BACKEND=local
 QC_SUITE_SQL_ENABLED=0
+
+POSTGRESQL_HOST=
+POSTGRESQL_PORT=5432
+POSTGRESQL_DATABASE=
+POSTGRESQL_USERNAME=
+POSTGRESQL_PASSWORD=
+POSTGRESQL_SCHEMA=public
+POSTGRESQL_SSLMODE=prefer
 
 # SQL Server — leave blank to run in local/offline mode
 MSSQL_SERVER=
@@ -96,6 +105,9 @@ def main(check: bool = False) -> int:
 
     # ── Data directories ───────────────────────────────────────────────
     _load_project_env(env_path)
+    from backend.app.core.config import AppConfig
+
+    cfg = AppConfig()
     data_root_str = os.getenv("QC_SUITE_DATA_ROOT", str(PROJECT_ROOT / "data"))
     data_root = Path(data_root_str).resolve()
     required_dirs = [
@@ -121,18 +133,15 @@ def main(check: bool = False) -> int:
         warnings.append("QC_SUITE_SECRET_KEY is set to an insecure default — change before production")
 
     # ── SQL Server schema migration ────────────────────────────────────
-    sql_enabled = os.getenv("QC_SUITE_SQL_ENABLED", "0").strip() == "1"
-    sql_vars = ["MSSQL_SERVER", "MSSQL_DATABASE", "MSSQL_USERNAME", "MSSQL_PASSWORD"]
-    if sql_enabled and all(os.getenv(v) for v in sql_vars):
+    backend = cfg.database_backend
+    if backend == "sqlserver":
         print("[bootstrap] SQL Server mirroring enabled — ensuring schema …")
         if not check:
             try:
-                from backend.app.core.config import AppConfig
                 from backend.app.repositories.sqlserver.auth_audit_repository import SqlServerAuthAuditRepository
                 from backend.app.repositories.sqlserver.inspection_mirror_repository import SqlServerInspectionMirrorRepository
                 from backend.app.repositories.sqlserver.session_store import SqlServerTokenStore
                 from backend.app.repositories.sqlserver.users_repository import SqlServerUsersRepository
-                cfg = AppConfig()
                 SqlServerUsersRepository(cfg)
                 print("[bootstrap]   dbo.qc_user_accounts ✓")
                 SqlServerTokenStore(cfg)
@@ -143,10 +152,27 @@ def main(check: bool = False) -> int:
                 print("[bootstrap]   dbo.qc_auth_audit ✓")
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"SQL Server schema migration failed: {exc}")
-    elif sql_enabled:
-        warnings.append("QC_SUITE_SQL_ENABLED=1 but MSSQL_* env vars are incomplete — skipping SQL schema check")
+    elif backend == "postgresql":
+        print("[bootstrap] PostgreSQL backend enabled — ensuring schema …")
+        if not check:
+            try:
+                from backend.app.repositories.postgres.auth_audit_repository import PostgresAuthAuditRepository
+                from backend.app.repositories.postgres.inspection_mirror_repository import PostgresInspectionMirrorRepository
+                from backend.app.repositories.postgres.session_store import PostgresTokenStore
+                from backend.app.repositories.postgres.users_repository import PostgresUsersRepository
+
+                PostgresUsersRepository(cfg)
+                print("[bootstrap]   public.qc_user_accounts ✓")
+                PostgresTokenStore(cfg)
+                print("[bootstrap]   public.qc_user_sessions ✓")
+                PostgresInspectionMirrorRepository(cfg)
+                print("[bootstrap]   public.qc_inspection_push ✓")
+                PostgresAuthAuditRepository(cfg)
+                print("[bootstrap]   public.qc_auth_audit ✓")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"PostgreSQL schema migration failed: {exc}")
     else:
-        print("[bootstrap] SQL Server disabled — running in local-only mode")
+        print("[bootstrap] relational backend disabled — running in local-only mode")
 
     # ── Report ─────────────────────────────────────────────────────────
     for w in warnings:

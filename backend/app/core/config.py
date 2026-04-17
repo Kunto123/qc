@@ -27,6 +27,7 @@ class AppConfig:
     debug: bool = os.getenv("QC_SUITE_DEBUG", "0").strip() == "1"
     secret_key: str = os.getenv("QC_SUITE_SECRET_KEY", "qc-suite-dev-secret")
     local_only: bool = os.getenv("QC_SUITE_LOCAL_ONLY", "1").strip() != "0"
+    relational_backend: str = os.getenv("QC_SUITE_DATABASE_BACKEND", "").strip().lower()
     sql_enabled_flag: bool = os.getenv("QC_SUITE_SQL_ENABLED", "0").strip() == "1"
     access_token_ttl_seconds: int = max(60, int(os.getenv("QC_SUITE_ACCESS_TOKEN_TTL_SECONDS", "86400")))
     device_mode: str = os.getenv("QC_SUITE_DEVICE", "auto").strip().lower() or "auto"
@@ -36,6 +37,13 @@ class AppConfig:
     sql_username: str = os.getenv("MSSQL_USERNAME", "").strip()
     sql_password: str = os.getenv("MSSQL_PASSWORD", "").strip()
     sql_driver: str = os.getenv("MSSQL_DRIVER", "ODBC Driver 17 for SQL Server")
+    postgresql_host: str = os.getenv("POSTGRESQL_HOST", "").strip()
+    postgresql_port: int = max(1, int(os.getenv("POSTGRESQL_PORT", "5432")))
+    postgresql_database: str = os.getenv("POSTGRESQL_DATABASE", "").strip()
+    postgresql_username: str = os.getenv("POSTGRESQL_USERNAME", "").strip()
+    postgresql_password: str = os.getenv("POSTGRESQL_PASSWORD", "").strip()
+    postgresql_schema: str = os.getenv("POSTGRESQL_SCHEMA", "public").strip() or "public"
+    postgresql_sslmode: str = os.getenv("POSTGRESQL_SSLMODE", "prefer").strip().lower() or "prefer"
     sticker_inference_mode: str = os.getenv("QC_SUITE_STICKER_INFERENCE_MODE", "auto").strip().lower() or "auto"
     default_sticker_model_path: str = DEFAULT_STICKER_MODEL_PATH
     default_sticker_model_meta_path: str = DEFAULT_STICKER_MODEL_META_PATH
@@ -80,16 +88,45 @@ class AppConfig:
     stream_port: int = max(1, int(os.getenv("QC_SUITE_STREAM_PORT", "8101")))
     stream_host: str = os.getenv("QC_SUITE_STREAM_HOST", "").strip()
 
-    @property
-    def sql_enabled(self) -> bool:
-        if not self.sql_enabled_flag:
-            return False
+    def _has_sqlserver_credentials(self) -> bool:
         return bool(
             self.sql_server
             and self.sql_database
             and self.sql_username
             and self.sql_password
         )
+
+    def _has_postgresql_credentials(self) -> bool:
+        return bool(
+            self.postgresql_host
+            and self.postgresql_database
+            and self.postgresql_username
+            and self.postgresql_password
+        )
+
+    @property
+    def database_backend(self) -> str:
+        backend = self.relational_backend
+        if backend in {"local", "sqlserver", "postgresql"}:
+            if backend == "sqlserver":
+                return backend if self._has_sqlserver_credentials() else "local"
+            if backend == "postgresql":
+                return backend if self._has_postgresql_credentials() else "local"
+            return backend
+
+        if self.sql_enabled_flag and self._has_sqlserver_credentials():
+            return "sqlserver"
+        if self._has_postgresql_credentials():
+            return "postgresql"
+        return "local"
+
+    @property
+    def sql_enabled(self) -> bool:
+        return self.database_backend in {"sqlserver", "postgresql"}
+
+    @property
+    def postgresql_enabled(self) -> bool:
+        return self.database_backend == "postgresql"
 
 
 def ensure_data_dirs() -> None:
