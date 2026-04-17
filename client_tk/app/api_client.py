@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+from functools import lru_cache
 import mimetypes
 from pathlib import Path
 from urllib.parse import quote
@@ -7,11 +9,30 @@ from urllib.parse import quote
 import requests
 
 
+@lru_cache(maxsize=1)
+def _local_backend_app():
+    from backend.app.main import app as backend_app
+
+    return backend_app
+
+
 class ApiClient:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.token: str | None = None
         self.session = requests.Session()
+        self._local_mode = self._is_local_transport(self.base_url)
+        self._local_client = None
+
+    @staticmethod
+    def _is_local_transport(base_url: str) -> bool:
+        normalized = str(base_url or "").strip().lower()
+        return not normalized or normalized.startswith("local://")
+
+    def _get_local_client(self):
+        if self._local_client is None:
+            self._local_client = _local_backend_app().test_client()
+        return self._local_client
 
     def set_token(self, token: str | None) -> None:
         self.token = token
@@ -22,7 +43,40 @@ class ApiClient:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
 
+    def _local_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        payload: dict | None = None,
+        json_content_type: bool = True,
+    ):
+        client = self._get_local_client()
+        response = client.open(
+            path,
+            method=method,
+            query_string=params or {},
+            json=payload if json_content_type else None,
+            data=payload if not json_content_type else None,
+            headers=self._headers(json_content_type=json_content_type),
+        )
+        return response
+
     def _request_json(self, method: str, path: str, *, params: dict | None = None, payload: dict | None = None, timeout: int = 20):
+        if self._local_mode:
+            response = self._local_request(method, path, params=params, payload=payload)
+            if not (200 <= response.status_code < 400):
+                detail = response.get_data(as_text=True)
+                try:
+                    parsed = response.get_json(silent=True)
+                    if isinstance(parsed, dict):
+                        detail = parsed.get("error") or detail
+                except Exception:  # noqa: BLE001
+                    pass
+                raise RuntimeError(f"{response.status_code}: {detail}")
+            return response.get_json()
+
         response = self.session.request(
             method=method,
             url=f"{self.base_url}{path}",
@@ -41,6 +95,19 @@ class ApiClient:
         return response.json()
 
     def _request_bytes(self, method: str, path: str, *, params: dict | None = None, payload: dict | None = None, timeout: int = 20) -> bytes:
+        if self._local_mode:
+            response = self._local_request(method, path, params=params, payload=payload)
+            if not (200 <= response.status_code < 400):
+                detail = response.get_data(as_text=True)
+                try:
+                    parsed = response.get_json(silent=True)
+                    if isinstance(parsed, dict):
+                        detail = parsed.get("error") or detail
+                except Exception:  # noqa: BLE001
+                    pass
+                raise RuntimeError(f"{response.status_code}: {detail}")
+            return bytes(response.data)
+
         response = self.session.request(
             method=method,
             url=f"{self.base_url}{path}",
@@ -158,6 +225,13 @@ class ApiClient:
 
     def export_inspections_csv(self, params: dict | None = None) -> str:
         """Return raw CSV text from the server export endpoint."""
+        if self._local_mode:
+            response = self._local_request("GET", "/inspections/export", params=params or {})
+            if not (200 <= response.status_code < 400):
+                detail = response.get_data(as_text=True)
+                raise RuntimeError(f"{response.status_code}: {detail}")
+            return response.get_data(as_text=True)
+
         response = self.session.request(
             method="GET",
             url=f"{self.base_url}/inspections/export",
@@ -254,6 +328,15 @@ class ApiClient:
         return self._post(f"/datasets/{dataset_id}/upload", payload)
 
     def upload_dataset_files(self, dataset_id: str, file_paths: list[str], target: str = "images") -> dict:
+        if self._local_mode:
+            from backend.app.core.container import datasets_repo
+
+            if not file_paths:
+                raise RuntimeError("400: At least one file is required")
+            batch = [(Path(file_path).name, Path(file_path).read_bytes()) for file_path in file_paths]
+            saved = datasets_repo.save_files(dataset_id, target, batch)
+            return {"target": target, "count": len(saved), "items": saved}
+
         multipart_files = []
         handles = []
         response = None
@@ -334,6 +417,22 @@ class ApiClient:
 
     def list_models(self) -> list[dict]:
         return self._get("/models")
+
+    def get_model_export_manifest(self, model_id: int) -> dict:
+        return self._get(f"/models/{model_id}/export-manifest")
+
+    def export_model_archive(self, model_id: int) -> bytes:
+        return self._request_bytes("POST", f"/models/{model_id}/export", timeout=60)
+
+    def import_model_archive(self, archive_path: str, *, target_lifecycle: str = "draft", skip_validation: bool = False, force_rename: bool = False) -> dict:
+        archive_bytes = Path(archive_path).read_bytes()
+        payload = {
+            "content_b64": base64.b64encode(archive_bytes).decode("ascii"),
+            "target_lifecycle": target_lifecycle,
+            "skip_validation": "1" if skip_validation else "0",
+            "force_rename": "1" if force_rename else "0",
+        }
+        return self._post("/models/import", payload)
 
     def create_model(self, payload: dict) -> dict:
         return self._post("/models", payload)

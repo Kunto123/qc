@@ -95,8 +95,9 @@ def _register_worker_lifecycle(app: Flask) -> None:
         try:
             from backend.app.streaming.server import start as start_stream_server
             config = app.config["QC_SUITE"]
-            stream_host = config.stream_host or config.host
-            start_stream_server(host=stream_host, port=config.stream_port)
+            if not getattr(config, "local_only", False):
+                stream_host = config.stream_host or config.host
+                start_stream_server(host=stream_host, port=config.stream_port)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[factory] streaming server failed to start: %s", exc)
 

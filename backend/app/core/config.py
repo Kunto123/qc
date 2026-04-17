@@ -26,6 +26,8 @@ class AppConfig:
     port: int = int(os.getenv("QC_SUITE_PORT", "8100"))
     debug: bool = os.getenv("QC_SUITE_DEBUG", "0").strip() == "1"
     secret_key: str = os.getenv("QC_SUITE_SECRET_KEY", "qc-suite-dev-secret")
+    local_only: bool = os.getenv("QC_SUITE_LOCAL_ONLY", "1").strip() != "0"
+    sql_enabled_flag: bool = os.getenv("QC_SUITE_SQL_ENABLED", "0").strip() == "1"
     access_token_ttl_seconds: int = max(60, int(os.getenv("QC_SUITE_ACCESS_TOKEN_TTL_SECONDS", "86400")))
     device_mode: str = os.getenv("QC_SUITE_DEVICE", "auto").strip().lower() or "auto"
     cuda_device_id: int = max(0, int(os.getenv("QC_SUITE_CUDA_DEVICE_ID", "0")))
@@ -80,6 +82,8 @@ class AppConfig:
 
     @property
     def sql_enabled(self) -> bool:
+        if not self.sql_enabled_flag:
+            return False
         return bool(
             self.sql_server
             and self.sql_database

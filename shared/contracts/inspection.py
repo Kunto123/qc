@@ -66,6 +66,10 @@ class InspectionResult:
     sticker_confidence: float | None = None
     sticker_bbox: dict[str, Any] | None = None
     sticker_backend: str | None = None
+    sticker_tilt_angle: float | None = None
+    sticker_tilt_expected: float | None = None
+    sticker_tilt_deviation: float | None = None
+    sticker_tilt_threshold: float | None = None
     validation_details: dict[str, Any] | None = None
     part_ready_roi_meta: dict[str, Any] | None = None
     sticker_roi_meta: dict[str, Any] | None = None

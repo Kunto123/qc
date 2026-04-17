@@ -14,9 +14,8 @@ from client_tk.app.components.counter_panel import CounterPanel
 from client_tk.app.components.live_view import LiveView
 from client_tk.app.components.result_panel import ResultPanel
 from client_tk.app.components.scrollable_frame import ScrollableFrame
-from client_tk.app.config import DEFAULT_STREAM_URL, DEFAULT_UPLOAD_INTERVAL_MS
+from client_tk.app.config import DEFAULT_UPLOAD_INTERVAL_MS
 from client_tk.app.services.camera_capture import CameraCaptureService
-from client_tk.app.services.frame_stream import FrameStreamService
 from client_tk.app.services.frame_upload import FrameUploadService
 from client_tk.app.theme import APP_BG, BORDER, PANEL_BG, SHELL_BG, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, ACCENT_HOVER, TEXT_ON_ACCENT
 
@@ -38,8 +37,7 @@ class OperatorScreen(ctk.CTkFrame):
         self.api = api_client
         self.state = session_state
         self.capture = CameraCaptureService()
-        self.streamer = FrameStreamService()
-        self.uploader = FrameUploadService()  # HTTP fallback when stream URL is empty
+        self.uploader = FrameUploadService()  # Local frame pump via API client bridge.
         self._latest_payload: dict | None = None
         self._latest_error: str | None = None
         self._lock = threading.Lock()
@@ -853,37 +851,20 @@ class OperatorScreen(ctk.CTkFrame):
         self.part_ready_preview.reset()
         self.main_view.reset()
         upload_interval_ms = self._resolve_upload_interval_ms()
-        stream_url = DEFAULT_STREAM_URL.strip()
-        if stream_url:
-            stream_fps = max(1.0, 1000.0 / max(100, upload_interval_ms))
-            token = getattr(self.state, "token", None) or ""
-            self.streamer.start(
-                stream_url=stream_url,
-                token=token,
-                session_id=payload["session_id"],
-                get_frame=self.capture.get_latest_frame,
-                on_result=self._set_result,
-                on_error=self._set_error,
-                fps=stream_fps,
-            )
-            self.info_var.set(
-                f"Session running: {payload['session_id']} (WebSocket stream @ {stream_fps:.0f} fps)"
-            )
-        else:
-            self.uploader.start(
-                interval_ms=upload_interval_ms,
-                get_frame=self.capture.get_latest_frame,
-                send_frame=lambda image_b64: self.api.push_frame(
-                    payload["session_id"],
-                    image_b64,
-                    response_mode="compact",
-                ),
-                on_result=self._set_result,
-                on_error=self._set_error,
-            )
-            self.info_var.set(
-                f"Session running: {payload['session_id']} (HTTP upload interval {upload_interval_ms} ms)"
-            )
+        self.uploader.start(
+            interval_ms=upload_interval_ms,
+            get_frame=self.capture.get_latest_frame,
+            send_frame=lambda image_b64: self.api.push_frame(
+                payload["session_id"],
+                image_b64,
+                response_mode="compact",
+            ),
+            on_result=self._set_result,
+            on_error=self._set_error,
+        )
+        self.info_var.set(
+            f"Session running: {payload['session_id']} (local frame pump @ {upload_interval_ms} ms)"
+        )
         self._refresh_context_summary()
         self._update_status_badges()
 
@@ -895,13 +876,12 @@ class OperatorScreen(ctk.CTkFrame):
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
                 if self._is_auth_error(message):
-                    stop_message = "Session lokal dihentikan, tapi stop di server gagal (401). Silakan login ulang."
+                    stop_message = "Session lokal dihentikan, tapi stop di backend gagal (401). Silakan login ulang."
                     if not self._auth_error_notified:
                         self._auth_error_notified = True
-                        messagebox.showwarning("Session", "Sesi server sudah tidak terotorisasi (401). Silakan login ulang.")
+                        messagebox.showwarning("Session", "Sesi backend sudah tidak terotorisasi (401). Silakan login ulang.")
                 else:
-                    stop_message = f"Session lokal dihentikan. Warning server: {message}"
-        self.streamer.stop()
+                    stop_message = f"Session lokal dihentikan. Warning backend: {message}"
         self.uploader.stop()
         self.state.active_session = None
         self.state.cache["part_ready"] = None
@@ -1019,7 +999,7 @@ class OperatorScreen(ctk.CTkFrame):
                         self.part_ready_preview.update_bgr(local_part_ready)
                 if payload.get("overlay_image_b64"):
                     self.main_view.update_b64(payload.get("overlay_image_b64"))
-                    self.display_source.set("Right View: Server ML Overlay")
+                    self.display_source.set("Right View: Local ML Overlay")
                 elif display_frame is not None:
                     local_scene = self._build_full_frame_with_roi(display_frame, "sticker", label="Sticker ROI", color=(255, 214, 10))
                     if local_scene is not None:
@@ -1054,7 +1034,6 @@ class OperatorScreen(ctk.CTkFrame):
             elif error:
                 self.state.latest_error = error
                 if self._is_auth_error(error):
-                    self.streamer.stop()
                     self.uploader.stop()
                     self.state.active_session = None
                     self.state.cache["part_ready"] = None
@@ -1068,7 +1047,7 @@ class OperatorScreen(ctk.CTkFrame):
                         self._latest_error = None
                 self._update_status_badges()
                 if not self._is_auth_error(error):
-                    self.info_var.set(f"Upload error: {error}")
+                    self.info_var.set(f"Frame pump error: {error}")
                 if frame is not None:
                     self._update_local_roi_previews(frame)
             else:
@@ -1102,7 +1081,6 @@ class OperatorScreen(ctk.CTkFrame):
             self.sidebar_canvas.unbind_all("<MouseWheel>")
         self._close_settings()
         self._stop_session()
-        self.streamer.stop()
         self.capture.stop()
 
     def destroy(self) -> None:

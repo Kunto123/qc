@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 import warnings
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -132,6 +134,22 @@ class _StubApi:
 
     def list_models(self):
         return []
+
+    def get_model_export_manifest(self, model_id: int):
+        return {"model_id": model_id}
+
+    def export_model_archive(self, model_id: int):
+        return b"stub-model-archive"
+
+    def import_model_archive(self, archive_path: str, *, target_lifecycle: str = "draft", skip_validation: bool = False, force_rename: bool = False):
+        return {
+            "status": "success",
+            "model_id": 101,
+            "imported_name": Path(archive_path).stem,
+            "warnings": [],
+            "lifecycle_status": target_lifecycle,
+        }
+
     def list_dataset_versions(self, dataset_id: str):
         return []
 
@@ -2699,6 +2717,67 @@ class UiSmokeTest(unittest.TestCase):
 
             mock_warn.assert_called_once()
             screen.destroy()
+
+    def test_engineer_export_selected_model_writes_archive(self) -> None:
+        models = [{"id": 42, "name": "Model Export", "path": "models/m42.pt", "source": "trained"}]
+        export_calls: list[int] = []
+
+        def export_model_archive(model_id: int):
+            export_calls.append(model_id)
+            return b"fake-zip-contents"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "model-42.zip"
+            with mock.patch.object(self.api, "list_models", return_value=models), \
+                 mock.patch.object(self.api, "export_model_archive", side_effect=export_model_archive), \
+                 mock.patch("client_tk.app.screens.engineer.view.filedialog.asksaveasfilename", return_value=str(export_path)), \
+                 mock.patch("client_tk.app.screens.engineer.view.messagebox.showinfo"), \
+                 mock.patch("client_tk.app.screens.engineer.view.messagebox.showwarning") as mock_warn:
+                screen = EngineerScreen(self.root, self.api, self.state)
+                screen.update_idletasks()
+                screen.select_tab("Models")
+                screen.models_list.selection_set(0)
+                screen.on_model_selected()
+
+                self.assertEqual(str(screen.models_export_button.cget("state")), "normal")
+
+                screen.export_selected_model()
+
+                self.assertEqual(export_calls, [42])
+                self.assertEqual(export_path.read_bytes(), b"fake-zip-contents")
+                mock_warn.assert_not_called()
+                screen.destroy()
+
+    def test_engineer_import_model_archive_refreshes_and_selects_new_model(self) -> None:
+        initial_models = [{"id": 10, "name": "Existing Model", "path": "models/existing.pt"}]
+        imported_model = {"id": 77, "name": "Imported Model", "path": "models/imported.pt", "source": "import"}
+        import_calls: list[tuple[str, str, bool, bool]] = []
+
+        def import_model_archive(archive_path: str, *, target_lifecycle: str = "draft", skip_validation: bool = False, force_rename: bool = False):
+            import_calls.append((archive_path, target_lifecycle, skip_validation, force_rename))
+            return {"status": "success", "model_id": 77, "imported_name": "Imported Model", "warnings": []}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "import-model.zip"
+            archive_path.write_bytes(b"fake zip archive")
+            with mock.patch.object(self.api, "list_models", side_effect=[initial_models, [*initial_models, imported_model]]), \
+                 mock.patch.object(self.api, "import_model_archive", side_effect=import_model_archive), \
+                 mock.patch("client_tk.app.screens.engineer.view.filedialog.askopenfilename", return_value=str(archive_path)), \
+                 mock.patch("client_tk.app.screens.engineer.view.messagebox.showinfo"), \
+                 mock.patch("client_tk.app.screens.engineer.view.messagebox.showerror"):
+                screen = EngineerScreen(self.root, self.api, self.state)
+                screen.update_idletasks()
+                screen.select_tab("Models")
+
+                self.assertEqual(screen.models_list.curselection(), ())
+
+                screen.import_model_archive()
+
+                self.assertEqual(import_calls, [(str(archive_path), "draft", False, False)])
+                self.assertEqual(screen.models_list.curselection(), (1,))
+                self.assertEqual(screen._selected_model_record()["id"], 77)
+                self.assertEqual(str(screen.models_export_button.cget("state")), "normal")
+                screen.destroy()
 
     # ------------------------------------------------------------------
     # Phase 6: Model Registry selection stability

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from datetime import UTC, datetime
 from pathlib import Path
+import tempfile
 
 from flask import Blueprint, g, jsonify, request, send_file
 
@@ -14,6 +15,7 @@ from backend.app.core.container import (
     datasets_repo,
     deployments_repo,
     models_repo,
+    model_export_service,
     templates_repo,
     token_store,
     training_service,
@@ -43,50 +45,6 @@ def _multipart_upload_files() -> list:
 
 def _truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _path_candidates(raw_path: str) -> set[str]:
-    value = str(raw_path or "").strip()
-    if not value:
-        return set()
-    path = Path(value)
-    candidates = {value.replace("/", "\\").lower()}
-    if path.name:
-        candidates.add(path.name.lower())
-    resolved_candidates = [path] if path.is_absolute() else [PROJECT_ROOT / path, MODELS_DIR / path, MODELS_DIR / path.name]
-    for candidate in resolved_candidates:
-        try:
-            candidates.add(str(candidate.resolve()).replace("/", "\\").lower())
-        except Exception:  # noqa: BLE001
-            continue
-    return candidates
-
-
-def _find_active_model_conflict(model_path: str) -> dict | None:
-    model_candidates = _path_candidates(model_path)
-    if not model_candidates:
-        return None
-    for deployment in deployments_repo.list_deployments():
-        if not deployment.get("is_active"):
-            continue
-        version = templates_repo.get_version(int(deployment.get("template_version_id") or 0))
-        if version is None:
-            continue
-        template_payload = dict(version.get("template") or {})
-        vision_payload = dict(template_payload.get("vision") or {})
-        deployed_model_path = str(vision_payload.get("model_path") or "").strip()
-        if not deployed_model_path:
-            continue
-        if model_candidates & _path_candidates(deployed_model_path):
-            return {
-                "deployment_id": deployment.get("id"),
-                "line_id": deployment.get("line_id"),
-                "station_id": deployment.get("station_id"),
-                "template_id": deployment.get("template_id"),
-                "template_version_id": deployment.get("template_version_id"),
-                "template_model_path": deployed_model_path,
-            }
-    return None
 
 
 def _purge_model_files(model: dict) -> list[str]:
@@ -613,6 +571,47 @@ def list_models():
     return jsonify(models_repo.list_models())
 
 
+@workstation_blueprint.get("/models/<int:model_id>/export-manifest")
+@require_roles(UserRole.ADMIN)
+def get_model_export_manifest(model_id: int):
+    try:
+        manifest = model_export_service.build_export_manifest(model_id)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+    return jsonify(manifest)
+
+
+@workstation_blueprint.post("/models/<int:model_id>/export")
+@require_roles(UserRole.ADMIN)
+def export_model(model_id: int):
+    try:
+        bundle = model_export_service.create_export(model_id)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+
+    archive_path = Path(bundle["archive_path"])
+
+    response = send_file(
+        archive_path,
+        as_attachment=True,
+        download_name=bundle["archive_name"],
+        mimetype="application/zip",
+    )
+
+    def _cleanup_export() -> None:
+        try:
+            archive_path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    response.call_on_close(_cleanup_export)
+    return response
+
+
 @workstation_blueprint.post("/models/upload")
 @require_roles(UserRole.ADMIN)
 def upload_model():
@@ -647,6 +646,62 @@ def upload_model():
         architecture_variant=str(payload.get("architecture_variant") or "").strip() or None,
     )
     return jsonify({**model, "saved_to": str(dest)}), 201
+
+
+@workstation_blueprint.post("/models/import")
+@require_roles(UserRole.ADMIN)
+def import_model():
+    payload = request.get_json(silent=True) or {}
+    form_data = request.form if request.form else None
+    skip_validation = _truthy(form_data.get("skip_validation") if form_data is not None else payload.get("skip_validation"))
+    force_rename = _truthy(form_data.get("force_rename") if form_data is not None else payload.get("force_rename"))
+    requested_lifecycle = form_data.get("target_lifecycle") if form_data is not None else payload.get("target_lifecycle")
+    target_lifecycle = str(requested_lifecycle or "draft").strip().lower() or "draft"
+
+    temp_archive_path: Path | None = None
+    original_filename: str | None = None
+    try:
+        if request.files:
+            archive_file = request.files.get("zip_file") or request.files.get("file")
+            if archive_file is None or not getattr(archive_file, "filename", ""):
+                return jsonify({"error": "zip_file is required"}), 400
+            original_filename = str(archive_file.filename or "").strip() or None
+            temp_handle = tempfile.NamedTemporaryFile(delete=False, suffix=".zip", prefix="qc-suite-import-")
+            temp_handle.close()
+            temp_archive_path = Path(temp_handle.name)
+            archive_file.save(str(temp_archive_path))
+        else:
+            content_b64 = str(payload.get("content_b64") or payload.get("zip_b64") or "").strip()
+            if not content_b64:
+                return jsonify({"error": "zip_file or content_b64 is required"}), 400
+            try:
+                content = base64.b64decode(content_b64)
+            except Exception as exc:  # noqa: BLE001
+                return jsonify({"error": f"Invalid base64 content: {exc}"}), 400
+            temp_handle = tempfile.NamedTemporaryFile(delete=False, suffix=".zip", prefix="qc-suite-import-")
+            temp_handle.write(content)
+            temp_handle.close()
+            temp_archive_path = Path(temp_handle.name)
+
+        result = model_export_service.import_model_archive(
+            temp_archive_path,
+            original_filename=original_filename,
+            skip_validation=skip_validation,
+            force_rename=force_rename,
+            target_lifecycle=target_lifecycle,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+    finally:
+        if temp_archive_path is not None:
+            try:
+                temp_archive_path.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+    return jsonify(result), 201
 
 
 @workstation_blueprint.post("/models")
@@ -735,7 +790,11 @@ def delete_model(model_id: int):
     if model is None:
         return jsonify({"error": "Model not found"}), 404
 
-    conflict = _find_active_model_conflict(str(model.get("path") or ""))
+    conflict = models_repo.find_active_model_conflict(
+        str(model.get("path") or ""),
+        templates_repo=templates_repo,
+        deployments_repo=deployments_repo,
+    )
     if conflict is not None:
         return jsonify({
             "error": "Model is referenced by an active deployment",

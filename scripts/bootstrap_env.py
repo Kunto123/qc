@@ -4,7 +4,7 @@
 Run this once before first launch, or after a fresh deploy, to ensure:
 - All required data directories exist
 - Default .env file is created if missing
-- SQL Server schema is up-to-date (if MSSQL_* env vars are set)
+- SQL Server schema is up-to-date (if SQL mirroring is enabled and MSSQL_* env vars are set)
 
 Usage:
     py -3.11 scripts/bootstrap_env.py
@@ -24,19 +24,46 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 ENV_TEMPLATE = """\
-QC_SUITE_HOST=0.0.0.0
+QC_SUITE_LOCAL_ONLY=1
+QC_SUITE_HOST=127.0.0.1
 QC_SUITE_PORT=8100
 QC_SUITE_DEBUG=0
 QC_SUITE_SECRET_KEY=CHANGE_ME_IN_PRODUCTION
 QC_SUITE_ACCESS_TOKEN_TTL_SECONDS=86400
 QC_SUITE_DATA_ROOT=./data
+QC_SUITE_SERVER_URL=local://embedded
+QC_SUITE_UPLOAD_INTERVAL_MS=500
 
+QC_SUITE_STICKER_INFERENCE_MODE=ultralytics
+QC_SUITE_DEFAULT_STICKER_MODEL_PATH=
+QC_SUITE_DEFAULT_STICKER_MODEL_META_PATH=
 QC_SUITE_DEVICE=auto
 QC_SUITE_CUDA_DEVICE_ID=0
 
-QC_SUITE_STICKER_INFERENCE_MODE=auto
-QC_SUITE_DEFAULT_STICKER_MODEL_PATH=
-QC_SUITE_DEFAULT_STICKER_MODEL_META_PATH=
+QC_SUITE_TRAINING_ENGINE_MODE=real
+QC_SUITE_TRAINING_TIMEOUT_MINUTES=720
+QC_SUITE_TRAINING_DEFAULT_EPOCHS=200
+QC_SUITE_TRAINING_DEFAULT_IMGSZ=640
+QC_SUITE_TRAINING_DEFAULT_BATCH=16
+QC_SUITE_TRAINING_DEFAULT_PATIENCE=20
+QC_SUITE_TRAINING_WEIGHTS_DOWNLOAD_ALLOWED=1
+QC_SUITE_GPU_FAIL_FAST=1
+QC_SUITE_PUSH_WORKER_INTERVAL_SECONDS=30
+QC_SUITE_PUSH_WORKER_MAX_RETRY=5
+
+QC_SUITE_PART_READY_SETTLE_MS=1500
+QC_SUITE_GEOMETRIC_AUGMENT_ENABLED=0
+
+# Legacy remote-streaming knobs retained for compatibility with split deployments.
+# Local-only desktop mode ignores these values.
+QC_SUITE_STREAM_PORT=8101
+QC_SUITE_STREAM_HOST=
+QC_SUITE_STREAM_URL=
+
+QC_SUITE_ACCESS_LOGS_ENABLED=0
+QC_SUITE_WERKZEUG_REQUEST_LOGS_ENABLED=0
+
+QC_SUITE_SQL_ENABLED=0
 
 # SQL Server — leave blank to run in local/offline mode
 MSSQL_SERVER=
@@ -44,10 +71,6 @@ MSSQL_DATABASE=
 MSSQL_USERNAME=
 MSSQL_PASSWORD=
 MSSQL_DRIVER=ODBC Driver 18 for SQL Server
-
-# Push worker tuning
-QC_SUITE_PUSH_WORKER_INTERVAL_SECONDS=30
-QC_SUITE_PUSH_WORKER_MAX_RETRY=5
 """
 
 
@@ -98,9 +121,10 @@ def main(check: bool = False) -> int:
         warnings.append("QC_SUITE_SECRET_KEY is set to an insecure default — change before production")
 
     # ── SQL Server schema migration ────────────────────────────────────
+    sql_enabled = os.getenv("QC_SUITE_SQL_ENABLED", "0").strip() == "1"
     sql_vars = ["MSSQL_SERVER", "MSSQL_DATABASE", "MSSQL_USERNAME", "MSSQL_PASSWORD"]
-    if all(os.getenv(v) for v in sql_vars):
-        print("[bootstrap] SQL Server env detected — ensuring schema …")
+    if sql_enabled and all(os.getenv(v) for v in sql_vars):
+        print("[bootstrap] SQL Server mirroring enabled — ensuring schema …")
         if not check:
             try:
                 from backend.app.core.config import AppConfig
@@ -119,8 +143,10 @@ def main(check: bool = False) -> int:
                 print("[bootstrap]   dbo.qc_auth_audit ✓")
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"SQL Server schema migration failed: {exc}")
+    elif sql_enabled:
+        warnings.append("QC_SUITE_SQL_ENABLED=1 but MSSQL_* env vars are incomplete — skipping SQL schema check")
     else:
-        print("[bootstrap] SQL Server env not set — running in local-only mode")
+        print("[bootstrap] SQL Server disabled — running in local-only mode")
 
     # ── Report ─────────────────────────────────────────────────────────
     for w in warnings:

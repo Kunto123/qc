@@ -27,6 +27,7 @@ KNOWN_REJECT_CODES = (
     RejectReasonCode.LOW_ROI_CONF.value,
     RejectReasonCode.LOW_CLASS_CONF.value,
     RejectReasonCode.OUT_OF_POSITION.value,
+    RejectReasonCode.OUT_OF_ANGLE.value,
     RejectReasonCode.PART_NOT_READY.value,
     RejectReasonCode.ERROR.value,
 )
@@ -72,6 +73,68 @@ def _round_bbox(position: dict[str, Any] | None) -> dict[str, float] | None:
         "y1": round(float(position.get("y1", 0.0)), 2),
         "x2": round(float(position.get("x2", 0.0)), 2),
         "y2": round(float(position.get("y2", 0.0)), 2),
+    }
+
+
+def _estimate_tilt_from_roi(roi_frame, expected_tilt_degrees: float) -> dict[str, Any]:
+    if roi_frame is None or getattr(roi_frame, "size", 0) == 0:
+        return {
+            "status": "unavailable",
+            "angle_degrees": None,
+            "expected_tilt_degrees": round(float(expected_tilt_degrees), 2),
+            "deviation_degrees": None,
+            "contour_area": None,
+            "threshold_mode": None,
+        }
+
+    gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    candidates: list[dict[str, Any]] = []
+    for threshold_mode in (cv2.THRESH_BINARY + cv2.THRESH_OTSU, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU):
+        try:
+            _, thresh = cv2.threshold(gray, 0, 255, threshold_mode)
+        except Exception:  # noqa: BLE001
+            continue
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        contour = max(contours, key=cv2.contourArea)
+        contour_area = float(cv2.contourArea(contour))
+        if contour_area <= 0:
+            continue
+        rect = cv2.minAreaRect(contour)
+        rect_w, rect_h = rect[1]
+        angle_degrees = float(rect[2])
+        if rect_w < rect_h:
+            angle_degrees = 90.0 + angle_degrees
+        candidates.append(
+            {
+                "angle_degrees": angle_degrees,
+                "contour_area": contour_area,
+                "threshold_mode": "binary_inv" if threshold_mode == cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU else "binary",
+            }
+        )
+
+    if not candidates:
+        return {
+            "status": "unavailable",
+            "angle_degrees": None,
+            "expected_tilt_degrees": round(float(expected_tilt_degrees), 2),
+            "deviation_degrees": None,
+            "contour_area": None,
+            "threshold_mode": None,
+        }
+
+    best = max(candidates, key=lambda item: float(item.get("contour_area") or 0.0))
+    angle_degrees = float(best["angle_degrees"])
+    deviation_degrees = abs(angle_degrees - float(expected_tilt_degrees))
+    return {
+        "status": "ok",
+        "angle_degrees": round(angle_degrees, 2),
+        "expected_tilt_degrees": round(float(expected_tilt_degrees), 2),
+        "deviation_degrees": round(deviation_degrees, 2),
+        "contour_area": round(float(best["contour_area"]), 2),
+        "threshold_mode": best["threshold_mode"],
     }
 
 
@@ -752,6 +815,10 @@ class InspectionSessionService:
             "class_names": list(detection_payload.get("class_names") or []),
             "fallback_reason": detection_payload.get("fallback_reason"),
         }
+        expected_tilt_degrees = float(getattr(sticker, "expected_tilt_degrees", 0.0) or 0.0)
+        max_tilt_degrees = getattr(sticker, "max_tilt_degrees", None)
+        max_tilt_degrees_value = None if max_tilt_degrees is None else float(max_tilt_degrees)
+        tilt_info = _estimate_tilt_from_roi(roi_frame, expected_tilt_degrees)
         if not sticker.enabled:
             return {
                 "decision": DecisionCode.ACCEPT.value,
@@ -771,6 +838,10 @@ class InspectionSessionService:
                 "sticker_confidence": None,
                 "sticker_bbox": None,
                 "sticker_backend": detection_context["backend"],
+                "sticker_tilt_angle": tilt_info.get("angle_degrees"),
+                "sticker_tilt_expected": tilt_info.get("expected_tilt_degrees"),
+                "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
+                "sticker_tilt_threshold": max_tilt_degrees_value,
                 "validation_details": {
                     "status": "disabled",
                     "candidate_source": "none",
@@ -778,6 +849,7 @@ class InspectionSessionService:
                     "candidate_count": len(detections),
                     "matching_candidate_count": 0,
                     "expected_center": None,
+                    "tilt": tilt_info,
                     "thresholds": thresholds,
                 },
             }
@@ -800,6 +872,10 @@ class InspectionSessionService:
                 "sticker_confidence": None,
                 "sticker_bbox": None,
                 "sticker_backend": detection_context["backend"],
+                "sticker_tilt_angle": tilt_info.get("angle_degrees"),
+                "sticker_tilt_expected": tilt_info.get("expected_tilt_degrees"),
+                "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
+                "sticker_tilt_threshold": max_tilt_degrees_value,
                 "validation_details": {
                     "status": "part_not_ready",
                     "candidate_source": "none",
@@ -807,6 +883,7 @@ class InspectionSessionService:
                     "candidate_count": len(detections),
                     "matching_candidate_count": 0,
                     "expected_center": None,
+                    "tilt": tilt_info,
                     "thresholds": thresholds,
                 },
             }
@@ -829,6 +906,10 @@ class InspectionSessionService:
                 "sticker_confidence": None,
                 "sticker_bbox": None,
                 "sticker_backend": detection_context["backend"],
+                "sticker_tilt_angle": tilt_info.get("angle_degrees"),
+                "sticker_tilt_expected": tilt_info.get("expected_tilt_degrees"),
+                "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
+                "sticker_tilt_threshold": max_tilt_degrees_value,
                 "validation_details": {
                     "status": "not_found",
                     "candidate_source": "none",
@@ -836,6 +917,7 @@ class InspectionSessionService:
                     "candidate_count": 0,
                     "matching_candidate_count": 0,
                     "expected_center": None,
+                    "tilt": tilt_info,
                     "thresholds": thresholds,
                 },
             }
@@ -867,6 +949,10 @@ class InspectionSessionService:
                 "sticker_confidence": None,
                 "sticker_bbox": None,
                 "sticker_backend": detection_context["backend"],
+                "sticker_tilt_angle": tilt_info.get("angle_degrees"),
+                "sticker_tilt_expected": tilt_info.get("expected_tilt_degrees"),
+                "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
+                "sticker_tilt_threshold": max_tilt_degrees_value,
                 "validation_details": {
                     "status": "not_found",
                     "candidate_source": "none",
@@ -874,6 +960,7 @@ class InspectionSessionService:
                     "candidate_count": len(candidates),
                     "matching_candidate_count": matching_candidate_count,
                     "expected_center": expected_center,
+                    "tilt": tilt_info,
                     "thresholds": thresholds,
                     "candidates": candidates,
                 },
@@ -888,6 +975,8 @@ class InspectionSessionService:
             reject_reason = RejectReasonCode.WRONG_TYPE.value
         elif thresholds["min_class_confidence"] is not None and float(selected_candidate.get("class_confidence") or 0.0) < float(thresholds["min_class_confidence"]):
             reject_reason = RejectReasonCode.LOW_CLASS_CONF.value
+        elif max_tilt_degrees_value is not None and tilt_info.get("angle_degrees") is not None and float(tilt_info.get("deviation_degrees") or 0.0) > max_tilt_degrees_value:
+            reject_reason = RejectReasonCode.OUT_OF_ANGLE.value
         elif position_gate_enabled and thresholds["max_offset_x"] is not None and abs(offset_x) > float(thresholds["max_offset_x"]):
             reject_reason = RejectReasonCode.OUT_OF_POSITION.value
         elif position_gate_enabled and thresholds["max_offset_y"] is not None and abs(offset_y) > float(thresholds["max_offset_y"]):
@@ -926,6 +1015,10 @@ class InspectionSessionService:
             "sticker_confidence": selected_candidate.get("confidence"),
             "sticker_bbox": dict(selected_candidate.get("bbox") or {}) or None,
             "sticker_backend": detection_context["backend"],
+            "sticker_tilt_angle": tilt_info.get("angle_degrees"),
+            "sticker_tilt_expected": tilt_info.get("expected_tilt_degrees"),
+            "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
+            "sticker_tilt_threshold": max_tilt_degrees_value,
             "validation_details": {
                 "status": status,
                 "candidate_source": candidate_source,
@@ -933,6 +1026,7 @@ class InspectionSessionService:
                 "candidate_count": len(candidates),
                 "matching_candidate_count": matching_candidate_count,
                 "expected_center": expected_center,
+                "tilt": tilt_info,
                 "thresholds": thresholds,
                 "candidates": candidates,
                 "model": detection_context,

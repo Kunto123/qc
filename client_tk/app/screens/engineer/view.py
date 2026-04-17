@@ -919,6 +919,9 @@ class EngineerScreen(ctk.CTkFrame):
         ttk.Button(models_action_bar, text="Refresh", command=self.refresh_models).pack(side="left")
         ttk.Button(models_action_bar, text="Rename Selected", command=self.rename_selected_model).pack(side="left", padx=6)
         ttk.Button(models_action_bar, text="Delete Selected", command=self.delete_selected_model).pack(side="left")
+        self.models_export_button = ttk.Button(models_action_bar, text="Export Selected", command=self.export_selected_model, state="disabled")
+        self.models_export_button.pack(side="left", padx=6)
+        ttk.Button(models_action_bar, text="Import Model", command=self.import_model_archive).pack(side="left")
 
         ttk.Label(self.models_right_panel, text="Register Sticker Model", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
         ttk.Label(
@@ -1137,6 +1140,22 @@ class EngineerScreen(ctk.CTkFrame):
         if not selection:
             return None
         return int(selection[0])
+
+    def _selected_model_record(self) -> dict | None:
+        index = self._selected_listbox_index(self.models_list)
+        if index is None or index >= len(self._model_cache):
+            return None
+        return self._model_cache[index]
+
+    def _update_model_action_state(self) -> None:
+        if not hasattr(self, "models_export_button"):
+            return
+        selected = self._selected_model_record()
+        state = "normal" if selected is not None else "disabled"
+        try:
+            self.models_export_button.configure(state=state)
+        except tk.TclError:
+            pass
 
     def _selected_dataset_id(self) -> str | None:
         index = self._selected_listbox_index(self.dataset_list)
@@ -3063,7 +3082,7 @@ class EngineerScreen(ctk.CTkFrame):
             self.train_base_model.set("")
         self._refresh_base_model_info()
 
-    def refresh_models(self):
+    def refresh_models(self, preferred_model_id: int | None = None):
         self._models_refresh_sequence += 1
         refresh_sequence = self._models_refresh_sequence
 
@@ -3080,11 +3099,11 @@ class EngineerScreen(ctk.CTkFrame):
                 return
             if not isinstance(result, list):
                 return
-            self._apply_models(result)
+            self._apply_models(result, preferred_model_id=preferred_model_id)
 
         run_async(self, _load, callback=_done)
 
-    def _apply_models(self, items: list[dict]) -> None:
+    def _apply_models(self, items: list[dict], *, preferred_model_id: int | None = None) -> None:
         # Remember the selected model_id before wiping, so we can restore it.
         prev_model_id: int | None = None
         if hasattr(self, "models_list"):
@@ -3098,15 +3117,23 @@ class EngineerScreen(ctk.CTkFrame):
             return
         self.models_list.delete(0, "end")
         restore_index: int | None = None
+        preferred_target = int(preferred_model_id or 0)
+        previous_target = int(prev_model_id or 0)
         for idx, item in enumerate(items):
             self.models_list.insert("end", f"{item['id']} | {item['name']} | {item['path']}")
-            if prev_model_id is not None and int(item.get("id") or 0) == prev_model_id:
+            item_id = int(item.get("id") or 0)
+            if preferred_target > 0 and item_id == preferred_target:
+                restore_index = idx
+                break
+            if restore_index is None and previous_target > 0 and item_id == previous_target:
                 restore_index = idx
 
         if restore_index is not None:
             self.models_list.selection_set(restore_index)
             self.models_list.see(restore_index)
             self.on_model_selected()
+        else:
+            self._update_model_action_state()
 
     def create_model(self):
         payload = {
@@ -3235,12 +3262,86 @@ class EngineerScreen(ctk.CTkFrame):
         self.model_detail.set_payload(result)
         self.refresh_models()
 
+    def export_selected_model(self):
+        selected = self._selected_model_record()
+        if selected is None:
+            messagebox.showwarning("Models", "Pilih model yang ingin diexport.")
+            return
+
+        model_id = int(selected.get("id") or 0)
+        if model_id <= 0:
+            messagebox.showwarning("Models", "Model terpilih tidak memiliki ID yang valid.")
+            return
+
+        model_name = str(selected.get("name") or f"model-{model_id}").strip() or f"model-{model_id}"
+        export_path = filedialog.asksaveasfilename(
+            defaultextension=".zip",
+            filetypes=[("ZIP Archive", "*.zip"), ("All Files", "*.*")],
+            initialfile=f"model-{model_id}.zip",
+            title="Export Model Archive",
+        )
+        if not export_path:
+            return
+
+        def _load():
+            archive_bytes = self.api.export_model_archive(model_id)
+            Path(export_path).write_bytes(archive_bytes)
+            return {"path": export_path, "model_id": model_id, "model_name": model_name}
+
+        def _done(result, error):
+            if error:
+                messagebox.showerror("Export Model", str(error))
+                return
+            if not isinstance(result, dict):
+                return
+            messagebox.showinfo(
+                "Export Model",
+                f"Model '{result['model_name']}' berhasil diexport.\nDisimpan ke:\n{result['path']}",
+            )
+
+        run_async(self, _load, callback=_done)
+
+    def import_model_archive(self):
+        archive_path = filedialog.askopenfilename(
+            title="Import Model Archive (.zip)",
+            filetypes=[("ZIP Archive", "*.zip"), ("All Files", "*.*")],
+        )
+        if not archive_path:
+            return
+
+        def _load():
+            return self.api.import_model_archive(archive_path, target_lifecycle="draft")
+
+        def _done(result, error):
+            if error:
+                messagebox.showerror("Import Model", str(error))
+                return
+            if not isinstance(result, dict):
+                return
+            imported_id = int(result.get("model_id") or result.get("id") or 0)
+            imported_name = str(result.get("imported_name") or Path(archive_path).stem or "Imported Model").strip() or "Imported Model"
+            warnings = [str(item).strip() for item in (result.get("warnings") or []) if str(item).strip()]
+            message_lines = [f"Model '{imported_name}' berhasil diimport."]
+            if imported_id > 0:
+                message_lines.append(f"ID baru: {imported_id}")
+            if warnings:
+                message_lines.append("")
+                message_lines.append("Peringatan:")
+                message_lines.extend(f"- {item}" for item in warnings)
+            messagebox.showinfo("Import Model", "\n".join(message_lines))
+            self.model_detail.set_payload(result)
+            self.refresh_models(preferred_model_id=imported_id if imported_id > 0 else None)
+
+        run_async(self, _load, callback=_done)
+
     def on_model_selected(self):
         index = self._selected_listbox_index(self.models_list)
         if index is None or index >= len(self._model_cache):
             self.model_detail.set_payload({})
+            self._update_model_action_state()
             return
         self.model_detail.set_payload(self._model_cache[index])
+        self._update_model_action_state()
 
     # ── Sticker ROI Setup helpers ────────────────────────────────────
 

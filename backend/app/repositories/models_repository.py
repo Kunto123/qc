@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from backend.app.core.config import DEFAULT_STICKER_MODEL_META_PATH, DEFAULT_STICKER_MODEL_PATH
+from backend.app.core.config import DEFAULT_STICKER_MODEL_META_PATH, DEFAULT_STICKER_MODEL_PATH, MODELS_DIR, PROJECT_ROOT
 from backend.app.repositories.base_json import JsonRepository
 
 # Lifecycle: draft → validated → canary → production → retired
@@ -33,6 +33,23 @@ def _file_sha256(path: str) -> str | None:
         return h.hexdigest()
     except Exception:  # noqa: BLE001
         return None
+
+
+def _path_candidates(raw_path: str) -> set[str]:
+    value = str(raw_path or "").strip()
+    if not value:
+        return set()
+    path = Path(value)
+    candidates = {value.replace("/", "\\").lower()}
+    if path.name:
+        candidates.add(path.name.lower())
+    resolved_candidates = [path] if path.is_absolute() else [PROJECT_ROOT / path, MODELS_DIR / path, MODELS_DIR / path.name]
+    for candidate in resolved_candidates:
+        try:
+            candidates.add(str(candidate.resolve()).replace("/", "\\").lower())
+        except Exception:  # noqa: BLE001
+            continue
+    return candidates
 
 
 def _load_default_meta() -> dict[str, Any]:
@@ -88,6 +105,73 @@ class ModelsRepository(JsonRepository):
             (item for item in self.list_models() if str(item.get("path") or "").strip().lower() == normalized),
             None,
         )
+
+    def find_by_name(self, name: str) -> dict | None:
+        normalized = str(name or "").strip().lower()
+        if not normalized:
+            return None
+        return next(
+            (item for item in self.list_models() if str(item.get("name") or "").strip().lower() == normalized),
+            None,
+        )
+
+    def find_active_model_conflict(self, model_path: str, *, templates_repo: Any, deployments_repo: Any) -> dict | None:
+        model_candidates = _path_candidates(model_path)
+        if not model_candidates:
+            return None
+        for deployment in deployments_repo.list_deployments():
+            if not deployment.get("is_active"):
+                continue
+            version = templates_repo.get_version(int(deployment.get("template_version_id") or 0))
+            if version is None:
+                continue
+            template_payload = dict(version.get("template") or {})
+            vision_payload = dict(template_payload.get("vision") or {})
+            deployed_model_path = str(vision_payload.get("model_path") or "").strip()
+            if not deployed_model_path:
+                continue
+            if model_candidates & _path_candidates(deployed_model_path):
+                return {
+                    "deployment_id": deployment.get("id"),
+                    "line_id": deployment.get("line_id"),
+                    "station_id": deployment.get("station_id"),
+                    "template_id": deployment.get("template_id"),
+                    "template_version_id": deployment.get("template_version_id"),
+                    "template_model_path": deployed_model_path,
+                }
+        return None
+
+    def list_model_deployment_references(self, model_path: str, *, templates_repo: Any, deployments_repo: Any) -> list[dict[str, Any]]:
+        model_candidates = _path_candidates(model_path)
+        if not model_candidates:
+            return []
+
+        references: list[dict[str, Any]] = []
+        for deployment in deployments_repo.list_deployments():
+            version = templates_repo.get_version(int(deployment.get("template_version_id") or 0))
+            if version is None:
+                continue
+            template_payload = dict(version.get("template") or {})
+            vision_payload = dict(template_payload.get("vision") or {})
+            deployed_model_path = str(vision_payload.get("model_path") or "").strip()
+            if not deployed_model_path or not (model_candidates & _path_candidates(deployed_model_path)):
+                continue
+            references.append(
+                {
+                    "deployment_id": deployment.get("id"),
+                    "line_id": deployment.get("line_id"),
+                    "station_id": deployment.get("station_id"),
+                    "template_id": deployment.get("template_id"),
+                    "template_version_id": deployment.get("template_version_id"),
+                    "template_name": deployment.get("template_name") or template_payload.get("name"),
+                    "version_number": deployment.get("version_number"),
+                    "is_active": bool(deployment.get("is_active")),
+                    "effective_from": deployment.get("effective_from"),
+                    "effective_until": deployment.get("effective_until"),
+                    "model_path": deployed_model_path,
+                }
+            )
+        return references
 
     def add_model(
         self,

@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
 
 from client_tk.app.api_client import ApiClient
-from client_tk.app.config import DEFAULT_SERVER_URL
+from client_tk.app.config import DEFAULT_LOCAL_ONLY, DEFAULT_SERVER_URL
 from client_tk.app.theme import (
     ACCENT,
     ACCENT_HOVER,
@@ -25,6 +25,7 @@ from client_tk.app.theme import (
     configure_ttk_navy_theme,
 )
 from client_tk.app.screens.admin.view import AdminScreen
+from client_tk.app.screens.engineer.view import EngineerScreen
 from client_tk.app.screens.operator.view import OperatorScreen
 from client_tk.app.services.session_state import SessionState
 from shared.contracts.enums import UserRole
@@ -33,13 +34,15 @@ from shared.contracts.enums import UserRole
 ROLE_SCREEN_MAP = {
     UserRole.ADMIN.value: AdminScreen,
     UserRole.OPERATOR.value: OperatorScreen,
+    UserRole.ENGINEER.value: EngineerScreen,
 }
 
 
 class LoginFrame(ctk.CTkFrame):
-    def __init__(self, master, on_login) -> None:
+    def __init__(self, master, on_login, *, local_only: bool = False) -> None:
         super().__init__(master, fg_color=APP_BG, corner_radius=0)
         self._on_login = on_login
+        self._local_only = bool(local_only)
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -62,7 +65,7 @@ class LoginFrame(ctk.CTkFrame):
             text_color=TEXT_SECONDARY,
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=24, pady=(0, 20))
 
-        ctk.CTkLabel(card, text="Server URL", text_color=TEXT_PRIMARY).grid(row=2, column=0, sticky="w", padx=24, pady=8)
+        ctk.CTkLabel(card, text="Runtime" if self._local_only else "Server URL", text_color=TEXT_PRIMARY).grid(row=2, column=0, sticky="w", padx=24, pady=8)
         ctk.CTkLabel(card, text="Username", text_color=TEXT_PRIMARY).grid(row=3, column=0, sticky="w", padx=24, pady=8)
         ctk.CTkLabel(card, text="Password", text_color=TEXT_PRIMARY).grid(row=4, column=0, sticky="w", padx=24, pady=8)
 
@@ -76,6 +79,8 @@ class LoginFrame(ctk.CTkFrame):
         self.base_url_entry.grid(row=2, column=1, sticky="ew", padx=(0, 24), pady=8)
         self.username_entry.grid(row=3, column=1, sticky="ew", padx=(0, 24), pady=8)
         self.password_entry.grid(row=4, column=1, sticky="ew", padx=(0, 24), pady=8)
+        if self._local_only:
+            self.base_url_entry.configure(state="disabled")
 
         ctk.CTkButton(
             card,
@@ -108,6 +113,7 @@ class QcSuiteDesktopApp(ctk.CTk):
     def __init__(self) -> None:
         configure_customtkinter()
         super().__init__()
+        self.local_only = DEFAULT_LOCAL_ONLY
         self.title("QC Suite Python")
         self.geometry("1440x900")
         self.minsize(1160, 720)
@@ -120,7 +126,7 @@ class QcSuiteDesktopApp(ctk.CTk):
         self.session_state = SessionState(base_url=DEFAULT_SERVER_URL)
         self.active_screen: ttk.Frame | None = None
 
-        self.login_frame = LoginFrame(self, self._handle_login)
+        self.login_frame = LoginFrame(self, self._handle_login, local_only=self.local_only)
         self.shell = ctk.CTkFrame(self, fg_color=APP_BG, corner_radius=0)
         self.shell.pack_forget()
 
@@ -129,7 +135,11 @@ class QcSuiteDesktopApp(ctk.CTk):
         ctk.CTkLabel(header, text="QC Suite Python", font=("Segoe UI", 16, "bold"), text_color=TEXT_PRIMARY).pack(side="left", padx=(16, 12), pady=14)
         self.user_label = ctk.CTkLabel(header, text="Not authenticated", text_color=TEXT_SECONDARY)
         self.user_label.pack(side="left", padx=16)
-        self.endpoint_label = ctk.CTkLabel(header, text=DEFAULT_SERVER_URL, text_color=TEXT_SECONDARY)
+        self.endpoint_label = ctk.CTkLabel(
+            header,
+            text="Embedded local runtime" if self.local_only else DEFAULT_SERVER_URL,
+            text_color=TEXT_SECONDARY,
+        )
         self.endpoint_label.pack(side="left", padx=16)
         ctk.CTkButton(
             header,
@@ -150,7 +160,7 @@ class QcSuiteDesktopApp(ctk.CTk):
     def _show_login(self) -> None:
         self._teardown_screen()
         self.shell.pack_forget()
-        self.login_frame.set_base_url(self.session_state.base_url)
+        self.login_frame.set_base_url(self.session_state.base_url if not self.local_only else DEFAULT_SERVER_URL)
         self.login_frame.pack(fill="both", expand=True)
         self.login_frame.focus_credentials()
 
@@ -159,8 +169,10 @@ class QcSuiteDesktopApp(ctk.CTk):
         self.shell.pack(fill="both", expand=True)
 
     def _handle_login(self, base_url: str, username: str, password: str) -> None:
-        if not base_url or not username or not password:
-            messagebox.showerror("Login", "Server URL, username, dan password wajib diisi.")
+        if self.local_only:
+            base_url = DEFAULT_SERVER_URL
+        if (not self.local_only and not base_url) or not username or not password:
+            messagebox.showerror("Login", "Username dan password wajib diisi." if self.local_only else "Server URL, username, dan password wajib diisi.")
             return
         try:
             self.api = ApiClient(base_url)
@@ -183,7 +195,8 @@ class QcSuiteDesktopApp(ctk.CTk):
             return
         self._teardown_screen()
         self.user_label.configure(text=f"{self.session_state.user.get('username')} ({self.session_state.user.get('role')})")
-        self.endpoint_label.configure(text=self.session_state.base_url)
+        endpoint_display = "Embedded local runtime" if self.local_only else self.session_state.base_url
+        self.endpoint_label.configure(text=endpoint_display)
         self.active_screen = screen_class(self.screen_host, self.api, self.session_state)
         self.active_screen.pack(fill="both", expand=True)
         self._show_shell()

@@ -21,6 +21,7 @@ from backend.app.repositories.templates_repository import TemplatesRepository
 from backend.app.repositories.training_repository import TrainingRepository
 from backend.app.repositories.users_repository import UsersRepository
 from backend.app.repositories.workstation_registry_repository import WorkstationRegistryRepository
+from backend.app.services.model_export_service import ModelExportService
 from backend.app.services.inspection_session import InspectionSessionService
 from backend.app.services.sticker_inference import StickerInferenceService
 from backend.app.services.template_runtime import TemplateRuntimeService
@@ -62,6 +63,7 @@ token_store = (
 
 template_runtime_service = TemplateRuntimeService(templates_repo, deployments_repo)
 sticker_inference_service = StickerInferenceService(app_config, models_repo, device_runtime)
+model_export_service = ModelExportService(models_repo, templates_repo, deployments_repo)
 inspection_session_service = InspectionSessionService(
     template_runtime_service,
     profiles_repo,

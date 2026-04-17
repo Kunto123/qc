@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# Deprecated remote-only compatibility path.
+# Local-only desktop mode does not start this sidecar.
 # ---------------------------------------------------------------------------
 # WebSocket Streaming Sidecar
 # ---------------------------------------------------------------------------

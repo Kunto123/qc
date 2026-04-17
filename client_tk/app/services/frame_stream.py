@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# Deprecated remote-only compatibility path.
+# Local-only desktop mode no longer selects this transport by default.
 # ---------------------------------------------------------------------------
 # WebSocket frame streaming client (replaces FrameUploadService for sessions)
 # ---------------------------------------------------------------------------
