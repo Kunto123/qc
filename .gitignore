@@ -15,6 +15,7 @@ ENV/
 .env.*
 .qc
 !.env.example
+data/models/*
 
 # Test / coverage / type-check caches
 .pytest_cache/
