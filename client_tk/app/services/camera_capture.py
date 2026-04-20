@@ -40,12 +40,15 @@ class CameraCaptureService:
         self._thread.start()
 
     def _loop(self) -> None:
+        # read() on most backends blocks until a frame is available; the sleep
+        # only paces the loop when read() returns immediately (e.g. DSHOW non-block).
         while self._running and self._capture is not None:
             ok, frame = self._capture.read()
             if ok and frame is not None:
                 with self._lock:
-                    self._frame = frame.copy()
-            time.sleep(0.02)
+                    self._frame = frame
+            else:
+                time.sleep(0.005)
 
     def get_latest_frame(self):
         with self._lock:

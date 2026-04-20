@@ -520,7 +520,7 @@ class OperatorScreen(ctk.CTkFrame):
             return default
 
     def _resolve_upload_interval_ms(self) -> int:
-        fallback = max(100, int(DEFAULT_UPLOAD_INTERVAL_MS))
+        fallback = max(50, int(DEFAULT_UPLOAD_INTERVAL_MS))
         detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
         if not isinstance(detail, dict):
             return fallback
@@ -531,7 +531,7 @@ class OperatorScreen(ctk.CTkFrame):
             return fallback
         if inference_fps <= 0.0:
             return fallback
-        return max(100, int(round(1000.0 / inference_fps)))
+        return max(50, int(round(1000.0 / inference_fps)))
 
     def _read_roi_payload(self, kind: str) -> dict[str, float]:
         variables = self._roi_vars(kind)
@@ -848,8 +848,13 @@ class OperatorScreen(ctk.CTkFrame):
         self.result_panel.reset()
         self.counter_panel.reset()
         self.recent_list.delete(0, "end")
-        self.part_ready_preview.reset()
-        self.main_view.reset()
+        # Restore raw preview immediately so camera stays visible during first backend round-trip.
+        _current_frame = self.capture.get_latest_frame()
+        if _current_frame is not None:
+            self._update_local_roi_previews(_current_frame)
+        else:
+            self.part_ready_preview.reset()
+            self.main_view.reset()
         upload_interval_ms = self._resolve_upload_interval_ms()
         self.uploader.start(
             interval_ms=upload_interval_ms,
@@ -862,8 +867,10 @@ class OperatorScreen(ctk.CTkFrame):
             on_result=self._set_result,
             on_error=self._set_error,
         )
+        infer_fps_actual = round(1000.0 / upload_interval_ms, 1)
         self.info_var.set(
-            f"Session running: {payload['session_id']} (local frame pump @ {upload_interval_ms} ms)"
+            f"Session running: {payload['session_id']} "
+            f"(infer @ {upload_interval_ms} ms / {infer_fps_actual} fps | preview @ 10 fps | JPEG q=75)"
         )
         self._refresh_context_summary()
         self._update_status_badges()
@@ -982,21 +989,29 @@ class OperatorScreen(ctk.CTkFrame):
                 self._sync_recent_events(payload)
                 self._refresh_context_summary()
                 self._update_status_badges(payload)
-                display_frame = frame if frame is not None else self.capture.get_latest_frame()
+                display_frame = frame
                 timings = payload.get("timings") or {}
                 total_ms = timings.get("total_ms")
                 inference_ms = timings.get("inference_ms")
+                client_timings = payload.get("client_timings") or {}
                 timing_suffix = ""
                 if isinstance(total_ms, (int, float)):
-                    timing_suffix = f" | latency={float(total_ms):.1f}ms"
+                    timing_suffix = f" | backend={float(total_ms):.0f}ms"
                     if isinstance(inference_ms, (int, float)):
-                        timing_suffix += f" infer={float(inference_ms):.1f}ms"
-                if payload.get("part_ready_preview_image_b64"):
-                    self.part_ready_preview.update_b64(payload.get("part_ready_preview_image_b64"))
-                elif display_frame is not None:
+                        timing_suffix += f" infer={float(inference_ms):.0f}ms"
+                enc_ms = client_timings.get("encode_ms")
+                req_ms = client_timings.get("request_ms")
+                if isinstance(enc_ms, (int, float)):
+                    timing_suffix += f" enc={float(enc_ms):.0f}ms"
+                if isinstance(req_ms, (int, float)):
+                    timing_suffix += f" req={float(req_ms):.0f}ms"
+                # Always prefer live camera frame for part_ready preview (fast, no decode overhead).
+                if display_frame is not None:
                     local_part_ready = self._crop_local_roi(display_frame, self._read_roi_payload("part_ready"))
                     if local_part_ready is not None:
                         self.part_ready_preview.update_bgr(local_part_ready)
+                elif payload.get("part_ready_preview_image_b64"):
+                    self.part_ready_preview.update_b64(payload.get("part_ready_preview_image_b64"))
                 if payload.get("overlay_image_b64"):
                     self.main_view.update_b64(payload.get("overlay_image_b64"))
                     self.display_source.set("Right View: Local ML Overlay")
@@ -1054,6 +1069,8 @@ class OperatorScreen(ctk.CTkFrame):
                 self._update_status_badges()
                 if frame is not None:
                     self._update_local_roi_previews(frame)
+                elif self.state.active_session:
+                    self.info_var.set("Session aktif — menunggu frame kamera.")
         except tk.TclError as exc:
             self.state.latest_error = str(exc)
             self.info_var.set(f"UI render warning: {exc}")

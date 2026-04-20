@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import threading
 import time
 import uuid
@@ -54,8 +55,12 @@ def _decode_image(image_b64: str):
     return image
 
 
+_OVERLAY_JPEG_QUALITY = int(os.getenv("QC_SUITE_OVERLAY_JPEG_QUALITY", "80"))
+_ENCODE_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, max(40, min(100, _OVERLAY_JPEG_QUALITY))]
+
+
 def _encode_image(image) -> str:
-    ok, encoded = cv2.imencode(".jpg", image)
+    ok, encoded = cv2.imencode(".jpg", image, _ENCODE_PARAMS)
     if not ok:
         return ""
     return base64.b64encode(encoded.tobytes()).decode("ascii")

@@ -16,6 +16,7 @@ ENV/
 .qc
 !.env.example
 data/models/*
+model-minipc/*
 
 # Test / coverage / type-check caches
 .pytest_cache/
