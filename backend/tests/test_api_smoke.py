@@ -2605,6 +2605,136 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(pr["part_ready_settle_ms"], 0)
         self.assertEqual(pr["part_ready_settle_remaining_ms"], 0)
 
+    def test_13g_commit_stable_frames_does_not_override_settle_ms(self) -> None:
+        """commit_stable_frames must not gate commits when part_ready_settle_ms is set.
+
+        Template has commit_stable_frames=100 (would never commit under the old frame-
+        count rule) but part_ready_settle_ms=0 (immediate commit under new unified rule).
+        The first frame must be committed, proving that settle_ms wins.
+        """
+        response = self.client.post(
+            "/templates",
+            json={
+                "name": "CSF Override Regression",
+                "description": "commit_stable_frames vs settle_ms regression",
+                "is_active": True,
+                "camera": {"camera_index": 0, "width": 640, "height": 480, "fps": 15},
+                "part_ready_roi": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+                "sticker_roi": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+                "vision": {"model_path": "models/dummy.pt", "classes": ["K0W-HB0"]},
+                "part_ready": {"enabled": False, "color_profile_id": None, "colorspace": "LAB"},
+                "sticker": {
+                    "part_name": "CSF Part",
+                    "expected_class": "K0W-HB0",
+                    "line": "LINE-CSF",
+                    "enabled": True,
+                    "validator_mode": "ml_detection",
+                    "min_roi_confidence": 0.0,
+                    "commit_stable_frames": 100,  # large value — must be ignored by runtime
+                    "part_ready_settle_ms": 0,    # immediate commit — sole runtime knob
+                },
+                "persistence": {"write_to_db": False},
+                "metadata": {"scenario": "csf-regression"},
+            },
+            headers=_headers(self.engineer_token),
+        )
+        assert response.status_code == 201, response.get_json()
+        template = response.get_json()
+
+        session_resp = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "csf-regression",
+                "camera_index": 0,
+                "template_version_id": template["version_id"],
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_resp.status_code, 201, session_resp.get_json())
+        sid = session_resp.get_json()["session_id"]
+
+        frame_resp = self.client.post(
+            f"/inspection/sessions/{sid}/frame",
+            json={"image_b64": _sample_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(frame_resp.status_code, 200, frame_resp.get_json())
+        payload = frame_resp.get_json()
+
+        # settle_ms=0 → commit on first frame regardless of commit_stable_frames=100
+        self.assertTrue(payload["count_committed"],
+                        "commit_stable_frames=100 must not block commit when settle_ms=0")
+        self.assertEqual(payload["counters"]["session_total"], 1)
+
+    def test_13h_settle_ms_controls_commit_after_settle_window(self) -> None:
+        """part_ready_settle_ms must gate the commit window after settle completes.
+
+        With settle_ms=80 ms:
+        - Frame during settle → inference skipped, no commit.
+        - First frame after settle → inference runs, event starts, no commit yet
+          (the event has just started so <80 ms have elapsed).
+        - Frame after another 100 ms → event has been stable ≥80 ms → commit.
+        """
+        template = self._create_settle_template(settle_ms=80)
+
+        session_resp = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "settle-commit-timing",
+                "camera_index": 0,
+                "template_version_id": template["version_id"],
+                "line_id": "LINE-SETTLE",
+                "station_id": "ST-SETTLE-H",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_resp.status_code, 201, session_resp.get_json())
+        sid = session_resp.get_json()["session_id"]
+
+        # Frame 1: blank → no presence, settle not started
+        self.client.post(
+            f"/inspection/sessions/{sid}/frame",
+            json={"image_b64": _blank_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+
+        # Frame 2: sample → settle starts (t≈0)
+        self.client.post(
+            f"/inspection/sessions/{sid}/frame",
+            json={"image_b64": _sample_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+
+        # Wait for settle to expire
+        time.sleep(0.12)
+
+        # Frame 3: first post-settle result → event starts now; commit not yet (0 ms elapsed)
+        r3 = self.client.post(
+            f"/inspection/sessions/{sid}/frame",
+            json={"image_b64": _sample_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(r3.status_code, 200, r3.get_json())
+        r3_payload = r3.get_json()
+        self.assertTrue(r3_payload["part_ready"]["part_ready_settled"], "Settle must be elapsed")
+        self.assertFalse(r3_payload["count_committed"],
+                         "Must not commit on first post-settle frame when settle_ms=80")
+
+        # Wait past the commit window
+        time.sleep(0.1)
+
+        # Frame 4: event stable for ≥80 ms → commit
+        r4 = self.client.post(
+            f"/inspection/sessions/{sid}/frame",
+            json={"image_b64": _sample_image_b64()},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(r4.status_code, 200, r4.get_json())
+        r4_payload = r4.get_json()
+        self.assertTrue(r4_payload["count_committed"],
+                        "Must commit after event has been stable for ≥settle_ms ms")
+        self.assertGreaterEqual(r4_payload["counters"]["session_total"], 1)
+
     # ------------------------------------------------------------------
     # Phase 14: model registry rename
     # ------------------------------------------------------------------

@@ -218,6 +218,9 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.sticker_expected_center_y_var = tk.StringVar(value="")
         self.sticker_commit_stable_frames_var = tk.StringVar(value="5")
         self.sticker_settle_ms_var = tk.StringVar(value="")
+        self.sticker_tilt_gate_enabled_var = tk.BooleanVar(value=False)
+        self.sticker_expected_tilt_var = tk.StringVar(value="0.0")
+        self.sticker_max_tilt_var = tk.StringVar(value="")
         self._api_client_ref = None  # set from outside for "Load from Session"
 
         self.write_to_db_var = tk.BooleanVar(value=True)
@@ -324,15 +327,40 @@ class TemplateEditorForm(ctk.CTkFrame):
         self._entry(sticker_config, 5, 2, "Max Offset Y", self.sticker_max_offset_y_var)
         self._entry(sticker_config, 6, 0, "Expected Center X (0-1)", self.sticker_expected_center_x_var)
         self._entry(sticker_config, 6, 2, "Expected Center Y (0-1)", self.sticker_expected_center_y_var)
-        self._entry(sticker_config, 7, 0, "Stable Frames (debounce)", self.sticker_commit_stable_frames_var)
+        self._entry(sticker_config, 7, 0, "Stable Frames (legacy)", self.sticker_commit_stable_frames_var)
         self._entry(sticker_config, 7, 2, "Part Ready Settle (ms)", self.sticker_settle_ms_var)
-        ctk.CTkLabel(sticker_config, text="Jumlah frame stabil berurutan sebelum keputusan dikunci (default 5).", text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(
+        ctk.CTkLabel(sticker_config, text="Settle (ms): nilai utama — mengontrol hold inferensi dan commit. 0 = nonaktif. Kosong = ikuti env.", text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(
             row=8, column=2, columnspan=2, sticky="w", padx=(0, 8))
-        ctk.CTkLabel(sticker_config, text="Settle (ms): kosong = ikuti env QC_SUITE_PART_READY_SETTLE_MS. 0 = nonaktif.", text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(
+        ctk.CTkLabel(sticker_config, text="Stable Frames: legacy, tidak memengaruhi runtime. Gunakan Part Ready Settle (ms) sebagai gantinya.", text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(
             row=8, column=0, columnspan=2, sticky="w", padx=(10, 8))
         ctk.CTkLabel(sticker_config, text="Kosong = auto center (0.5). Gunakan Visual Picker di bawah.", text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(
             row=9, column=0, columnspan=4, sticky="w", pady=(0, 4), padx=10
         )
+
+        # Tilt gate section
+        tilt_separator = ctk.CTkFrame(sticker_config, fg_color=BORDER, height=1)
+        tilt_separator.grid(row=10, column=0, columnspan=4, sticky="ew", padx=10, pady=(6, 4))
+        ctk.CTkLabel(sticker_config, text="Tilt Gate", font=("Segoe UI", 9, "bold"), text_color=TEXT_PRIMARY).grid(
+            row=11, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 4))
+        self.tilt_gate_checkbox = ctk.CTkCheckBox(
+            sticker_config,
+            text="Aktifkan Gate Kemiringan (OUT_OF_ANGLE)",
+            variable=self.sticker_tilt_gate_enabled_var,
+            text_color=TEXT_PRIMARY,
+            command=self._on_tilt_gate_toggled,
+        )
+        self.tilt_gate_checkbox.grid(row=12, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 6))
+        self._entry(sticker_config, 13, 0, "Expected Tilt (°)", self.sticker_expected_tilt_var)
+        self._entry(sticker_config, 13, 2, "Max Tilt Deviation (°)", self.sticker_max_tilt_var)
+        self.tilt_note_label = ctk.CTkLabel(
+            sticker_config,
+            text="Gate nonaktif — nilai tersimpan sebagai telemetry, tidak memengaruhi accept/reject.",
+            text_color=TEXT_SECONDARY,
+            font=("Segoe UI", 8),
+        )
+        self.tilt_note_label.grid(row=14, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 8))
+        self._tilt_entries: list[ctk.CTkEntry] = []
+        self.sticker_tilt_gate_enabled_var.trace_add("write", lambda *_: self._on_tilt_gate_toggled())
 
         # Visual ROI Picker
         self.roi_picker = RoiPickerCanvas(sticker_tab, "Visual ROI & Expected Center Picker", size=(640, 300))
@@ -464,6 +492,16 @@ class TemplateEditorForm(ctk.CTkFrame):
         self._sync_picker()
 
     # ------------------------------------------------------------------
+
+    def _on_tilt_gate_toggled(self) -> None:
+        enabled = self.sticker_tilt_gate_enabled_var.get()
+        note = (
+            "Gate aktif — maks deviasi dipakai untuk reject OUT_OF_ANGLE."
+            if enabled
+            else "Gate nonaktif — nilai tersimpan sebagai telemetry, tidak memengaruhi accept/reject."
+        )
+        if hasattr(self, "tilt_note_label"):
+            self.tilt_note_label.configure(text=note)
 
     def _entry(self, master, row: int, column: int, label: str, variable: tk.Variable) -> None:
         ctk.CTkLabel(master, text=label, text_color=TEXT_PRIMARY).grid(row=row, column=column, sticky="w", padx=(0, 8), pady=4)
@@ -711,7 +749,12 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.sticker_commit_stable_frames_var.set(str(sticker.get("commit_stable_frames") or "5"))
         _settle = sticker.get("part_ready_settle_ms")
         self.sticker_settle_ms_var.set("" if _settle is None else str(_settle))
+        self.sticker_tilt_gate_enabled_var.set(bool(sticker.get("tilt_gate_enabled", False)))
+        self.sticker_expected_tilt_var.set(str(sticker.get("expected_tilt_degrees", 0.0)))
+        _max_tilt = sticker.get("max_tilt_degrees")
+        self.sticker_max_tilt_var.set("" if _max_tilt is None else str(_max_tilt))
         self.after_idle(self._sync_picker)
+        self.after_idle(self._on_tilt_gate_toggled)
 
         persistence = payload.get("persistence") or {}
         self.write_to_db_var.set(bool(persistence.get("write_to_db", True)))
@@ -789,6 +832,9 @@ class TemplateEditorForm(ctk.CTkFrame):
                 "expected_center_y": _float_or_none(self.sticker_expected_center_y_var.get()),
                 "commit_stable_frames": _int_or_none(self.sticker_commit_stable_frames_var.get()) or 5,
                 "part_ready_settle_ms": _int_or_none(self.sticker_settle_ms_var.get()),
+                "tilt_gate_enabled": bool(self.sticker_tilt_gate_enabled_var.get()),
+                "expected_tilt_degrees": _float_or_none(self.sticker_expected_tilt_var.get()) or 0.0,
+                "max_tilt_degrees": _float_or_none(self.sticker_max_tilt_var.get()),
             },
             "persistence": {
                 "write_to_db": bool(self.write_to_db_var.get()),
@@ -833,6 +879,9 @@ class TemplateEditorForm(ctk.CTkFrame):
                     "max_offset_x": 80,
                     "max_offset_y": 80,
                     "part_ready_settle_ms": None,
+                    "tilt_gate_enabled": False,
+                    "expected_tilt_degrees": 0.0,
+                    "max_tilt_degrees": None,
                 },
                 "persistence": {"write_to_db": True},
                 "metadata": {},

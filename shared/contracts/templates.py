@@ -61,9 +61,16 @@ class StickerRule:
     expected_center_y: float | None = None
     expected_tilt_degrees: float = 0.0
     max_tilt_degrees: float | None = None
+    # Tilt gate toggle: when False (default) the OUT_OF_ANGLE decision is never
+    # raised — tilt telemetry is still calculated and forwarded as observability data.
+    # Set True to make max_tilt_degrees an active reject gate.
+    tilt_gate_enabled: bool = False
+    # Legacy field — kept for backward compatibility with older templates and API
+    # payloads only. Runtime commit timing is now controlled exclusively by
+    # part_ready_settle_ms and no longer depends on this field.
     commit_stable_frames: int = 1
-    # Settle-time debounce: inference and commit are held for this many ms after
-    # part_ready first becomes True.
+    # Primary runtime timing knob: controls both the inference hold (settle) and the
+    # commit window after the first stable post-ready result.
     # None  = use system-wide default (QC_SUITE_PART_READY_SETTLE_MS env var).
     # 0     = bypass debounce for this template regardless of env.
     # > 0   = explicit ms value; overrides env default.

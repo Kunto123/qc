@@ -430,6 +430,7 @@ class InspectionSessionService:
             part_ready_payload=effective_part_ready,
             presence=presence,
             now=datetime.now(UTC),
+            settle_ms=settle_ms,
         )
         timings["event_state_ms"] = _elapsed_ms(event_state_started)
 
@@ -803,6 +804,11 @@ class InspectionSessionService:
         validator_mode = str(getattr(sticker, "validator_mode", "ml_detection") or "ml_detection").strip().lower()
         position_gate_enabled = validator_mode not in ROI_CLASS_VALIDATOR_MODES
         line_id = state.line_id or sticker.line
+        expected_tilt_degrees = float(getattr(sticker, "expected_tilt_degrees", 0.0) or 0.0)
+        max_tilt_degrees = getattr(sticker, "max_tilt_degrees", None)
+        max_tilt_degrees_value = None if max_tilt_degrees is None else float(max_tilt_degrees)
+        tilt_gate_enabled = bool(getattr(sticker, "tilt_gate_enabled", False))
+        tilt_info = _estimate_tilt_from_roi(roi_frame, expected_tilt_degrees)
         thresholds = {
             "min_roi_confidence": float(sticker.min_roi_confidence or 0.0),
             "min_class_confidence": (
@@ -812,6 +818,9 @@ class InspectionSessionService:
             "max_offset_y": None if sticker.max_offset_y is None else float(sticker.max_offset_y),
             "validator_mode": validator_mode,
             "position_gate_enabled": position_gate_enabled,
+            "tilt_gate_enabled": tilt_gate_enabled,
+            "max_tilt_degrees": max_tilt_degrees_value,
+            "expected_tilt_degrees": expected_tilt_degrees,
         }
         detection_context = {
             "backend": detection_payload.get("backend"),
@@ -820,10 +829,6 @@ class InspectionSessionService:
             "class_names": list(detection_payload.get("class_names") or []),
             "fallback_reason": detection_payload.get("fallback_reason"),
         }
-        expected_tilt_degrees = float(getattr(sticker, "expected_tilt_degrees", 0.0) or 0.0)
-        max_tilt_degrees = getattr(sticker, "max_tilt_degrees", None)
-        max_tilt_degrees_value = None if max_tilt_degrees is None else float(max_tilt_degrees)
-        tilt_info = _estimate_tilt_from_roi(roi_frame, expected_tilt_degrees)
         if not sticker.enabled:
             return {
                 "decision": DecisionCode.ACCEPT.value,
@@ -980,7 +985,7 @@ class InspectionSessionService:
             reject_reason = RejectReasonCode.WRONG_TYPE.value
         elif thresholds["min_class_confidence"] is not None and float(selected_candidate.get("class_confidence") or 0.0) < float(thresholds["min_class_confidence"]):
             reject_reason = RejectReasonCode.LOW_CLASS_CONF.value
-        elif max_tilt_degrees_value is not None and tilt_info.get("angle_degrees") is not None and float(tilt_info.get("deviation_degrees") or 0.0) > max_tilt_degrees_value:
+        elif tilt_gate_enabled and max_tilt_degrees_value is not None and tilt_info.get("angle_degrees") is not None and float(tilt_info.get("deviation_degrees") or 0.0) > max_tilt_degrees_value:
             reject_reason = RejectReasonCode.OUT_OF_ANGLE.value
         elif position_gate_enabled and thresholds["max_offset_x"] is not None and abs(offset_x) > float(thresholds["max_offset_x"]):
             reject_reason = RejectReasonCode.OUT_OF_POSITION.value
@@ -1046,6 +1051,7 @@ class InspectionSessionService:
         part_ready_payload: dict[str, Any],
         presence: dict[str, Any],
         now: datetime,
+        settle_ms: int = 0,
     ) -> tuple[str, str | None, bool]:
         if not presence.get("present", False):
             state.current_presence = False
@@ -1089,8 +1095,17 @@ class InspectionSessionService:
         if not part_ready_payload.get("part_ready", False):
             return InspectionEventState.PART_DETECTED.value, state.current_event_id, False
 
-        commit_threshold = int(getattr(state.template.sticker, "commit_stable_frames", None) or COMMIT_STABLE_FRAMES)
-        if state.current_event_stable_frames >= commit_threshold:
+        # Time-based commit driven by settle_ms (the same value that gates inference).
+        # settle_ms=0 → commit immediately on the first stable post-ready frame.
+        # settle_ms>0 → commit only after the current event has been continuously
+        # stable for at least settle_ms milliseconds since current_event_started_at.
+        if settle_ms > 0 and state.current_event_started_at is not None:
+            elapsed_event_ms = (now - state.current_event_started_at).total_seconds() * 1000.0
+            commit_ready = elapsed_event_ms >= settle_ms
+        else:
+            commit_ready = True
+
+        if commit_ready:
             state.current_event_committed = True
             state.cooldown_until = now + timedelta(milliseconds=COMMIT_COOLDOWN_MS)
             return InspectionEventState.DECISION_COMMITTED.value, state.current_event_id, True

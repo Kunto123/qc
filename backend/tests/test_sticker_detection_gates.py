@@ -6,12 +6,14 @@ Covers:
   Phase 5 — artifact filename contains job_id_short (no same-second collision).
   Phase 6 — registry display name contains job_id_short.
   Phase 7 — old artifact filenames (no job_id_short) are still loadable unchanged.
+  Phase 8 — tilt_gate_enabled toggle controls OUT_OF_ANGLE decision; telemetry always present.
 """
 from __future__ import annotations
 
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -367,6 +369,276 @@ class BackwardCompatTest(unittest.TestCase):
         new_path = "models/trained/ds1__yolov5n__20260101-120000__abcdef12.pt"
         result = TrainingWorker._trained_artifact_path(new_path)
         self.assertTrue(str(result).endswith("ds1__yolov5n__20260101-120000__abcdef12.pt"))
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: tilt_gate_enabled toggle controls OUT_OF_ANGLE; telemetry always present
+# ---------------------------------------------------------------------------
+
+class TiltGateToggleTest(unittest.TestCase):
+    """_validate_sticker must gate OUT_OF_ANGLE on tilt_gate_enabled, while always
+    computing and returning tilt telemetry regardless of the toggle state."""
+
+    def _make_state(self, *, tilt_gate_enabled: bool, max_tilt_degrees: float | None = 5.0):
+        from backend.app.models.session_state import SessionState
+        from shared.contracts.enums import SessionStatus
+        from shared.contracts.templates import (
+            CameraDefaults, InspectionTemplate, PartReadyConfig,
+            PersistenceConfig, RoiGeometry, StickerRule, VisionConfig,
+        )
+
+        sticker = StickerRule(
+            part_name="P1",
+            expected_class="sticker",
+            line="L1",
+            enabled=True,
+            validator_mode="ml_detection",
+            min_roi_confidence=0.0,
+            expected_tilt_degrees=0.0,
+            max_tilt_degrees=max_tilt_degrees,
+            tilt_gate_enabled=tilt_gate_enabled,
+        )
+        template = InspectionTemplate(
+            id=1,
+            version_id=1,
+            version_number=1,
+            name="T",
+            description="",
+            is_active=True,
+            camera=CameraDefaults(),
+            part_ready_roi=RoiGeometry(),
+            sticker_roi=RoiGeometry(),
+            vision=VisionConfig(),
+            part_ready=PartReadyConfig(),
+            sticker=sticker,
+            persistence=PersistenceConfig(),
+        )
+        return SessionState(
+            session_id="s1",
+            client_id="c1",
+            camera_index=0,
+            template=template,
+            status=SessionStatus.RUNNING,
+        )
+
+    def _detection_payload(self) -> dict:
+        return {
+            "backend": "ultralytics",
+            "model_path": "m.pt",
+            "meta_path": None,
+            "class_names": ["sticker"],
+            "fallback_reason": None,
+        }
+
+    def _one_passing_detection(self) -> list[dict]:
+        return [
+            {
+                "label": "sticker",
+                "confidence": 0.9,
+                "class_confidence": 0.9,
+                "position": {"x1": 10.0, "y1": 10.0, "x2": 50.0, "y2": 50.0},
+            }
+        ]
+
+    def _part_ready_payload(self) -> dict:
+        return {
+            "part_ready": True,
+            "part_ready_confidence": 1.0,
+            "reject_reason_code": None,
+        }
+
+    def _high_deviation_tilt_info(self) -> dict:
+        return {
+            "status": "ok",
+            "angle_degrees": 30.0,
+            "expected_tilt_degrees": 0.0,
+            "deviation_degrees": 30.0,
+            "contour_area": 100.0,
+            "threshold_mode": "binary",
+        }
+
+    def _call_validate(self, state, detections, *, tilt_return_value):
+        service = _make_inspection_service()
+        roi_frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        from backend.app.services import inspection_session as _mod
+        with unittest.mock.patch.object(_mod, "_estimate_tilt_from_roi", return_value=tilt_return_value):
+            return service._validate_sticker(
+                roi_frame=roi_frame,
+                state=state,
+                detections=detections,
+                detection_payload=self._detection_payload(),
+                part_ready_payload=self._part_ready_payload(),
+                username=None,
+                user_id=None,
+            )
+
+    # ------------------------------------------------------------------
+    # Serialisation: tilt_gate_enabled survives template round-trip
+    # ------------------------------------------------------------------
+
+    def test_tilt_gate_enabled_round_trips_in_to_dict(self) -> None:
+        from shared.contracts.templates import StickerRule
+        rule = StickerRule(part_name="P", expected_class="C", line="L", tilt_gate_enabled=True)
+        from dataclasses import asdict
+        d = asdict(rule)
+        self.assertTrue(d["tilt_gate_enabled"])
+
+    def test_tilt_gate_disabled_default_in_to_dict(self) -> None:
+        from shared.contracts.templates import StickerRule
+        rule = StickerRule(part_name="P", expected_class="C", line="L")
+        from dataclasses import asdict
+        d = asdict(rule)
+        self.assertFalse(d["tilt_gate_enabled"])
+
+    def test_template_from_dict_accepts_tilt_gate_enabled(self) -> None:
+        from shared.contracts.templates import template_from_dict
+        payload = {
+            "name": "T", "version_number": 1,
+            "sticker": {
+                "part_name": "P", "expected_class": "C", "line": "L",
+                "tilt_gate_enabled": True,
+                "expected_tilt_degrees": 10.0,
+                "max_tilt_degrees": 8.0,
+            },
+        }
+        tmpl = template_from_dict(payload)
+        self.assertTrue(tmpl.sticker.tilt_gate_enabled)
+        self.assertEqual(tmpl.sticker.expected_tilt_degrees, 10.0)
+        self.assertEqual(tmpl.sticker.max_tilt_degrees, 8.0)
+
+    def test_template_from_dict_defaults_tilt_gate_to_false_when_absent(self) -> None:
+        from shared.contracts.templates import template_from_dict
+        payload = {
+            "name": "T", "version_number": 1,
+            "sticker": {"part_name": "P", "expected_class": "C", "line": "L"},
+        }
+        tmpl = template_from_dict(payload)
+        self.assertFalse(tmpl.sticker.tilt_gate_enabled)
+
+    # ------------------------------------------------------------------
+    # Gate behaviour: toggle OFF → OUT_OF_ANGLE never raised
+    # ------------------------------------------------------------------
+
+    def test_tilt_gate_off_does_not_reject_out_of_angle(self) -> None:
+        state = self._make_state(tilt_gate_enabled=False, max_tilt_degrees=5.0)
+        result = self._call_validate(
+            state,
+            self._one_passing_detection(),
+            tilt_return_value=self._high_deviation_tilt_info(),
+        )
+        self.assertNotEqual(
+            result.get("reject_reason_code"), "OUT_OF_ANGLE",
+            "Gate is OFF — OUT_OF_ANGLE must not fire even when deviation=30 > threshold=5",
+        )
+        self.assertEqual(result.get("decision"), "ACCEPT")
+
+    def test_tilt_gate_off_accepts_when_no_max_tilt(self) -> None:
+        state = self._make_state(tilt_gate_enabled=False, max_tilt_degrees=None)
+        result = self._call_validate(
+            state,
+            self._one_passing_detection(),
+            tilt_return_value=self._high_deviation_tilt_info(),
+        )
+        self.assertNotEqual(result.get("reject_reason_code"), "OUT_OF_ANGLE")
+
+    # ------------------------------------------------------------------
+    # Gate behaviour: toggle ON → OUT_OF_ANGLE fired when deviation exceeds max
+    # ------------------------------------------------------------------
+
+    def test_tilt_gate_on_rejects_when_deviation_exceeds_max(self) -> None:
+        state = self._make_state(tilt_gate_enabled=True, max_tilt_degrees=5.0)
+        result = self._call_validate(
+            state,
+            self._one_passing_detection(),
+            tilt_return_value=self._high_deviation_tilt_info(),  # deviation=30 > max=5
+        )
+        self.assertEqual(
+            result.get("reject_reason_code"), "OUT_OF_ANGLE",
+            "Gate is ON and deviation=30 > max=5 — must reject OUT_OF_ANGLE",
+        )
+        self.assertEqual(result.get("decision"), "REJECT")
+
+    def test_tilt_gate_on_accepts_when_deviation_within_max(self) -> None:
+        state = self._make_state(tilt_gate_enabled=True, max_tilt_degrees=45.0)
+        low_deviation_tilt = {
+            "status": "ok",
+            "angle_degrees": 3.0,
+            "expected_tilt_degrees": 0.0,
+            "deviation_degrees": 3.0,  # well within max=45
+            "contour_area": 100.0,
+            "threshold_mode": "binary",
+        }
+        result = self._call_validate(
+            state,
+            self._one_passing_detection(),
+            tilt_return_value=low_deviation_tilt,
+        )
+        self.assertNotEqual(result.get("reject_reason_code"), "OUT_OF_ANGLE")
+        self.assertEqual(result.get("decision"), "ACCEPT")
+
+    def test_tilt_gate_on_but_no_max_tilt_does_not_raise(self) -> None:
+        state = self._make_state(tilt_gate_enabled=True, max_tilt_degrees=None)
+        result = self._call_validate(
+            state,
+            self._one_passing_detection(),
+            tilt_return_value=self._high_deviation_tilt_info(),
+        )
+        self.assertNotEqual(result.get("reject_reason_code"), "OUT_OF_ANGLE")
+
+    # ------------------------------------------------------------------
+    # Telemetry: tilt angles always present in payload regardless of toggle
+    # ------------------------------------------------------------------
+
+    def test_tilt_telemetry_present_when_gate_off(self) -> None:
+        state = self._make_state(tilt_gate_enabled=False, max_tilt_degrees=5.0)
+        tilt_info = self._high_deviation_tilt_info()
+        result = self._call_validate(
+            state, self._one_passing_detection(), tilt_return_value=tilt_info
+        )
+        self.assertIsNotNone(result.get("sticker_tilt_angle"), "tilt angle must be in payload")
+        self.assertIsNotNone(result.get("sticker_tilt_deviation"), "deviation must be in payload")
+        self.assertEqual(result["sticker_tilt_angle"], tilt_info["angle_degrees"])
+
+    def test_tilt_telemetry_present_when_gate_on(self) -> None:
+        state = self._make_state(tilt_gate_enabled=True, max_tilt_degrees=5.0)
+        tilt_info = self._high_deviation_tilt_info()
+        result = self._call_validate(
+            state, self._one_passing_detection(), tilt_return_value=tilt_info
+        )
+        self.assertIsNotNone(result.get("sticker_tilt_angle"))
+        self.assertIsNotNone(result.get("sticker_tilt_deviation"))
+
+    def test_tilt_gate_enabled_flag_in_thresholds(self) -> None:
+        """validation_details.thresholds must expose tilt_gate_enabled for observability."""
+        state = self._make_state(tilt_gate_enabled=True, max_tilt_degrees=5.0)
+        result = self._call_validate(
+            state, self._one_passing_detection(), tilt_return_value=self._high_deviation_tilt_info()
+        )
+        details = result.get("validation_details") or {}
+        thresholds = details.get("thresholds") or {}
+        self.assertIn("tilt_gate_enabled", thresholds)
+        self.assertTrue(thresholds["tilt_gate_enabled"])
+
+    # ------------------------------------------------------------------
+    # Regression: other gates are unaffected by the tilt toggle
+    # ------------------------------------------------------------------
+
+    def test_low_roi_conf_still_rejects_when_tilt_gate_off(self) -> None:
+        from shared.contracts.templates import StickerRule
+        state = self._make_state(tilt_gate_enabled=False)
+        state.template.sticker.min_roi_confidence = 0.95  # very high threshold
+        low_conf_detection = [
+            {
+                "label": "sticker",
+                "confidence": 0.1,  # far below 0.95
+                "class_confidence": 0.9,
+                "position": {"x1": 10.0, "y1": 10.0, "x2": 50.0, "y2": 50.0},
+            }
+        ]
+        result = self._call_validate(
+            state, low_conf_detection, tilt_return_value=self._high_deviation_tilt_info()
+        )
+        self.assertEqual(result.get("reject_reason_code"), "LOW_ROI_CONF")
 
 
 if __name__ == "__main__":
