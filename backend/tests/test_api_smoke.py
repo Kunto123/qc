@@ -497,6 +497,40 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertIn("inference_ms", timings)
         self.assertGreaterEqual(float(timings.get("total_ms") or 0.0), 0.0)
 
+    def test_01c_stream_response_mode_skips_overlay(self) -> None:
+        session_response = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "operator-stream",
+                "camera_index": 0,
+                "template_version_id": 1,
+                "line_id": "LINE-A",
+                "station_id": "ST-01",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_response.status_code, 201, session_response.get_json())
+        session_payload = session_response.get_json()
+
+        frame_response = self.client.post(
+            f"/inspection/sessions/{session_payload['session_id']}/frame",
+            json={"image_b64": _sample_image_b64(), "response_mode": "stream"},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(frame_response.status_code, 200, frame_response.get_json())
+        frame_payload = frame_response.get_json()
+        # Stream mode skips overlay — client renders locally from bbox data.
+        self.assertFalse(frame_payload.get("overlay_image_b64"))
+        self.assertIsNone(frame_payload.get("preview_image_b64"))
+        # Detection and validation data must still be present.
+        self.assertIn("detections", frame_payload)
+        self.assertIn("validation", frame_payload)
+        self.assertIn("sticker_roi_meta", frame_payload)
+        timings = frame_payload.get("timings") or {}
+        self.assertIn("total_ms", timings)
+        # overlay_compose_ms should be ~0 (skipped).
+        self.assertLessEqual(float(timings.get("overlay_compose_ms") or 0.0), 5.0)
+
     def test_02_part_ready_color_gate_blocks_commit_until_match(self) -> None:
         calibration_response = self.client.post(
             "/calibration/color-profile",

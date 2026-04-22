@@ -457,24 +457,31 @@ class InspectionSessionService:
             )
         timings["persistence_ms"] = _elapsed_ms(persistence_started)
 
+        normalized_response_mode = str(response_mode or "").strip().lower()
+        # "stream": skip overlay compose and encode entirely — client renders locally.
+        # "compact"/"minimal"/"overlay": encode overlay but skip heavy preview images.
+        # (default) "full": encode everything.
+        stream_response = normalized_response_mode in {"stream"}
+        compact_response = stream_response or normalized_response_mode in {"compact", "minimal", "overlay"}
+
         overlay_started = time.perf_counter()
-        overlay = self._compose_overlay(
-            full_frame=frame,
-            part_ready_roi_meta=part_ready_roi_meta,
-            sticker_roi_meta=sticker_roi_meta,
-            detections=detections,
-            validation=validation,
-            part_ready=part_ready,
-            event_state=event_state,
-            state=state,
-        )
+        overlay_image_b64 = ""
+        if not stream_response:
+            overlay = self._compose_overlay(
+                full_frame=frame,
+                part_ready_roi_meta=part_ready_roi_meta,
+                sticker_roi_meta=sticker_roi_meta,
+                detections=detections,
+                validation=validation,
+                part_ready=part_ready,
+                event_state=event_state,
+                state=state,
+            )
+            overlay_image_b64 = _encode_image(overlay)
+            state.last_overlay_b64 = overlay_image_b64
         timings["overlay_compose_ms"] = _elapsed_ms(overlay_started)
 
-        normalized_response_mode = str(response_mode or "").strip().lower()
-        compact_response = normalized_response_mode in {"compact", "minimal", "overlay"}
-
         encode_started = time.perf_counter()
-        overlay_image_b64 = _encode_image(overlay)
         preview_image_b64 = None
         part_ready_preview_image_b64 = None
         sticker_preview_image_b64 = None
@@ -516,7 +523,6 @@ class InspectionSessionService:
             "part_ready_preview_image_b64": part_ready_preview_image_b64,
             "sticker_preview_image_b64": sticker_preview_image_b64,
         }
-        state.last_overlay_b64 = overlay_image_b64
         state.latest_result = payload
         return payload
 

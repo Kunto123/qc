@@ -7,6 +7,17 @@ from collections.abc import Callable
 
 import cv2
 
+# Rolling window to compute average request_ms for adaptive quality.
+_ADAPTIVE_WINDOW = 6
+# If avg request_ms exceeds this threshold, reduce JPEG quality one step.
+_OVERLOAD_THRESHOLD_MS = 200.0
+# If avg request_ms drops below this threshold, restore quality one step.
+_RECOVER_THRESHOLD_MS = 100.0
+_QUALITY_STEP = 5
+_QUALITY_MIN = 45
+# Width to auto-downscale to when backend is consistently overloaded.
+_ADAPTIVE_RESIZE_WIDTH = 480
+
 
 class FrameUploadService:
     def __init__(self) -> None:
@@ -30,13 +41,19 @@ class FrameUploadService:
         on_error: Callable[[str], None],
         jpeg_quality: int = 75,
         resize_width: int | None = None,
+        adaptive: bool = True,
     ) -> None:
         self.stop()
         self._running = True
         target_interval_s = max(0.05, interval_ms / 1000.0)
-        encode_params = [cv2.IMWRITE_JPEG_QUALITY, max(40, min(100, jpeg_quality))]
+        base_quality = max(40, min(100, jpeg_quality))
+        base_resize = resize_width
 
         def _loop():
+            current_quality = base_quality
+            current_resize = base_resize
+            request_ms_history: list[float] = []
+
             while self._running:
                 loop_started = time.perf_counter()
                 try:
@@ -51,14 +68,24 @@ class FrameUploadService:
                             time.sleep(sleep_s)
                         continue
 
+                    # Adaptive: kick in auto-resize when backend is overloaded.
+                    effective_resize = current_resize
+                    if adaptive and current_resize is None:
+                        if (
+                            len(request_ms_history) >= _ADAPTIVE_WINDOW
+                            and sum(request_ms_history) / len(request_ms_history) > _OVERLOAD_THRESHOLD_MS * 1.5
+                        ):
+                            effective_resize = _ADAPTIVE_RESIZE_WIDTH
+
                     resize_ms = 0.0
-                    if resize_width is not None and frame.shape[1] > resize_width:
-                        scale = resize_width / frame.shape[1]
+                    if effective_resize is not None and frame.shape[1] > effective_resize:
+                        scale = effective_resize / frame.shape[1]
                         new_h = int(frame.shape[0] * scale)
                         t0 = time.perf_counter()
-                        frame = cv2.resize(frame, (resize_width, new_h), interpolation=cv2.INTER_LINEAR)
+                        frame = cv2.resize(frame, (effective_resize, new_h), interpolation=cv2.INTER_LINEAR)
                         resize_ms = (time.perf_counter() - t0) * 1000.0
 
+                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, current_quality]
                     t0 = time.perf_counter()
                     ok, encoded = cv2.imencode(".jpg", frame, encode_params)
                     encode_ms = (time.perf_counter() - t0) * 1000.0
@@ -74,6 +101,17 @@ class FrameUploadService:
                     result = send_frame(image_b64)
                     request_ms = (time.perf_counter() - t0) * 1000.0
 
+                    # Adaptive quality adjustment.
+                    if adaptive:
+                        request_ms_history.append(request_ms)
+                        if len(request_ms_history) > _ADAPTIVE_WINDOW:
+                            del request_ms_history[0]
+                        avg_ms = sum(request_ms_history) / len(request_ms_history)
+                        if avg_ms > _OVERLOAD_THRESHOLD_MS and current_quality > _QUALITY_MIN:
+                            current_quality = max(_QUALITY_MIN, current_quality - _QUALITY_STEP)
+                        elif avg_ms < _RECOVER_THRESHOLD_MS and current_quality < base_quality:
+                            current_quality = min(base_quality, current_quality + _QUALITY_STEP)
+
                     client_timings = {
                         "capture_ms": round(capture_ms, 2),
                         "resize_ms": round(resize_ms, 2),
@@ -82,8 +120,10 @@ class FrameUploadService:
                         "request_ms": round(request_ms, 2),
                         "frame_width": frame.shape[1],
                         "frame_height": frame.shape[0],
-                        "jpeg_quality": jpeg_quality,
+                        "jpeg_quality": current_quality,
                         "payload_bytes": len(encoded),
+                        "adaptive_quality": current_quality if adaptive else None,
+                        "adaptive_resize": effective_resize if adaptive else None,
                     }
                     with self._timings_lock:
                         self._last_client_timings = client_timings

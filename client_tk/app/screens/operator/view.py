@@ -597,6 +597,78 @@ class OperatorScreen(ctk.CTkFrame):
         )
         return annotated
 
+    def _build_local_detection_overlay(self, frame, payload: dict):
+        """Render detection bboxes onto the live camera frame using payload data.
+
+        Replicates the backend overlay composition locally so that the network
+        round-trip cost of JPEG-encoding and transmitting the overlay image is
+        eliminated entirely (stream response mode).
+        """
+        if frame is None:
+            return None
+        overlay = frame.copy()
+        validation = payload.get("validation") or {}
+        part_ready = payload.get("part_ready") or {}
+        sticker_roi = payload.get("sticker_roi_meta") or {}
+        part_ready_roi = payload.get("part_ready_roi_meta") or {}
+        detections = payload.get("detections") or []
+        event_state = payload.get("event_state") or "idle"
+
+        from shared.contracts.enums import DecisionCode
+        decision = validation.get("decision")
+        reject_reason = validation.get("reject_reason_code") or "OK"
+        decision_color = (0, 180, 0) if decision == DecisionCode.ACCEPT.value else (0, 0, 220)
+
+        # Part ready ROI box (blue).
+        if part_ready_roi.get("width") and part_ready_roi.get("height"):
+            px, py = int(part_ready_roi["x"]), int(part_ready_roi["y"])
+            pw, ph = int(part_ready_roi["width"]), int(part_ready_roi["height"])
+            cv2.rectangle(overlay, (px, py), (px + pw, py + ph), (50, 180, 255), 2)
+
+        # Sticker ROI box (yellow).
+        sx = int(sticker_roi.get("x", 0))
+        sy = int(sticker_roi.get("y", 0))
+        sw = int(sticker_roi.get("width", 0))
+        sh = int(sticker_roi.get("height", 0))
+        if sw and sh:
+            cv2.rectangle(overlay, (sx, sy), (sx + sw, sy + sh), (255, 200, 0), 2)
+
+        # Detection bounding boxes (coordinates are relative to sticker ROI).
+        for det in detections:
+            pos = det.get("position") or {}
+            x1 = int(sx + float(pos.get("x1", 0)))
+            y1 = int(sy + float(pos.get("y1", 0)))
+            x2 = int(sx + float(pos.get("x2", 0)))
+            y2 = int(sy + float(pos.get("y2", 0)))
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 255), 2)
+            lbl = str(det.get("label") or "")
+            conf = float(det.get("confidence") or 0.0)
+            cv2.putText(overlay, f"{lbl} {conf:.2f}", (x1, max(20, y1 - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # Expected center crosshair.
+        if sw and sh:
+            template_detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
+            sticker_cfg = (template_detail or {}).get("sticker") or {}
+            cx_ratio = float(sticker_cfg.get("expected_center_x") or 0.5)
+            cy_ratio = float(sticker_cfg.get("expected_center_y") or 0.5)
+            exp_x = int(sx + cx_ratio * sw)
+            exp_y = int(sy + cy_ratio * sh)
+            arm = 18
+            cv2.line(overlay, (exp_x - arm, exp_y), (exp_x + arm, exp_y), (0, 220, 255), 2, cv2.LINE_AA)
+            cv2.line(overlay, (exp_x, exp_y - arm), (exp_x, exp_y + arm), (0, 220, 255), 2, cv2.LINE_AA)
+
+        # Decision and status text.
+        cv2.putText(overlay, f"{decision} / {reject_reason}", (12, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, decision_color, 2, cv2.LINE_AA)
+        pr_val = part_ready.get("part_ready")
+        pr_ratio = part_ready.get("match_ratio", part_ready.get("part_ready_confidence", "-"))
+        cv2.putText(overlay, f"part_ready={pr_val} ratio={pr_ratio}", (12, 48),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(overlay, f"state={event_state}", (12, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+        return overlay
+
     def _update_local_roi_previews(self, frame) -> None:
         if frame is None:
             self.part_ready_preview.reset()
@@ -862,7 +934,9 @@ class OperatorScreen(ctk.CTkFrame):
             send_frame=lambda image_b64: self.api.push_frame(
                 payload["session_id"],
                 image_b64,
-                response_mode="compact",
+                # "stream" skips backend overlay compose+encode (~10-50ms saved per frame).
+                # Client renders detection boxes locally from bbox data in the payload.
+                response_mode="stream",
             ),
             on_result=self._set_result,
             on_error=self._set_error,
@@ -1014,7 +1088,13 @@ class OperatorScreen(ctk.CTkFrame):
                     self.part_ready_preview.update_b64(payload.get("part_ready_preview_image_b64"))
                 if payload.get("overlay_image_b64"):
                     self.main_view.update_b64(payload.get("overlay_image_b64"))
-                    self.display_source.set("Right View: Local ML Overlay")
+                    self.display_source.set("Right View: ML Overlay (backend)")
+                elif display_frame is not None and payload.get("sticker_roi_meta"):
+                    # Stream mode: render detection boxes locally (no backend overlay round-trip).
+                    local_overlay = self._build_local_detection_overlay(display_frame, payload)
+                    if local_overlay is not None:
+                        self.main_view.update_bgr(local_overlay)
+                        self.display_source.set("Right View: ML Overlay (local)")
                 elif display_frame is not None:
                     local_scene = self._build_full_frame_with_roi(display_frame, "sticker", label="Sticker ROI", color=(255, 214, 10))
                     if local_scene is not None:
