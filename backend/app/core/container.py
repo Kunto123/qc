@@ -31,6 +31,8 @@ from backend.app.services.sticker_inference import StickerInferenceService
 from backend.app.services.template_runtime import TemplateRuntimeService
 from backend.app.services.training import TrainingService
 from backend.app.workers.push_worker import PushWorker
+from backend.app.services.plc_adapter import DryRunPlcAdapter, TcpPlcAdapter
+from backend.app.workers.plc_worker import PlcWorker
 
 
 app_config = AppConfig()
@@ -85,12 +87,25 @@ token_store = (
 template_runtime_service = TemplateRuntimeService(templates_repo, deployments_repo)
 sticker_inference_service = StickerInferenceService(app_config, models_repo, device_runtime)
 model_export_service = ModelExportService(models_repo, templates_repo, deployments_repo)
+
+_plc_adapter = (
+    TcpPlcAdapter(app_config.plc_host, app_config.plc_port, timeout_s=app_config.plc_timeout_ms / 1000.0)
+    if app_config.plc_enabled and not app_config.plc_dry_run
+    else DryRunPlcAdapter()
+)
+plc_worker: PlcWorker | None = (
+    PlcWorker(_plc_adapter, hold_ms=app_config.plc_clamp_hold_ms)
+    if app_config.plc_enabled
+    else None
+)
+
 inspection_session_service = InspectionSessionService(
     template_runtime_service,
     profiles_repo,
     inspection_results_repo,
     sticker_inference_service,
     app_config=app_config,
+    plc_worker=plc_worker,
 )
 training_service = TrainingService(training_repo, models_repo, device_runtime, app_config=app_config)
 workstation_registry_repo = WorkstationRegistryRepository()

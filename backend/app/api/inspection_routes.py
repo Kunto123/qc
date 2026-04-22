@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 from flask import Blueprint, Response, g, jsonify, request
 
-from backend.app.core.container import audit_repo, inspection_results_repo, inspection_session_service
+from backend.app.core.container import audit_repo, inspection_results_repo, inspection_session_service, plc_worker
 from backend.app.core.http import require_auth, require_roles
 from shared.contracts.enums import DecisionCode, RejectReasonCode, UserRole
 
@@ -363,3 +363,33 @@ def export_inspections():
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=inspections.csv"},
     )
+
+
+@inspection_blueprint.post("/inspection/plc/release")
+@require_roles(UserRole.ADMIN)
+def plc_manual_release():
+    """Admin manual clamp release — enqueues an immediate release command to the PLC worker.
+
+    Returns 503 when PLC is disabled (QC_SUITE_PLC_ENABLED=0).
+    """
+    if plc_worker is None:
+        return jsonify({"error": "PLC worker is disabled (QC_SUITE_PLC_ENABLED=0)"}), 503
+    reason = str((request.get_json(silent=True) or {}).get("reason") or "manual_admin").strip() or "manual_admin"
+    plc_worker.force_release(reason=reason)
+    _try_audit(
+        "plc_manual_release",
+        actor_id=g.current_user.id,
+        actor_username=g.current_user.username,
+        ip_address=_client_ip(),
+        details=json.dumps({"reason": reason}, ensure_ascii=True),
+    )
+    return jsonify({"ok": True, "queued": "clamp_release", "reason": reason})
+
+
+@inspection_blueprint.get("/inspection/plc/status")
+@require_roles(UserRole.ADMIN)
+def plc_status():
+    """Return the current PLC worker status (running, queue size, last command)."""
+    if plc_worker is None:
+        return jsonify({"enabled": False, "note": "PLC worker is disabled (QC_SUITE_PLC_ENABLED=0)"})
+    return jsonify({"enabled": True, **plc_worker.status()})

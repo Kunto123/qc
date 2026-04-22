@@ -87,6 +87,19 @@ class AppConfig:
     #   inherit QC_SUITE_HOST so the two servers share the same bind address.
     stream_port: int = max(1, int(os.getenv("QC_SUITE_STREAM_PORT", "8101")))
     stream_host: str = os.getenv("QC_SUITE_STREAM_HOST", "").strip()
+    # PLC / Remote-IO clamp control.
+    # QC_SUITE_PLC_ENABLED=1  — activate the PLC worker (default off).
+    # QC_SUITE_PLC_DRY_RUN=1  — log commands only, no real socket (default on so
+    #   accidentally enabling PLC without hardware never opens a TCP connection).
+    # QC_SUITE_PLC_HOST / QC_SUITE_PLC_PORT — TCP gateway address (Modbus/custom).
+    # QC_SUITE_PLC_TIMEOUT_MS — socket connect/send timeout.
+    # QC_SUITE_PLC_CLAMP_HOLD_MS — ms to keep clamp engaged before auto-release.
+    plc_enabled: bool = os.getenv("QC_SUITE_PLC_ENABLED", "0").strip() == "1"
+    plc_dry_run: bool = os.getenv("QC_SUITE_PLC_DRY_RUN", "1").strip() != "0"
+    plc_host: str = os.getenv("QC_SUITE_PLC_HOST", "127.0.0.1").strip()
+    plc_port: int = max(1, int(os.getenv("QC_SUITE_PLC_PORT", "5020")))
+    plc_timeout_ms: int = max(100, int(os.getenv("QC_SUITE_PLC_TIMEOUT_MS", "1000")))
+    plc_clamp_hold_ms: int = max(0, int(os.getenv("QC_SUITE_PLC_CLAMP_HOLD_MS", "2000")))
 
     def _has_sqlserver_credentials(self) -> bool:
         return bool(

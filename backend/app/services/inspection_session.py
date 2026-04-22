@@ -151,6 +151,7 @@ class InspectionSessionService:
         results_repo: InspectionResultsRepository,
         sticker_inference: StickerInferenceService,
         app_config: AppConfig | None = None,
+        plc_worker=None,
     ) -> None:
         self._template_runtime = template_runtime
         self._profiles_repo = profiles_repo
@@ -164,6 +165,7 @@ class InspectionSessionService:
             if app_config is not None
             else 0
         )
+        self._plc_worker = plc_worker
 
     def start_session(
         self,
@@ -455,6 +457,11 @@ class InspectionSessionService:
                 sticker_roi_meta=sticker_roi_meta,
                 committed_at=datetime.now(UTC),
             )
+            if self._plc_worker is not None:
+                self._plc_worker.enqueue_commit(
+                    event_id=event_id,
+                    decision=str(validation.get("decision") or ""),
+                )
         timings["persistence_ms"] = _elapsed_ms(persistence_started)
 
         normalized_response_mode = str(response_mode or "").strip().lower()

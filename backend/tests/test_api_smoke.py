@@ -2903,3 +2903,141 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(after["source"], original["source"])
         self.assertEqual(after.get("provenance"), original.get("provenance"))
 
+    # ------------------------------------------------------------------
+    # Test group 15 — PLC worker integration
+    # ------------------------------------------------------------------
+
+    def test_15a_plc_status_disabled_by_default(self) -> None:
+        """GET /inspection/plc/status returns enabled=False when PLC is off."""
+        resp = self.client.get("/inspection/plc/status", headers=_headers(self.admin_token))
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        body = resp.get_json()
+        self.assertFalse(body.get("enabled"), "PLC must be disabled by default (QC_SUITE_PLC_ENABLED=0)")
+
+    def test_15b_plc_status_requires_admin(self) -> None:
+        """GET /inspection/plc/status is admin-only."""
+        resp = self.client.get("/inspection/plc/status", headers=_headers(self.operator_token))
+        self.assertEqual(resp.status_code, 403, resp.get_json())
+
+    def test_15c_plc_manual_release_disabled_returns_503(self) -> None:
+        """POST /inspection/plc/release returns 503 when PLC worker is disabled."""
+        resp = self.client.post(
+            "/inspection/plc/release",
+            json={"reason": "test"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(resp.status_code, 503, resp.get_json())
+
+    def test_15d_plc_manual_release_requires_admin(self) -> None:
+        """POST /inspection/plc/release is admin-only."""
+        resp = self.client.post(
+            "/inspection/plc/release",
+            json={},
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(resp.status_code, 403, resp.get_json())
+
+    def test_15e_plc_worker_enqueue_once_per_commit(self) -> None:
+        """A committed inspection must enqueue exactly one PLC command.
+
+        Uses a dry-run PlcWorker injected directly into inspection_session_service.
+        Sends two frames after commit — the queue must not grow beyond 1 because
+        InspectionSessionService gates count_committed on current_event_committed.
+        """
+        import queue as _queue_mod
+        from backend.app.services.plc_adapter import DryRunPlcAdapter
+        from backend.app.workers.plc_worker import PlcWorker
+        from backend.app.core.container import inspection_session_service
+
+        captured: list[dict] = []
+
+        class _CapturingAdapter(DryRunPlcAdapter):
+            def send_clamp_hold(self, *, event_id=None, decision=None):
+                captured.append({"cmd": "hold", "event_id": event_id, "decision": decision})
+
+            def send_clamp_release(self, *, event_id=None, reason=None):
+                captured.append({"cmd": "release", "event_id": event_id, "reason": reason})
+
+        worker = PlcWorker(_CapturingAdapter(), hold_ms=0)
+        original_worker = inspection_session_service._plc_worker
+        inspection_session_service._plc_worker = worker
+        worker.start()
+
+        try:
+            tpl_resp = self.client.post(
+                "/templates",
+                json={
+                    "name": "PLC Enqueue Regression",
+                    "description": "",
+                    "is_active": True,
+                    "camera": {"camera_index": 0, "width": 640, "height": 480, "fps": 15},
+                    "part_ready_roi": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+                    "sticker_roi": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+                    "vision": {"model_path": "models/dummy.pt", "classes": ["K0W-HB0"]},
+                    "part_ready": {"enabled": False},
+                    "sticker": {
+                        "part_name": "PLC Part",
+                        "expected_class": "K0W-HB0",
+                        "line": "LINE-PLC",
+                        "enabled": True,
+                        "validator_mode": "ml_detection",
+                        "min_roi_confidence": 0.0,
+                        "part_ready_settle_ms": 0,
+                    },
+                    "persistence": {"write_to_db": False},
+                    "metadata": {},
+                },
+                headers=_headers(self.engineer_token),
+            )
+            self.assertEqual(tpl_resp.status_code, 201, tpl_resp.get_json())
+            version_id = tpl_resp.get_json()["version_id"]
+
+            sess_resp = self.client.post(
+                "/inspection/sessions/start",
+                json={"client_id": "plc-test", "camera_index": 0, "template_version_id": version_id},
+                headers=_headers(self.operator_token),
+            )
+            self.assertEqual(sess_resp.status_code, 201)
+            sid = sess_resp.get_json()["session_id"]
+
+            # Frame 1 — should commit (settle_ms=0)
+            f1 = self.client.post(
+                f"/inspection/sessions/{sid}/frame",
+                json={"image_b64": _sample_image_b64()},
+                headers=_headers(self.operator_token),
+            )
+            self.assertEqual(f1.status_code, 200)
+            self.assertTrue(f1.get_json()["count_committed"], "frame 1 must commit")
+
+            # Frame 2 — must NOT commit again (event already committed)
+            f2 = self.client.post(
+                f"/inspection/sessions/{sid}/frame",
+                json={"image_b64": _sample_image_b64()},
+                headers=_headers(self.operator_token),
+            )
+            self.assertEqual(f2.status_code, 200)
+            self.assertFalse(f2.get_json()["count_committed"], "frame 2 must not re-commit same event")
+
+            # Drain worker queue
+            import time
+            time.sleep(0.15)
+
+            # Exactly one hold + one release (hold_ms=0 → immediate release)
+            hold_cmds = [c for c in captured if c["cmd"] == "hold"]
+            self.assertEqual(len(hold_cmds), 1, f"expected 1 clamp_hold, got {len(hold_cmds)}: {captured}")
+        finally:
+            worker.stop()
+            inspection_session_service._plc_worker = original_worker
+
+    def test_15f_plc_worker_dry_run_adapter_logs_only(self) -> None:
+        """DryRunPlcAdapter.send_clamp_hold/release must not raise and return None."""
+        from backend.app.services.plc_adapter import DryRunPlcAdapter
+        adapter = DryRunPlcAdapter()
+        adapter.connect()
+        adapter.send_clamp_hold(event_id="evt-1", decision="ACCEPT")
+        adapter.send_clamp_release(event_id="evt-1", reason="auto")
+        adapter.disconnect()
+        st = adapter.status()
+        self.assertEqual(st["adapter"], "DryRunPlcAdapter")
+        self.assertTrue(st.get("connected"))
+

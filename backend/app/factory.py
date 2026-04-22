@@ -37,7 +37,7 @@ def create_app() -> Flask:
 
     @app.get("/health/detailed")
     def health_detailed():
-        from backend.app.core.container import app_config, inspection_results_repo, push_worker, token_store
+        from backend.app.core.container import app_config, inspection_results_repo, plc_worker, push_worker, token_store
         checks: dict[str, dict] = {}
 
         backend_name = app_config.database_backend
@@ -72,6 +72,13 @@ def create_app() -> Flask:
         except Exception as exc:  # noqa: BLE001
             checks["push_queue"] = {"error": str(exc)}
 
+        # PLC worker
+        if plc_worker is not None:
+            plc_status = plc_worker.status()
+            checks["plc_worker"] = {"ok": plc_status.get("running", False), **plc_status}
+        else:
+            checks["plc_worker"] = {"ok": True, "note": "disabled"}
+
         all_ok = all(v.get("ok", True) for v in checks.values() if isinstance(v, dict) and "ok" in v)
         return jsonify({
             "status": "ok" if all_ok else "degraded",
@@ -99,6 +106,14 @@ def _register_worker_lifecycle(app: Flask) -> None:
             logger.info("[factory] push worker started")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[factory] push worker failed to start: %s", exc)
+
+        try:
+            from backend.app.core.container import plc_worker
+            if plc_worker is not None:
+                plc_worker.start()
+                logger.info("[factory] plc worker started")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[factory] plc worker failed to start: %s", exc)
 
         try:
             from backend.app.streaming.server import start as start_stream_server
