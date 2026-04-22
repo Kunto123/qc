@@ -29,33 +29,6 @@ class ResultPanel(ctk.CTkFrame):
         self.columnconfigure(0, weight=1)
         self._value_widgets: list[ctk.CTkLabel] = []
 
-        ctk.CTkLabel(self, text="Inspection Status", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).pack(
-            anchor="w",
-            padx=12,
-            pady=(12, 8),
-        )
-
-        self.decision_banner = ctk.CTkLabel(
-            self,
-            text="WAITING",
-            fg_color="#334155",
-            text_color="#f8fafc",
-            font=("Segoe UI", 24, "bold"),
-            corner_radius=14,
-            anchor="center",
-        )
-        self.decision_banner.pack(fill="x", padx=12, pady=(0, 10))
-
-        self.subtitle_var = ctk.CTkLabel(
-            self,
-            text="Menunggu event inspeksi pertama.",
-            font=("Segoe UI", 10),
-            wraplength=320,
-            justify="left",
-            text_color=TEXT_SECONDARY,
-        )
-        self.subtitle_var.pack(anchor="w", padx=12, pady=(0, 10))
-
         self.live_frame = self._build_section("Live Stage")
         self.live_state_var = self._build_field(self.live_frame, 0, "Event State")
         self.live_decision_var = self._build_field(self.live_frame, 1, "Live Decision")
@@ -153,23 +126,7 @@ class ResultPanel(ctk.CTkFrame):
         display_sticker_detection = committed_sticker_detection or live_sticker_detection
         timings = payload.get("timings") or {}
 
-        decision = display_validation.get("decision") or "WAITING"
-        reason = display_validation.get("reject_reason_code") or ("OK" if decision == "ACCEPT" else "-")
-        palette = {
-            "ACCEPT": ("#166534", "#f0fdf4"),
-            "REJECT": ("#991b1b", "#fef2f2"),
-            "WAITING": ("#334155", "#f8fafc"),
-        }
-        bg, fg = palette.get(decision, ("#334155", "#f8fafc"))
-        self.decision_banner.configure(fg_color=bg, text_color=fg, text=decision)
-        if committed_validation:
-            self.subtitle_var.configure(
-                text="Banner menampilkan hasil committed terakhir. Detail live tetap menunjukkan frame yang sedang diproses."
-            )
-        else:
-            self.subtitle_var.configure(
-                text="Belum ada event committed. Banner sementara mengikuti hasil live terbaru."
-            )
+        reason = display_validation.get("reject_reason_code") or ("OK" if display_validation.get("decision") == "ACCEPT" else "-")
 
         live_reason = live_validation.get("reject_reason_code") or ("OK" if live_validation.get("decision") == "ACCEPT" else "-")
         self.live_state_var.configure(text=str(payload.get("event_state") or "-").upper())
@@ -260,8 +217,6 @@ class ResultPanel(ctk.CTkFrame):
         self.commit_var.configure(text=_format_timestamp(committed.get("committed_at")))
 
     def reset(self) -> None:
-        self.decision_banner.configure(fg_color="#334155", text_color="#f8fafc", text="WAITING")
-        self.subtitle_var.configure(text="Menunggu event inspeksi pertama.")
         for widget in (
             self.live_state_var,
             self.live_decision_var,

@@ -10,14 +10,14 @@ import customtkinter as ctk
 import cv2
 
 from client_tk.app.components.async_bridge import run_async
-from client_tk.app.components.counter_panel import CounterPanel
+from client_tk.app.components.counter_panel import BREAKDOWN_ORDER, CounterPanel
 from client_tk.app.components.live_view import LiveView
 from client_tk.app.components.result_panel import ResultPanel
 from client_tk.app.components.scrollable_frame import ScrollableFrame
 from client_tk.app.config import DEFAULT_UPLOAD_INTERVAL_MS
 from client_tk.app.services.camera_capture import CameraCaptureService
 from client_tk.app.services.frame_upload import FrameUploadService
-from client_tk.app.theme import APP_BG, BORDER, PANEL_BG, SHELL_BG, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, ACCENT_HOVER, TEXT_ON_ACCENT
+from client_tk.app.theme import APP_BG, BORDER, PANEL_ALT_BG, PANEL_BG, SHELL_BG, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, ACCENT_HOVER, TEXT_ON_ACCENT
 
 
 BADGE_COLORS = {
@@ -183,11 +183,37 @@ class OperatorScreen(ctk.CTkFrame):
         self.sidebar_container.grid_propagate(False)
         self.sidebar_container.columnconfigure(0, weight=1)
         self.sidebar_container.rowconfigure(0, weight=0)  # counter: fixed
-        self.sidebar_container.rowconfigure(1, weight=1)  # scroll: fills rest
+        self.sidebar_container.rowconfigure(1, weight=0)  # decision banner: fixed
+        self.sidebar_container.rowconfigure(2, weight=1)  # scroll: fills rest
 
         # Fixed counter strip — always visible, outside scroll area
         self.counter_panel = CounterPanel(self.sidebar_container)
         self.counter_panel.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+
+        # Decision status banner — fixed below counter, outside scroll area
+        self.decision_status_frame = ctk.CTkFrame(
+            self.sidebar_container, fg_color=PANEL_BG, corner_radius=16, border_width=1, border_color=BORDER
+        )
+        self.decision_status_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self.decision_banner = ctk.CTkLabel(
+            self.decision_status_frame,
+            text="WAITING",
+            fg_color="#334155",
+            text_color="#f8fafc",
+            font=("Segoe UI", 24, "bold"),
+            corner_radius=14,
+            anchor="center",
+        )
+        self.decision_banner.pack(fill="x", padx=12, pady=(12, 6))
+        self.decision_subtitle = ctk.CTkLabel(
+            self.decision_status_frame,
+            text="Menunggu event inspeksi pertama.",
+            font=("Segoe UI", 10),
+            wraplength=320,
+            justify="left",
+            text_color=TEXT_SECONDARY,
+        )
+        self.decision_subtitle.pack(anchor="w", padx=12, pady=(0, 10))
 
         self.sidebar_canvas = tk.Canvas(
             self.sidebar_container,
@@ -196,8 +222,8 @@ class OperatorScreen(ctk.CTkFrame):
         )
         self.sidebar_scrollbar = ttk.Scrollbar(self.sidebar_container, orient="vertical", command=self.sidebar_canvas.yview)
         self.sidebar_canvas.configure(yscrollcommand=self.sidebar_scrollbar.set)
-        self.sidebar_canvas.grid(row=1, column=0, sticky="nsew")
-        self.sidebar_scrollbar.grid(row=1, column=1, sticky="ns")
+        self.sidebar_canvas.grid(row=2, column=0, sticky="nsew")
+        self.sidebar_scrollbar.grid(row=2, column=1, sticky="ns")
 
         self.sidebar_inner = ttk.Frame(self.sidebar_canvas)
         self.sidebar_window = self.sidebar_canvas.create_window((0, 0), window=self.sidebar_inner, anchor="nw")
@@ -207,12 +233,32 @@ class OperatorScreen(ctk.CTkFrame):
         self.sidebar_canvas.bind("<Configure>", self._resize_sidebar_inner)
         self.sidebar_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
+        # Reject breakdown — at top of scrollable area
+        breakdown_frame = ctk.CTkFrame(
+            self.sidebar_inner, fg_color=PANEL_BG, corner_radius=16, border_width=1, border_color=BORDER
+        )
+        breakdown_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ctk.CTkLabel(breakdown_frame, text="Reject Breakdown", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).pack(
+            anchor="w", padx=12, pady=(12, 6)
+        )
+        breakdown_body = ctk.CTkFrame(breakdown_frame, fg_color=PANEL_ALT_BG, corner_radius=12, border_width=1, border_color=BORDER)
+        breakdown_body.pack(fill="x", padx=12, pady=(0, 12))
+        breakdown_body.grid_columnconfigure(1, weight=1)
+        self.breakdown_labels: dict[str, ctk.CTkLabel] = {}
+        for _idx, _key in enumerate(BREAKDOWN_ORDER):
+            ctk.CTkLabel(breakdown_body, text=f"{_key}:", text_color=TEXT_PRIMARY).grid(
+                row=_idx, column=0, sticky="w", padx=10, pady=3
+            )
+            _lbl = ctk.CTkLabel(breakdown_body, text="0", text_color=TEXT_SECONDARY)
+            _lbl.grid(row=_idx, column=1, sticky="e", padx=10, pady=3)
+            self.breakdown_labels[_key] = _lbl
+
         self.result_panel = ResultPanel(self.sidebar_inner)
-        self.result_panel.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self.result_panel.grid(row=1, column=0, sticky="ew", pady=(0, 8))
 
         events = ttk.LabelFrame(self.sidebar_inner, text="Recent Events", padding=8)
-        events.grid(row=1, column=0, sticky="nsew")
-        self.sidebar_inner.rowconfigure(1, weight=1)
+        events.grid(row=2, column=0, sticky="nsew")
+        self.sidebar_inner.rowconfigure(2, weight=1)
         self.recent_list = tk.Listbox(events, height=12)
         self.recent_list.pack(fill="both", expand=True)
 
@@ -614,6 +660,16 @@ class OperatorScreen(ctk.CTkFrame):
         detections = payload.get("detections") or []
         event_state = payload.get("event_state") or "idle"
 
+        # Backend computes roi_meta pixel coords from the (possibly downscaled) frame
+        # that was uploaded. The display overlay is drawn on the full-resolution live
+        # camera frame. Scale all backend pixel coordinates accordingly.
+        client_timings = payload.get("client_timings") or {}
+        sent_w = client_timings.get("frame_width")
+        sent_h = client_timings.get("frame_height")
+        disp_h, disp_w = frame.shape[:2]
+        scale_x = disp_w / sent_w if sent_w else 1.0
+        scale_y = disp_h / sent_h if sent_h else 1.0
+
         from shared.contracts.enums import DecisionCode
         decision = validation.get("decision")
         reject_reason = validation.get("reject_reason_code") or "OK"
@@ -621,25 +677,27 @@ class OperatorScreen(ctk.CTkFrame):
 
         # Part ready ROI box (blue).
         if part_ready_roi.get("width") and part_ready_roi.get("height"):
-            px, py = int(part_ready_roi["x"]), int(part_ready_roi["y"])
-            pw, ph = int(part_ready_roi["width"]), int(part_ready_roi["height"])
+            px = int(part_ready_roi["x"] * scale_x)
+            py = int(part_ready_roi["y"] * scale_y)
+            pw = int(part_ready_roi["width"] * scale_x)
+            ph = int(part_ready_roi["height"] * scale_y)
             cv2.rectangle(overlay, (px, py), (px + pw, py + ph), (50, 180, 255), 2)
 
         # Sticker ROI box (yellow).
-        sx = int(sticker_roi.get("x", 0))
-        sy = int(sticker_roi.get("y", 0))
-        sw = int(sticker_roi.get("width", 0))
-        sh = int(sticker_roi.get("height", 0))
+        sx = int(sticker_roi.get("x", 0) * scale_x)
+        sy = int(sticker_roi.get("y", 0) * scale_y)
+        sw = int(sticker_roi.get("width", 0) * scale_x)
+        sh = int(sticker_roi.get("height", 0) * scale_y)
         if sw and sh:
             cv2.rectangle(overlay, (sx, sy), (sx + sw, sy + sh), (255, 200, 0), 2)
 
-        # Detection bounding boxes (coordinates are relative to sticker ROI).
+        # Detection bounding boxes (coordinates are relative to sticker ROI, in backend frame space).
         for det in detections:
             pos = det.get("position") or {}
-            x1 = int(sx + float(pos.get("x1", 0)))
-            y1 = int(sy + float(pos.get("y1", 0)))
-            x2 = int(sx + float(pos.get("x2", 0)))
-            y2 = int(sy + float(pos.get("y2", 0)))
+            x1 = int(sx + float(pos.get("x1", 0)) * scale_x)
+            y1 = int(sy + float(pos.get("y1", 0)) * scale_y)
+            x2 = int(sx + float(pos.get("x2", 0)) * scale_x)
+            y2 = int(sy + float(pos.get("y2", 0)) * scale_y)
             cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 255), 2)
             lbl = str(det.get("label") or "")
             conf = float(det.get("confidence") or 0.0)
@@ -919,6 +977,10 @@ class OperatorScreen(ctk.CTkFrame):
             self._latest_error = None
         self.result_panel.reset()
         self.counter_panel.reset()
+        self.decision_banner.configure(fg_color="#334155", text_color="#f8fafc", text="WAITING")
+        self.decision_subtitle.configure(text="Menunggu event inspeksi pertama.")
+        for _lbl in self.breakdown_labels.values():
+            _lbl.configure(text="0")
         self.recent_list.delete(0, "end")
         # Restore raw preview immediately so camera stays visible during first backend round-trip.
         _current_frame = self.capture.get_latest_frame()
@@ -1060,6 +1122,26 @@ class OperatorScreen(ctk.CTkFrame):
                 self.state.cache["last_committed_result"] = payload.get("last_committed_result")
                 self.result_panel.update_payload(payload)
                 self.counter_panel.update_payload(payload)
+                # Update decision banner (fixed area below counter)
+                _live_val = payload.get("validation") or {}
+                _committed = payload.get("last_committed_result") or {}
+                _committed_val = _committed.get("validation") or {}
+                _disp_val = _committed_val or _live_val
+                _decision = _disp_val.get("decision") or "WAITING"
+                _d_palette = {"ACCEPT": ("#166534", "#f0fdf4"), "REJECT": ("#991b1b", "#fef2f2"), "WAITING": ("#334155", "#f8fafc")}
+                _d_bg, _d_fg = _d_palette.get(_decision, ("#334155", "#f8fafc"))
+                self.decision_banner.configure(fg_color=_d_bg, text_color=_d_fg, text=_decision)
+                self.decision_subtitle.configure(
+                    text=(
+                        "Banner menampilkan hasil committed terakhir."
+                        if _committed_val
+                        else "Belum ada event committed. Banner mengikuti hasil live terbaru."
+                    )
+                )
+                # Update reject breakdown (scrollable area)
+                _breakdown = (payload.get("counters") or {}).get("session_reject_breakdown") or {}
+                for _key, _lbl in self.breakdown_labels.items():
+                    _lbl.configure(text=str(_breakdown.get(_key, 0)))
                 self._sync_recent_events(payload)
                 self._refresh_context_summary()
                 self._update_status_badges(payload)
