@@ -483,6 +483,16 @@ class ApiClient:
     # Workstation heartbeat
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # PLC / Remote-IO control
+    # ------------------------------------------------------------------
+
+    def plc_status(self) -> dict:
+        return self._get("/inspection/plc/status")
+
+    def plc_manual_release(self, reason: str = "manual_admin") -> dict:
+        return self._post("/inspection/plc/release", {"reason": reason})
+
     def heartbeat(self, machine_id: str, *, client_version: str | None = None,
                   line_id: str | None = None, station_id: str | None = None) -> dict:
         payload: dict = {"machine_id": machine_id}

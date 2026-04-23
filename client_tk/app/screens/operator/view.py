@@ -46,6 +46,7 @@ class OperatorScreen(ctk.CTkFrame):
         self._closed = False
         self._machine_id = f"{platform.node() or 'workstation'}-{uuid.getnode():012x}"
         self._settings_window: tk.Toplevel | None = None
+        self._plc_release_window: tk.Toplevel | None = None
         self._template_lookup: dict[str, dict] = {}
         self._template_detail_lookup: dict[int, dict] = {}
         self._template_version_detail_lookup: dict[int, dict] = {}
@@ -137,7 +138,7 @@ class OperatorScreen(ctk.CTkFrame):
         self.status_badges_container = ctk.CTkFrame(self.status_frame, fg_color="transparent")
         self.status_badges_container.pack(fill="x", padx=10, pady=(0, 10))
         self.badges: dict[str, ctk.CTkLabel] = {}
-        for key in ("SERVER", "CAMERA", "SESSION", "DB", "EVENT"):
+        for key in ("SERVER", "CAMERA", "SESSION", "DB", "EVENT", "PLC"):
             label = ctk.CTkLabel(
                 self.status_badges_container,
                 text=f"{key}: -",
@@ -213,7 +214,29 @@ class OperatorScreen(ctk.CTkFrame):
             justify="left",
             text_color=TEXT_SECONDARY,
         )
-        self.decision_subtitle.pack(anchor="w", padx=12, pady=(0, 10))
+        self.decision_subtitle.pack(anchor="w", padx=12, pady=(0, 6))
+
+        self.plc_release_btn = ctk.CTkButton(
+            self.decision_status_frame,
+            text="Release Clamp",
+            command=self._open_plc_release_dialog,
+            fg_color="#7f1d1d",
+            hover_color="#991b1b",
+            text_color="#fef2f2",
+            font=("Segoe UI", 11, "bold"),
+            corner_radius=10,
+            height=34,
+        )
+        self.plc_release_btn.pack(fill="x", padx=12, pady=(0, 4))
+        self.plc_status_label = ctk.CTkLabel(
+            self.decision_status_frame,
+            text="",
+            font=("Segoe UI", 9),
+            text_color=TEXT_SECONDARY,
+            wraplength=320,
+            justify="left",
+        )
+        self.plc_status_label.pack(anchor="w", padx=12, pady=(0, 10))
 
         self.sidebar_canvas = tk.Canvas(
             self.sidebar_container,
@@ -388,8 +411,8 @@ class OperatorScreen(ctk.CTkFrame):
         for widget in self.status_badges_container.grid_slaves():
             widget.grid_forget()
 
-        keys = ["SERVER", "CAMERA", "SESSION", "DB", "EVENT"]
-        columns = 3 if compact else 5
+        keys = ["SERVER", "CAMERA", "SESSION", "DB", "EVENT", "PLC"]
+        columns = 3 if compact else 6
         rows = 2 if compact else 1
         for column in range(columns):
             self.status_badges_container.columnconfigure(column, weight=1)
@@ -828,6 +851,144 @@ class OperatorScreen(ctk.CTkFrame):
         bg, fg = BADGE_COLORS.get(tone, BADGE_COLORS["neutral"])
         self.badges[key].configure(text=f"{key}: {value}", fg_color=bg, text_color=fg)
 
+    def _open_plc_release_dialog(self) -> None:
+        if self._plc_release_window and self._plc_release_window.winfo_exists():
+            self._plc_release_window.lift()
+            self._plc_release_window.focus_force()
+            return
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Admin Authorization — Release Clamp")
+        dialog.geometry("400x290")
+        dialog.resizable(False, False)
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+        self._plc_release_window = dialog
+        dialog.protocol("WM_DELETE_WINDOW", lambda: self._close_plc_dialog(dialog))
+
+        shell = ttk.Frame(dialog, padding=16)
+        shell.pack(fill="both", expand=True)
+        shell.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            shell,
+            text="Tindakan ini mengirim sinyal release clamp ke PLC.\nHanya admin yang dapat melakukan ini.",
+            foreground="#991b1b",
+            wraplength=340,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+
+        ttk.Label(shell, text="Username Admin:").grid(row=1, column=0, sticky="w", pady=4, padx=(0, 8))
+        username_var = tk.StringVar()
+        ttk.Entry(shell, textvariable=username_var, width=28).grid(row=1, column=1, sticky="ew", pady=4)
+
+        ttk.Label(shell, text="Password Admin:").grid(row=2, column=0, sticky="w", pady=4, padx=(0, 8))
+        password_var = tk.StringVar()
+        ttk.Entry(shell, textvariable=password_var, show="*", width=28).grid(row=2, column=1, sticky="ew", pady=4)
+
+        ttk.Label(shell, text="Alasan:").grid(row=3, column=0, sticky="w", pady=4, padx=(0, 8))
+        reason_var = tk.StringVar(value="manual_admin")
+        ttk.Entry(shell, textvariable=reason_var, width=28).grid(row=3, column=1, sticky="ew", pady=4)
+
+        status_var = tk.StringVar(value="")
+        status_lbl = ttk.Label(shell, textvariable=status_var, foreground="#1d4ed8", wraplength=340, justify="left")
+        status_lbl.grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 4))
+
+        btn_frame = ttk.Frame(shell)
+        btn_frame.grid(row=5, column=0, columnspan=2, sticky="e", pady=(8, 0))
+
+        cancel_btn = ttk.Button(btn_frame, text="Batal", command=lambda: self._close_plc_dialog(dialog))
+        cancel_btn.pack(side="left", padx=(0, 8))
+
+        confirm_btn = ctk.CTkButton(
+            btn_frame,
+            text="Release Clamp ▶",
+            fg_color="#991b1b",
+            hover_color="#7f1d1d",
+            text_color="#fef2f2",
+            font=("Segoe UI", 11, "bold"),
+            command=lambda: self._execute_plc_release(
+                username_var.get().strip(),
+                password_var.get(),
+                reason_var.get().strip() or "manual_admin",
+                status_var,
+                status_lbl,
+                confirm_btn,
+                cancel_btn,
+                dialog,
+            ),
+        )
+        confirm_btn.pack(side="left")
+
+    def _close_plc_dialog(self, dialog: tk.Toplevel) -> None:
+        if dialog.winfo_exists():
+            dialog.destroy()
+        self._plc_release_window = None
+
+    def _execute_plc_release(
+        self,
+        username: str,
+        password: str,
+        reason: str,
+        status_var: tk.StringVar,
+        status_lbl,
+        confirm_btn,
+        cancel_btn,
+        dialog: tk.Toplevel,
+    ) -> None:
+        if not username or not password:
+            status_var.set("Username dan password tidak boleh kosong.")
+            status_lbl.configure(foreground="#991b1b")
+            return
+
+        status_var.set("Mengautentikasi admin...")
+        status_lbl.configure(foreground="#1d4ed8")
+        confirm_btn.configure(state="disabled")
+        cancel_btn.configure(state="disabled")
+
+        def _work():
+            from client_tk.app.api_client import ApiClient
+            temp = ApiClient(self.api.base_url)
+            login_result = temp.login(username, password)
+            token = login_result.get("token")
+            if not token:
+                raise RuntimeError("Login berhasil tapi token tidak ditemukan.")
+            user_info = login_result.get("user") or {}
+            role = str(user_info.get("role") or "").strip().lower()
+            if role != "admin":
+                raise RuntimeError(f"Akun '{username}' bukan admin (role={role or '-'}).")
+            temp.set_token(token)
+            return temp.plc_manual_release(reason)
+
+        def _on_done(result, error):
+            confirm_btn.configure(state="normal")
+            cancel_btn.configure(state="normal")
+            if error:
+                msg = str(error)
+                if "503" in msg or "disabled" in msg.lower():
+                    status_var.set("PLC dinonaktifkan di backend (QC_SUITE_PLC_ENABLED=0).")
+                    self._set_badge("PLC", "DISABLED", "neutral")
+                    self.plc_status_label.configure(text="PLC dinonaktifkan di backend.")
+                elif "403" in msg or "forbidden" in msg.lower():
+                    status_var.set("Akses ditolak. Pastikan akun yang dimasukkan adalah admin.")
+                    self._set_badge("PLC", "DENIED", "danger")
+                elif "401" in msg or "invalid" in msg.lower() or "credentials" in msg.lower():
+                    status_var.set("Login gagal: username atau password salah.")
+                    self._set_badge("PLC", "AUTH ERR", "danger")
+                else:
+                    status_var.set(f"Error: {msg}")
+                    self._set_badge("PLC", "ERROR", "danger")
+                    self.plc_status_label.configure(text=f"PLC error: {msg[:60]}")
+                status_lbl.configure(foreground="#991b1b")
+            else:
+                status_var.set("Clamp berhasil dirilis.")
+                status_lbl.configure(foreground="#166534")
+                self._set_badge("PLC", "RELEASED", "success")
+                self.plc_status_label.configure(text=f"Clamp dirilis oleh admin '{username}'.")
+                dialog.after(1500, lambda: self._close_plc_dialog(dialog))
+
+        run_async(dialog, _work, callback=_on_done)
+
     def _refresh_context_summary(self) -> None:
         username = self.state.user.get("username") if self.state.user else "-"
         self.operator_context.set(f"Operator: {username}")
@@ -870,6 +1031,12 @@ class OperatorScreen(ctk.CTkFrame):
         event_state = str((payload or {}).get("event_state") or "idle").upper()
         event_tone = "success" if event_state == "DECISION_COMMITTED" else "info" if event_state not in {"IDLE", "COOLDOWN"} else "neutral"
         self._set_badge("EVENT", event_state, event_tone)
+        # PLC badge: initialise to "-" only if it has never been set (text still shows key: -).
+        # Subsequent updates come exclusively from _execute_plc_release so the
+        # last-known state persists across frame-poll cycles.
+        current_plc_text = self.badges["PLC"].cget("text")
+        if not current_plc_text or current_plc_text == "PLC: -":
+            self._set_badge("PLC", "-", "neutral")
 
     def _sync_recent_events(self, payload: dict) -> None:
         items = payload.get("recent_events") or []
@@ -979,6 +1146,7 @@ class OperatorScreen(ctk.CTkFrame):
         self.counter_panel.reset()
         self.decision_banner.configure(fg_color="#334155", text_color="#f8fafc", text="WAITING")
         self.decision_subtitle.configure(text="Menunggu event inspeksi pertama.")
+        self.plc_status_label.configure(text="")
         for _lbl in self.breakdown_labels.values():
             _lbl.configure(text="0")
         self.recent_list.delete(0, "end")
@@ -1259,6 +1427,8 @@ class OperatorScreen(ctk.CTkFrame):
         if hasattr(self, "sidebar_canvas"):
             self.sidebar_canvas.unbind_all("<MouseWheel>")
         self._close_settings()
+        if self._plc_release_window and self._plc_release_window.winfo_exists():
+            self._plc_release_window.destroy()
         self._stop_session()
         self.capture.stop()
 
