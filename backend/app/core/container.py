@@ -31,7 +31,7 @@ from backend.app.services.sticker_inference import StickerInferenceService
 from backend.app.services.template_runtime import TemplateRuntimeService
 from backend.app.services.training import TrainingService
 from backend.app.workers.push_worker import PushWorker
-from backend.app.services.plc_adapter import DryRunPlcAdapter, TcpPlcAdapter
+from backend.app.services.plc_adapter import DryRunPlcAdapter, ModbusTcpPlcAdapter
 from backend.app.workers.plc_worker import PlcWorker
 
 
@@ -89,7 +89,23 @@ sticker_inference_service = StickerInferenceService(app_config, models_repo, dev
 model_export_service = ModelExportService(models_repo, templates_repo, deployments_repo)
 
 _plc_adapter = (
-    TcpPlcAdapter(app_config.plc_host, app_config.plc_port, timeout_s=app_config.plc_timeout_ms / 1000.0)
+    ModbusTcpPlcAdapter(
+        app_config.plc_host,
+        app_config.plc_port,
+        timeout_s=app_config.plc_timeout_ms / 1000.0,
+        unit_id=app_config.plc_modbus_unit_id,
+        command_mode=app_config.plc_modbus_command_mode,
+        hold_address=app_config.plc_modbus_hold_address,
+        release_address=app_config.plc_modbus_release_address,
+        hold_value=app_config.plc_modbus_hold_value,
+        release_value=app_config.plc_modbus_release_value,
+        zero_based_addressing=app_config.plc_modbus_zero_based_addressing,
+        readback_enabled=app_config.plc_modbus_readback_enabled,
+        readback_mode=app_config.plc_modbus_readback_mode,
+        readback_address=app_config.plc_modbus_readback_address,
+        readback_expected_hold_value=app_config.plc_modbus_readback_expected_hold_value,
+        readback_expected_release_value=app_config.plc_modbus_readback_expected_release_value,
+    )
     if app_config.plc_enabled and not app_config.plc_dry_run
     else DryRunPlcAdapter()
 )

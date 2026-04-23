@@ -129,6 +129,33 @@ cd qc-suite-python
 py -3.11 -m unittest client_tk.tests.test_ui_smoke
 ```
 
+## Remote I/O via Modbus TCP
+
+Jika remote I/O Anda dikendalikan lewat Modbus TCP/IP, set PLC mode di `.env` lalu sesuaikan peta output sesuai datasheet perangkat.
+
+Contoh minimal:
+
+```env
+QC_SUITE_PLC_ENABLED=1
+QC_SUITE_PLC_DRY_RUN=0
+QC_SUITE_PLC_HOST=192.168.1.50
+QC_SUITE_PLC_PORT=502
+QC_SUITE_PLC_MODBUS_UNIT_ID=1
+QC_SUITE_PLC_MODBUS_COMMAND_MODE=coil
+QC_SUITE_PLC_MODBUS_HOLD_ADDRESS=0
+QC_SUITE_PLC_MODBUS_RELEASE_ADDRESS=0
+QC_SUITE_PLC_MODBUS_ZERO_BASED_ADDRESSING=1
+```
+
+Catatan singkat:
+
+- `coil` cocok kalau output remote I/O berupa coil ON/OFF.
+- `holding_register` cocok kalau gateway Anda menulis nilai register tertentu.
+- `QC_SUITE_PLC_DRY_RUN=1` tetap aman untuk simulasi, karena hanya log command.
+- Jika perangkat Anda punya status balik, aktifkan `QC_SUITE_PLC_MODBUS_READBACK_ENABLED=1` dan isi alamat readback yang benar.
+
+Setelah itu, cek status PLC dari backend admin endpoint dan pastikan satu cycle hold/release terkirim saat inspeksi commit terjadi.
+
 ## Mode Split Deployment
 
 Mode ini hanya diperlukan bila Anda ingin memisahkan backend dan client ke mesin berbeda.

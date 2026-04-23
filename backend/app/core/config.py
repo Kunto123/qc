@@ -91,7 +91,7 @@ class AppConfig:
     # QC_SUITE_PLC_ENABLED=1  — activate the PLC worker (default off).
     # QC_SUITE_PLC_DRY_RUN=1  — log commands only, no real socket (default on so
     #   accidentally enabling PLC without hardware never opens a TCP connection).
-    # QC_SUITE_PLC_HOST / QC_SUITE_PLC_PORT — TCP gateway address (Modbus/custom).
+    # QC_SUITE_PLC_HOST / QC_SUITE_PLC_PORT — Modbus TCP endpoint or gateway address.
     # QC_SUITE_PLC_TIMEOUT_MS — socket connect/send timeout.
     # QC_SUITE_PLC_CLAMP_HOLD_MS — ms to keep clamp engaged before auto-release.
     plc_enabled: bool = os.getenv("QC_SUITE_PLC_ENABLED", "0").strip() == "1"
@@ -100,6 +100,26 @@ class AppConfig:
     plc_port: int = max(1, int(os.getenv("QC_SUITE_PLC_PORT", "5020")))
     plc_timeout_ms: int = max(100, int(os.getenv("QC_SUITE_PLC_TIMEOUT_MS", "1000")))
     plc_clamp_hold_ms: int = max(0, int(os.getenv("QC_SUITE_PLC_CLAMP_HOLD_MS", "2000")))
+    # Modbus TCP mapping for clamp control.
+    # Defaults are placeholders until the remote I/O datasheet is finalized.
+    plc_modbus_unit_id: int = max(0, int(os.getenv("QC_SUITE_PLC_MODBUS_UNIT_ID", "1")))
+    plc_modbus_command_mode: str = os.getenv("QC_SUITE_PLC_MODBUS_COMMAND_MODE", "coil").strip().lower() or "coil"
+    plc_modbus_hold_address: int = max(0, int(os.getenv("QC_SUITE_PLC_MODBUS_HOLD_ADDRESS", "0")))
+    plc_modbus_release_address: int = max(0, int(os.getenv("QC_SUITE_PLC_MODBUS_RELEASE_ADDRESS", "0")))
+    plc_modbus_hold_value: int = max(0, int(os.getenv("QC_SUITE_PLC_MODBUS_HOLD_VALUE", "1")))
+    plc_modbus_release_value: int = max(0, int(os.getenv("QC_SUITE_PLC_MODBUS_RELEASE_VALUE", "0")))
+    plc_modbus_zero_based_addressing: bool = os.getenv("QC_SUITE_PLC_MODBUS_ZERO_BASED_ADDRESSING", "1").strip() != "0"
+    plc_modbus_readback_enabled: bool = os.getenv("QC_SUITE_PLC_MODBUS_READBACK_ENABLED", "0").strip() == "1"
+    plc_modbus_readback_mode: str = os.getenv("QC_SUITE_PLC_MODBUS_READBACK_MODE", "coil").strip().lower() or "coil"
+    plc_modbus_readback_address: int = max(0, int(os.getenv("QC_SUITE_PLC_MODBUS_READBACK_ADDRESS", "0")))
+    plc_modbus_readback_expected_hold_value: int = max(
+        0,
+        int(os.getenv("QC_SUITE_PLC_MODBUS_READBACK_EXPECTED_HOLD_VALUE", "1")),
+    )
+    plc_modbus_readback_expected_release_value: int = max(
+        0,
+        int(os.getenv("QC_SUITE_PLC_MODBUS_READBACK_EXPECTED_RELEASE_VALUE", "0")),
+    )
 
     def _has_sqlserver_credentials(self) -> bool:
         return bool(
