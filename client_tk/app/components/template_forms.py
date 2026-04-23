@@ -209,6 +209,7 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.sticker_part_name_var = tk.StringVar()
         self.sticker_expected_class_var = tk.StringVar()
         self.sticker_line_var = tk.StringVar()
+        self.sticker_station_var = tk.StringVar()
         self.sticker_validator_mode_var = tk.StringVar(value="ml_detection")
         self.sticker_min_roi_conf_var = tk.StringVar(value="0.0")
         self.sticker_min_class_conf_var = tk.StringVar()
@@ -320,28 +321,29 @@ class TemplateEditorForm(ctk.CTkFrame):
         self._entry(sticker_config, 2, 0, "Part Name", self.sticker_part_name_var)
         self._entry(sticker_config, 2, 2, "Expected Class", self.sticker_expected_class_var)
         self._entry(sticker_config, 3, 0, "Line", self.sticker_line_var)
-        self._entry(sticker_config, 3, 2, "Validator Mode", self.sticker_validator_mode_var)
-        self._entry(sticker_config, 4, 0, "Min ROI Conf", self.sticker_min_roi_conf_var)
-        self._entry(sticker_config, 4, 2, "Min Class Conf", self.sticker_min_class_conf_var)
-        self._entry(sticker_config, 5, 0, "Max Offset X", self.sticker_max_offset_x_var)
-        self._entry(sticker_config, 5, 2, "Max Offset Y", self.sticker_max_offset_y_var)
-        self._entry(sticker_config, 6, 0, "Expected Center X (0-1)", self.sticker_expected_center_x_var)
-        self._entry(sticker_config, 6, 2, "Expected Center Y (0-1)", self.sticker_expected_center_y_var)
-        self._entry(sticker_config, 7, 0, "Stable Frames (legacy)", self.sticker_commit_stable_frames_var)
-        self._entry(sticker_config, 7, 2, "Part Ready Settle (ms)", self.sticker_settle_ms_var)
+        self._entry(sticker_config, 3, 2, "Station", self.sticker_station_var)
+        self._entry(sticker_config, 4, 0, "Validator Mode", self.sticker_validator_mode_var)
+        self._entry(sticker_config, 4, 2, "Min ROI Conf", self.sticker_min_roi_conf_var)
+        self._entry(sticker_config, 5, 0, "Min Class Conf", self.sticker_min_class_conf_var)
+        self._entry(sticker_config, 5, 2, "Max Offset X", self.sticker_max_offset_x_var)
+        self._entry(sticker_config, 6, 0, "Max Offset Y", self.sticker_max_offset_y_var)
+        self._entry(sticker_config, 6, 2, "Expected Center X (0-1)", self.sticker_expected_center_x_var)
+        self._entry(sticker_config, 7, 0, "Expected Center Y (0-1)", self.sticker_expected_center_y_var)
+        self._entry(sticker_config, 7, 2, "Stable Frames (legacy)", self.sticker_commit_stable_frames_var)
+        self._entry(sticker_config, 8, 0, "Part Ready Settle (ms)", self.sticker_settle_ms_var)
         ctk.CTkLabel(sticker_config, text="Settle (ms): nilai utama — mengontrol hold inferensi dan commit. 0 = nonaktif. Kosong = ikuti env.", text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(
-            row=8, column=2, columnspan=2, sticky="w", padx=(0, 8))
+            row=9, column=0, columnspan=2, sticky="w", padx=(10, 8))
         ctk.CTkLabel(sticker_config, text="Stable Frames: legacy, tidak memengaruhi runtime. Gunakan Part Ready Settle (ms) sebagai gantinya.", text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(
-            row=8, column=0, columnspan=2, sticky="w", padx=(10, 8))
+            row=9, column=2, columnspan=2, sticky="w", padx=(0, 8))
         ctk.CTkLabel(sticker_config, text="Kosong = auto center (0.5). Gunakan Visual Picker di bawah.", text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(
-            row=9, column=0, columnspan=4, sticky="w", pady=(0, 4), padx=10
+            row=10, column=0, columnspan=4, sticky="w", pady=(0, 4), padx=10
         )
 
         # Tilt gate section
         tilt_separator = ctk.CTkFrame(sticker_config, fg_color=BORDER, height=1)
-        tilt_separator.grid(row=10, column=0, columnspan=4, sticky="ew", padx=10, pady=(6, 4))
+        tilt_separator.grid(row=11, column=0, columnspan=4, sticky="ew", padx=10, pady=(6, 4))
         ctk.CTkLabel(sticker_config, text="Tilt Gate", font=("Segoe UI", 9, "bold"), text_color=TEXT_PRIMARY).grid(
-            row=11, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 4))
+            row=12, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 4))
         self.tilt_gate_checkbox = ctk.CTkCheckBox(
             sticker_config,
             text="Aktifkan Gate Kemiringan (OUT_OF_ANGLE)",
@@ -349,16 +351,16 @@ class TemplateEditorForm(ctk.CTkFrame):
             text_color=TEXT_PRIMARY,
             command=self._on_tilt_gate_toggled,
         )
-        self.tilt_gate_checkbox.grid(row=12, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 6))
-        self._entry(sticker_config, 13, 0, "Expected Tilt (°)", self.sticker_expected_tilt_var)
-        self._entry(sticker_config, 13, 2, "Max Tilt Deviation (°)", self.sticker_max_tilt_var)
+        self.tilt_gate_checkbox.grid(row=13, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 6))
+        self._entry(sticker_config, 14, 0, "Expected Tilt (°)", self.sticker_expected_tilt_var)
+        self._entry(sticker_config, 14, 2, "Max Tilt Deviation (°)", self.sticker_max_tilt_var)
         self.tilt_note_label = ctk.CTkLabel(
             sticker_config,
             text="Gate nonaktif — nilai tersimpan sebagai telemetry, tidak memengaruhi accept/reject.",
             text_color=TEXT_SECONDARY,
             font=("Segoe UI", 8),
         )
-        self.tilt_note_label.grid(row=14, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 8))
+        self.tilt_note_label.grid(row=15, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 8))
         self._tilt_entries: list[ctk.CTkEntry] = []
         self.sticker_tilt_gate_enabled_var.trace_add("write", lambda *_: self._on_tilt_gate_toggled())
 
@@ -739,6 +741,7 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.sticker_part_name_var.set(str(sticker.get("part_name") or ""))
         self.sticker_expected_class_var.set(str(sticker.get("expected_class") or ""))
         self.sticker_line_var.set(str(sticker.get("line") or ""))
+        self.sticker_station_var.set(str(sticker.get("station") or ""))
         self.sticker_validator_mode_var.set(str(sticker.get("validator_mode") or "ml_detection"))
         self.sticker_min_roi_conf_var.set(str(sticker.get("min_roi_confidence", 0.0)))
         self.sticker_min_class_conf_var.set("" if sticker.get("min_class_confidence") is None else str(sticker.get("min_class_confidence")))
@@ -822,6 +825,7 @@ class TemplateEditorForm(ctk.CTkFrame):
                 "part_name": self.sticker_part_name_var.get().strip() or "Sample Part",
                 "expected_class": self.sticker_expected_class_var.get().strip() or (classes[0] if classes else "sample-sticker"),
                 "line": self.sticker_line_var.get().strip() or "LINE-A",
+                "station": self.sticker_station_var.get().strip(),
                 "enabled": bool(self.sticker_enabled_var.get()),
                 "validator_mode": self.sticker_validator_mode_var.get().strip() or "ml_detection",
                 "min_roi_confidence": _float_or_none(self.sticker_min_roi_conf_var.get()) or 0.0,
@@ -872,6 +876,7 @@ class TemplateEditorForm(ctk.CTkFrame):
                     "part_name": "",
                     "expected_class": "",
                     "line": "",
+                    "station": "",
                     "enabled": True,
                     "validator_mode": "ml_detection",
                     "min_roi_confidence": 0.0,

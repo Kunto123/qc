@@ -798,8 +798,11 @@ class OperatorScreen(ctk.CTkFrame):
         if camera_config.get("camera_index") is not None:
             self.camera_value.set(str(camera_config["camera_index"]))
         sticker_config = detail.get("sticker") or {}
-        if not keep_line_station and sticker_config.get("line"):
-            self.line_value.set(str(sticker_config["line"]))
+        if not keep_line_station:
+            if sticker_config.get("line"):
+                self.line_value.set(str(sticker_config["line"]))
+            if sticker_config.get("station"):
+                self.station_value.set(str(sticker_config["station"]))
         self.state.cache["selected_template_detail"] = detail
         self._refresh_context_summary()
 

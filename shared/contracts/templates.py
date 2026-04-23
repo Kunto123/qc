@@ -51,6 +51,7 @@ class StickerRule:
     part_name: str
     expected_class: str
     line: str
+    station: str = ""
     enabled: bool = True
     validator_mode: str = "ml_detection"
     min_roi_confidence: float = 0.0
