@@ -28,6 +28,10 @@ class PlcWorker:
     Double-send protection: the commit hook in InspectionSessionService only
     fires once per event (count_committed is gated by current_event_committed),
     so PlcWorker itself does not need dedup logic.
+
+    Safe release: if the clamp is still engaged when stop() is called (e.g. the
+    process is interrupted mid-hold), a release is sent after the worker thread
+    exits as a safety net before the adapter is disconnected.
     """
 
     def __init__(
@@ -44,6 +48,7 @@ class PlcWorker:
         self._lock = threading.Lock()
         self._last_command: str | None = None
         self._last_command_at: float | None = None
+        self._clamp_engaged: bool = False
 
     # ------------------------------------------------------------------
     # Public control
@@ -61,6 +66,17 @@ class PlcWorker:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
+        # Safety net: if thread exited without completing a release, send it now
+        with self._lock:
+            engaged = self._clamp_engaged
+        if engaged:
+            logger.warning("[plc-worker] clamp still engaged after shutdown — sending safe release")
+            try:
+                self._adapter.send_clamp_release(event_id=None, reason="shutdown")
+                with self._lock:
+                    self._clamp_engaged = False
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[plc-worker] safe release failed on shutdown: %s", exc)
         try:
             self._adapter.disconnect()
         except Exception:  # noqa: BLE001
@@ -82,6 +98,7 @@ class PlcWorker:
                 "queue_size": self._queue.qsize(),
                 "last_command": self._last_command,
                 "last_command_at": self._last_command_at,
+                "clamp_engaged": self._clamp_engaged,
                 **self._adapter.status(),
             }
 
@@ -121,6 +138,7 @@ class PlcWorker:
             with self._lock:
                 self._last_command = "clamp_hold"
                 self._last_command_at = time.time()
+                self._clamp_engaged = True
         except Exception as exc:  # noqa: BLE001
             logger.error("[plc-worker] clamp_hold failed: %s", exc)
 
@@ -130,5 +148,6 @@ class PlcWorker:
             with self._lock:
                 self._last_command = "clamp_release"
                 self._last_command_at = time.time()
+                self._clamp_engaged = False
         except Exception as exc:  # noqa: BLE001
             logger.error("[plc-worker] clamp_release failed: %s", exc)

@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import logging
-import socket
-import struct
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from typing import Any
+
+from pymodbus.client import ModbusTcpClient
+from pymodbus.exceptions import ConnectionException, ModbusIOException
+
+# Exception types that indicate a transport failure and warrant a reconnect+retry.
+# RuntimeError (raised on Modbus protocol errors) is intentionally excluded so a
+# bad-function-code or illegal-address response never causes a duplicate write.
+_TRANSPORT_ERRORS = (OSError, ConnectionException, ModbusIOException)
 
 logger = logging.getLogger(__name__)
 
@@ -50,23 +58,25 @@ class DryRunPlcAdapter(PlcAdapter):
 
 
 class ModbusTcpPlcAdapter(PlcAdapter):
-    """Modbus TCP adapter for a clamp-enabled remote I/O bridge.
+    """Modbus TCP adapter using pymodbus.client.ModbusTcpClient.
 
-    The adapter supports both write-single-coil and write-single-register
-    command modes. Optional readback verification can confirm the remote I/O
-    state after each command when a status point is available.
+    Supports coil and holding-register command modes with optional readback
+    verification. Transient disconnects trigger one automatic reconnect and
+    retry before the error is surfaced to the caller.
     """
 
-    _FUNCTION_WRITE_SINGLE_COIL = 0x05
-    _FUNCTION_WRITE_SINGLE_REGISTER = 0x06
-    _FUNCTION_READ_COILS = 0x01
-    _FUNCTION_READ_HOLDING_REGISTERS = 0x03
     _VALID_COMMAND_MODES = {"coil", "holding_register"}
-    _VALID_READBACK_MODES = {"none", "coil", "holding_register"}
+    # "discrete_input" reads FC02 (read discrete inputs) — use this when the remote I/O
+    # exposes a separate physical feedback input that reflects actual mechanical state,
+    # rather than reading back the same output coil that was written.
+    _VALID_READBACK_MODES = {"none", "coil", "discrete_input", "holding_register"}
     _MODE_ALIASES = {
         "register": "holding_register",
         "holding-register": "holding_register",
         "coils": "coil",
+        "di": "discrete_input",
+        "discrete-input": "discrete_input",
+        "discrete_inputs": "discrete_input",
     }
 
     def __init__(
@@ -83,7 +93,7 @@ class ModbusTcpPlcAdapter(PlcAdapter):
         release_value: int = 0,
         zero_based_addressing: bool = True,
         readback_enabled: bool = False,
-        readback_mode: str = "coil",
+        readback_mode: str = "discrete_input",
         readback_address: int = 0,
         readback_expected_hold_value: int = 1,
         readback_expected_release_value: int = 0,
@@ -115,15 +125,13 @@ class ModbusTcpPlcAdapter(PlcAdapter):
         if self._readback_enabled and self._readback_mode == "none":
             raise ValueError("readback_enabled requires readback_mode to be 'coil' or 'holding_register'")
 
-        self._sock: socket.socket | None = None
-        self._transaction_id = 0
+        self._client = ModbusTcpClient(self._host, port=self._port, timeout=self._timeout_s)
 
     def connect(self) -> None:
-        if self._sock is not None:
+        if self._client.connected:
             return
-        sock = socket.create_connection((self._host, self._port), timeout=self._timeout_s)
-        sock.settimeout(self._timeout_s)
-        self._sock = sock
+        if not self._client.connect():
+            raise RuntimeError(f"failed to connect to modbus at {self._host}:{self._port}")
         logger.info(
             "[plc-modbus] connected to %s:%d (unit_id=%d, mode=%s)",
             self._host,
@@ -153,13 +161,7 @@ class ModbusTcpPlcAdapter(PlcAdapter):
         )
 
     def disconnect(self) -> None:
-        if self._sock is None:
-            return
-        try:
-            self._sock.close()
-        except OSError:
-            pass
-        self._sock = None
+        self._client.close()
         logger.info("[plc-modbus] disconnected")
 
     def status(self) -> dict:
@@ -174,7 +176,7 @@ class ModbusTcpPlcAdapter(PlcAdapter):
             "readback_enabled": self._readback_enabled,
             "readback_mode": self._readback_mode,
             "readback_address": self._readback_address,
-            "connected": self._sock is not None,
+            "connected": self._client.connected,
         }
 
     def _write_command(
@@ -188,70 +190,62 @@ class ModbusTcpPlcAdapter(PlcAdapter):
         expected_readback: int,
     ) -> None:
         wire_address = self._to_wire_address(address)
-        function_code, payload, expected_value = self._build_write_payload(wire_address, value)
-        response = self._exchange(payload)
-        self._validate_write_response(
-            response,
-            label=label,
-            function_code=function_code,
-            wire_address=wire_address,
-            expected_value=expected_value,
-        )
+
+        def _do_write() -> None:
+            if self._command_mode == "coil":
+                response = self._client.write_coil(wire_address, bool(value), device_id=self._unit_id)
+            else:
+                response = self._client.write_register(wire_address, value, device_id=self._unit_id)
+            if response.isError():
+                raise RuntimeError(f"modbus write error for {label}: {response}")
+
+        self._call_with_retry(_do_write)
         logger.info(
             "[plc-modbus] %s event=%s detail=%s address=%d value=%d mode=%s",
             label,
             event_id,
             detail,
             wire_address,
-            expected_value,
+            value,
             self._command_mode,
         )
         if self._readback_enabled:
-            self._verify_readback(label=label, event_id=event_id, detail=detail, expected_value=expected_readback)
-
-    def _exchange(self, payload: bytes) -> bytes:
-        sock = self._ensure_socket()
-        transaction_id = self._next_transaction_id()
-        packet = struct.pack(
-            ">HHHB",
-            transaction_id,
-            0,
-            len(payload) + 1,
-            self._unit_id,
-        ) + payload
-
-        try:
-            sock.sendall(packet)
-            header = self._read_exact(7)
-            rx_transaction_id, rx_protocol_id, rx_length, rx_unit_id = struct.unpack(
-                ">HHHB",
-                header,
+            # Readback gets its own retry so a transient disconnect between the
+            # successful write and the read triggers reconnect+re-read, not a
+            # re-write, which would be redundant and misleading in logs.
+            self._call_with_retry(
+                lambda: self._verify_readback(
+                    label=label, event_id=event_id, detail=detail, expected_value=expected_readback
+                )
             )
-            if rx_transaction_id != transaction_id:
-                raise RuntimeError(
-                    f"modbus transaction mismatch: expected {transaction_id}, received {rx_transaction_id}",
-                )
-            if rx_protocol_id != 0:
-                raise RuntimeError(f"unexpected modbus protocol id {rx_protocol_id}")
-            if rx_unit_id != self._unit_id:
-                raise RuntimeError(f"unexpected modbus unit id {rx_unit_id}")
-            if rx_length < 2:
-                raise RuntimeError(f"invalid modbus response length {rx_length}")
 
-            body = self._read_exact(rx_length - 1)
-            if not body:
-                raise RuntimeError("empty modbus response body")
+    def _call_with_retry(self, operation: Callable[[], Any]) -> Any:
+        """Run `operation`; on transport failure reconnect once and retry.
 
-            function_code = body[0]
-            if function_code & 0x80:
-                exception_code = body[1] if len(body) > 1 else 0
-                raise RuntimeError(
-                    f"modbus exception on function 0x{function_code & 0x7F:02X}: code 0x{exception_code:02X}",
-                )
-            return body
-        except (OSError, RuntimeError):
-            self._reset_socket()
-            raise
+        Only _TRANSPORT_ERRORS (OSError, pymodbus ConnectionException,
+        ModbusIOException) trigger a reconnect+retry. Protocol errors
+        (RuntimeError from isError() checks) propagate immediately so a
+        bad-address or illegal-function response never causes a duplicate write.
+        """
+        self._ensure_connected()
+        try:
+            return operation()
+        except _TRANSPORT_ERRORS as exc:
+            logger.warning("[plc-modbus] transient transport error: %s — reconnecting", exc)
+            self._client.close()
+            try:
+                if not self._client.connect():
+                    raise RuntimeError(
+                        f"modbus reconnect failed to {self._host}:{self._port}"
+                    ) from exc
+            except Exception as reconnect_exc:
+                raise RuntimeError("modbus reconnect failed") from reconnect_exc
+            return operation()
+
+    def _ensure_connected(self) -> None:
+        if not self._client.connected:
+            if not self._client.connect():
+                raise RuntimeError(f"failed to connect to modbus at {self._host}:{self._port}")
 
     def _verify_readback(
         self,
@@ -275,112 +269,24 @@ class ModbusTcpPlcAdapter(PlcAdapter):
         )
 
     def _readback_value(self) -> int:
+        wire_address = self._to_wire_address(self._readback_address)
         if self._readback_mode == "coil":
-            response = self._exchange(
-                struct.pack(
-                    ">BHH",
-                    self._FUNCTION_READ_COILS,
-                    self._to_wire_address(self._readback_address),
-                    1,
-                ),
-            )
-            if len(response) < 3:
-                raise RuntimeError("invalid coil readback response")
-            byte_count = response[1]
-            if byte_count < 1:
-                raise RuntimeError("invalid coil readback byte count")
-            return 1 if response[2] & 0x01 else 0
-
-        response = self._exchange(
-            struct.pack(
-                ">BHH",
-                self._FUNCTION_READ_HOLDING_REGISTERS,
-                self._to_wire_address(self._readback_address),
-                1,
-            ),
-        )
-        if len(response) < 4:
-            raise RuntimeError("invalid holding-register readback response")
-        byte_count = response[1]
-        if byte_count < 2:
-            raise RuntimeError("invalid holding-register readback byte count")
-        return struct.unpack(">H", response[2:4])[0]
-
-    def _build_write_payload(self, wire_address: int, value: int) -> tuple[int, bytes, int]:
-        if self._command_mode == "coil":
-            encoded_value = 0xFF00 if int(value) != 0 else 0x0000
-            return (
-                self._FUNCTION_WRITE_SINGLE_COIL,
-                struct.pack(">BHH", self._FUNCTION_WRITE_SINGLE_COIL, wire_address, encoded_value),
-                encoded_value,
-            )
-
-        register_value = self._validate_register_value(value, "register_value")
-        return (
-            self._FUNCTION_WRITE_SINGLE_REGISTER,
-            struct.pack(">BHH", self._FUNCTION_WRITE_SINGLE_REGISTER, wire_address, register_value),
-            register_value,
-        )
-
-    def _validate_write_response(
-        self,
-        response: bytes,
-        *,
-        label: str,
-        function_code: int,
-        wire_address: int,
-        expected_value: int,
-    ) -> None:
-        if len(response) != 5:
-            raise RuntimeError(f"unexpected modbus write response length {len(response)} for {label}")
-        rx_function_code, rx_address, rx_value = struct.unpack(">BHH", response)
-        if rx_function_code != function_code:
-            raise RuntimeError(
-                f"unexpected modbus function 0x{rx_function_code:02X} for {label}; expected 0x{function_code:02X}",
-            )
-        if rx_address != wire_address:
-            raise RuntimeError(
-                f"unexpected modbus address {rx_address} for {label}; expected {wire_address}",
-            )
-        if rx_value != expected_value:
-            raise RuntimeError(
-                f"unexpected modbus value {rx_value} for {label}; expected {expected_value}",
-            )
-
-    def _ensure_socket(self) -> socket.socket:
-        if self._sock is None:
-            self.connect()
-        if self._sock is None:
-            raise RuntimeError("modbus socket is not connected")
-        return self._sock
-
-    def _read_exact(self, size: int) -> bytes:
-        if size <= 0:
-            return b""
-        sock = self._ensure_socket()
-        chunks = bytearray()
-        while len(chunks) < size:
-            try:
-                chunk = sock.recv(size - len(chunks))
-            except OSError as exc:
-                raise RuntimeError("modbus receive failed") from exc
-            if not chunk:
-                raise RuntimeError("modbus connection closed while waiting for response")
-            chunks.extend(chunk)
-        return bytes(chunks)
-
-    def _next_transaction_id(self) -> int:
-        self._transaction_id = (self._transaction_id + 1) & 0xFFFF
-        return self._transaction_id
-
-    def _reset_socket(self) -> None:
-        if self._sock is None:
-            return
-        try:
-            self._sock.close()
-        except OSError:
-            pass
-        self._sock = None
+            response = self._client.read_coils(wire_address, count=1, device_id=self._unit_id)
+            if response.isError():
+                raise RuntimeError(f"coil readback error: {response}")
+            return int(response.bits[0])
+        if self._readback_mode == "discrete_input":
+            # FC02: read discrete inputs — intended for a separate physical feedback
+            # point (e.g. a limit switch or sensor DI) that reflects mechanical state,
+            # not the same output coil that was written.
+            response = self._client.read_discrete_inputs(wire_address, count=1, device_id=self._unit_id)
+            if response.isError():
+                raise RuntimeError(f"discrete input readback error: {response}")
+            return int(response.bits[0])
+        response = self._client.read_holding_registers(wire_address, count=1, device_id=self._unit_id)
+        if response.isError():
+            raise RuntimeError(f"holding register readback error: {response}")
+        return response.registers[0]
 
     def _to_wire_address(self, address: int) -> int:
         wire_address = self._validate_address(address, "address")
@@ -423,4 +329,3 @@ class ModbusTcpPlcAdapter(PlcAdapter):
 
 class TcpPlcAdapter(ModbusTcpPlcAdapter):
     """Compatibility alias for older imports."""
-

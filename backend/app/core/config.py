@@ -110,7 +110,7 @@ class AppConfig:
     plc_modbus_release_value: int = max(0, int(os.getenv("QC_SUITE_PLC_MODBUS_RELEASE_VALUE", "0")))
     plc_modbus_zero_based_addressing: bool = os.getenv("QC_SUITE_PLC_MODBUS_ZERO_BASED_ADDRESSING", "1").strip() != "0"
     plc_modbus_readback_enabled: bool = os.getenv("QC_SUITE_PLC_MODBUS_READBACK_ENABLED", "0").strip() == "1"
-    plc_modbus_readback_mode: str = os.getenv("QC_SUITE_PLC_MODBUS_READBACK_MODE", "coil").strip().lower() or "coil"
+    plc_modbus_readback_mode: str = os.getenv("QC_SUITE_PLC_MODBUS_READBACK_MODE", "discrete_input").strip().lower() or "discrete_input"
     plc_modbus_readback_address: int = max(0, int(os.getenv("QC_SUITE_PLC_MODBUS_READBACK_ADDRESS", "0")))
     plc_modbus_readback_expected_hold_value: int = max(
         0,

@@ -126,5 +126,5 @@ def _register_worker_lifecycle(app: Flask) -> None:
 
     @app.teardown_appcontext
     def _stop_workers(_exc=None):
-        pass  # daemon threads exit with process; explicit stop only needed in tests
+        pass  # process-level teardown is handled by backend.app.core.shutdown
 
