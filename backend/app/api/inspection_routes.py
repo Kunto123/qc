@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 from flask import Blueprint, Response, g, jsonify, request
 
-from backend.app.core.container import audit_repo, inspection_results_repo, inspection_session_service, plc_worker
+from backend.app.core.container import audit_repo, inspection_results_repo, inspection_session_service, plc_worker, reject_log_repo
 from backend.app.core.http import require_auth, require_roles
 from shared.contracts.enums import DecisionCode, RejectReasonCode, UserRole
 
@@ -89,6 +89,16 @@ def stop_session(session_id: str):
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 404
     return jsonify(result)
+
+
+@inspection_blueprint.get("/inspection/reject-logs")
+@require_roles(UserRole.ADMIN)
+def list_reject_logs():
+    try:
+        limit = min(int(request.args.get("limit") or 100), 1000)
+    except ValueError:
+        limit = 100
+    return jsonify(reject_log_repo.list_recent(limit=limit))
 
 
 @inspection_blueprint.get("/inspection/latest-preview")

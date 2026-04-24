@@ -176,12 +176,14 @@ class HybridInspectionResultsRepository:
         station_id: str | None = None,
         part_name: str | None = None,
         template_version_id: int | None = None,
+        decision_code: str | None = None,
     ) -> dict[str, Any]:
         return self._local_repo.summary(
             line_id=line_id,
             station_id=station_id,
             part_name=part_name,
             template_version_id=template_version_id,
+            decision_code=decision_code,
         )
 
     def buckets(
@@ -191,6 +193,7 @@ class HybridInspectionResultsRepository:
         station_id: str | None = None,
         part_name: str | None = None,
         template_version_id: int | None = None,
+        decision_code: str | None = None,
         granularity: str = "hour",
         limit: int = 200,
     ) -> list[dict[str, Any]]:
@@ -199,6 +202,7 @@ class HybridInspectionResultsRepository:
             station_id=station_id,
             part_name=part_name,
             template_version_id=template_version_id,
+            decision_code=decision_code,
             granularity=granularity,
             limit=limit,
         )

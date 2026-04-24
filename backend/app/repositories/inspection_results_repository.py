@@ -129,12 +129,14 @@ class InspectionResultsRepository(JsonRepository):
         station_id: str | None = None,
         part_name: str | None = None,
         template_version_id: int | None = None,
+        decision_code: str | None = None,
     ) -> dict[str, Any]:
         items = self.list_results(
             line_id=line_id,
             station_id=station_id,
             part_name=part_name,
             template_version_id=template_version_id,
+            decision_code=decision_code,
             limit=100_000,
         )
         summary = _new_aggregate()
@@ -149,6 +151,7 @@ class InspectionResultsRepository(JsonRepository):
         station_id: str | None = None,
         part_name: str | None = None,
         template_version_id: int | None = None,
+        decision_code: str | None = None,
         granularity: str = "hour",
         limit: int = 200,
     ) -> list[dict[str, Any]]:
@@ -157,6 +160,7 @@ class InspectionResultsRepository(JsonRepository):
             station_id=station_id,
             part_name=part_name,
             template_version_id=template_version_id,
+            decision_code=decision_code,
             limit=100_000,
         )
         bucketed: dict[tuple[str, str | None, str | None, int | None, str | None], dict[str, Any]] = {}

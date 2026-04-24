@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import threading
 import time
@@ -15,11 +16,15 @@ from backend.app.core.config import AppConfig
 from backend.app.models.session_state import SessionState
 from backend.app.repositories.inspection_results_repository import InspectionResultsRepository
 from backend.app.repositories.profiles_repository import ProfilesRepository
+from backend.app.repositories.reject_log_repository import RejectLogRepository
 from backend.app.services.calibration import CalibrationService
 from backend.app.services.sticker_inference import StickerInferenceService
 from backend.app.services.template_runtime import TemplateRuntimeService
 from shared.contracts.enums import DecisionCode, InspectionEventState, RejectReasonCode, SessionStatus
 from shared.contracts.templates import RoiGeometry
+
+
+logger = logging.getLogger(__name__)
 
 
 KNOWN_REJECT_CODES = (
@@ -152,6 +157,7 @@ class InspectionSessionService:
         sticker_inference: StickerInferenceService,
         app_config: AppConfig | None = None,
         plc_worker=None,
+        reject_log_repo: RejectLogRepository | None = None,
     ) -> None:
         self._template_runtime = template_runtime
         self._profiles_repo = profiles_repo
@@ -166,6 +172,7 @@ class InspectionSessionService:
             else 0
         )
         self._plc_worker = plc_worker
+        self._reject_log_repo = reject_log_repo
 
     def start_session(
         self,
@@ -445,6 +452,8 @@ class InspectionSessionService:
                 part_ready=part_ready,
                 part_ready_roi_meta=part_ready_roi_meta,
                 sticker_roi_meta=sticker_roi_meta,
+                    sticker_detection=sticker_detection,
+                    event_id=event_id,
             )
             self._register_committed_result(
                 state=state,
@@ -1319,7 +1328,44 @@ class InspectionSessionService:
         part_ready: dict[str, Any],
         part_ready_roi_meta: dict[str, Any],
         sticker_roi_meta: dict[str, Any],
+        sticker_detection: dict[str, Any],
+        event_id: str | None,
     ) -> dict[str, Any]:
+        decision = str(validation.get("decision") or "").strip().upper()
+        if decision != DecisionCode.ACCEPT.value:
+            reject_log_written = False
+            reject_entry = None
+            if self._reject_log_repo is not None:
+                try:
+                    reject_entry = self._reject_log_repo.log_reject(
+                        {
+                            "session_id": state.session_id,
+                            "event_id": event_id or state.current_event_id,
+                            "template_version_id": state.template.version_id,
+                            "line_id": validation.get("line_id") or state.line_id,
+                            "station_id": validation.get("station_id") or state.station_id,
+                            "part_name": validation.get("part_name"),
+                            "decision_code": decision or DecisionCode.REJECT.value,
+                            "reject_reason_code": validation.get("reject_reason_code") or RejectReasonCode.ERROR.value,
+                            "operator_user_id": validation.get("operator_user_id"),
+                            "mp_check": validation.get("mp_check"),
+                            "validation_details": validation.get("validation_details"),
+                            "part_ready": part_ready,
+                            "sticker_detection": sticker_detection,
+                            "part_ready_roi_meta": dict(part_ready_roi_meta),
+                            "sticker_roi_meta": dict(sticker_roi_meta),
+                        }
+                    )
+                    reject_log_written = True
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("[inspection] reject log write failed: %s", exc, exc_info=True)
+            return {
+                "written": False,
+                "reason": "reject_logged" if reject_log_written else "reject_log_error",
+                "reject_log_written": reject_log_written,
+                "reject_log_entry": reject_entry,
+            }
+
         if not state.template.persistence.write_to_db:
             return {"written": False, "reason": "disabled"}
         persist_key = (

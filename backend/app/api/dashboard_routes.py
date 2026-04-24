@@ -18,6 +18,7 @@ def summary():
             station_id=request.args.get("station_id") or None,
             part_name=request.args.get("part_name") or None,
             template_version_id=int(request.args["template_version_id"]) if request.args.get("template_version_id") else None,
+            decision_code=request.args.get("decision_code") or None,
         )
     )
 
@@ -34,6 +35,7 @@ def buckets():
             station_id=request.args.get("station_id") or None,
             part_name=request.args.get("part_name") or None,
             template_version_id=int(request.args["template_version_id"]) if request.args.get("template_version_id") else None,
+            decision_code=request.args.get("decision_code") or None,
             granularity=granularity,
             limit=min(int(request.args.get("limit") or 200), 1000),
         )

@@ -3041,3 +3041,101 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(st["adapter"], "DryRunPlcAdapter")
         self.assertTrue(st.get("connected"))
 
+    def test_15g_rejects_are_logged_locally_and_not_persisted_to_results_db(self) -> None:
+        """Reject decisions must bypass the inspection results DB and write to the local reject log."""
+        from backend.app.core.container import reject_log_repo
+        from backend.app.core.container import inspection_session_service
+
+        create_response = self.client.post(
+            "/templates",
+            json={
+                "name": "Reject Log Smoke",
+                "description": "Reject should go to local log only",
+                "is_active": True,
+                "camera": {"camera_index": 0, "width": 640, "height": 480, "fps": 15},
+                "part_ready_roi": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+                "sticker_roi": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+                "vision": {"model_path": "models/dummy.pt", "classes": ["K0W-HB0"]},
+                "part_ready": {"enabled": False},
+                "sticker": {
+                    "part_name": "Reject Log Part",
+                    "expected_class": "SHOULD_REJECT",
+                    "line": "LINE-REJECT",
+                    "enabled": True,
+                    "validator_mode": "ml_detection",
+                    "min_roi_confidence": 0.0,
+                    "part_ready_settle_ms": 0,
+                },
+                "persistence": {"write_to_db": True},
+                "metadata": {"scenario": "reject-log-smoke"},
+            },
+            headers=_headers(self.engineer_token),
+        )
+        self.assertEqual(create_response.status_code, 201, create_response.get_json())
+        template = create_response.get_json()
+
+        session_response = self.client.post(
+            "/inspection/sessions/start",
+            json={
+                "client_id": "reject-log-smoke",
+                "camera_index": 0,
+                "template_version_id": template["version_id"],
+                "line_id": "LINE-REJECT",
+                "station_id": "ST-REJECT",
+            },
+            headers=_headers(self.operator_token),
+        )
+        self.assertEqual(session_response.status_code, 201, session_response.get_json())
+        session_id = session_response.get_json()["session_id"]
+
+        original_predict = inspection_session_service._sticker_inference.predict
+
+        def fake_predict(*_args, **_kwargs):
+            return {
+                "backend": "patched",
+                "model_path": "patched.pt",
+                "meta_path": "patched.meta.json",
+                "class_names": ["K0W-HB0"],
+                "fallback_reason": None,
+                "detections": [
+                    {
+                        "label": "K0W-HB0",
+                        "confidence": 0.91,
+                        "class_confidence": 0.91,
+                        "position": {"x1": 320.0, "y1": 40.0, "x2": 382.0, "y2": 120.0},
+                    }
+                ],
+            }
+
+        inspection_session_service._sticker_inference.predict = fake_predict
+        try:
+            frame_response = self.client.post(
+                f"/inspection/sessions/{session_id}/frame",
+                json={"image_b64": _sample_image_b64()},
+                headers=_headers(self.operator_token),
+            )
+        finally:
+            inspection_session_service._sticker_inference.predict = original_predict
+
+        self.assertEqual(frame_response.status_code, 200, frame_response.get_json())
+        frame_payload = frame_response.get_json()
+
+        self.assertTrue(frame_payload["count_committed"])
+        self.assertEqual(frame_payload["validation"]["decision"], "REJECT")
+        self.assertFalse(frame_payload["db_write"]["written"])
+        self.assertEqual(frame_payload["db_write"]["reason"], "reject_logged")
+        self.assertTrue(frame_payload["db_write"]["reject_log_written"])
+
+        inspection_response = self.client.get(
+            f"/inspections?template_version_id={template['version_id']}",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(inspection_response.status_code, 200, inspection_response.get_json())
+        self.assertEqual(inspection_response.get_json(), [])
+
+        reject_log_response = self.client.get("/inspection/reject-logs?limit=20", headers=_headers(self.admin_token))
+        self.assertEqual(reject_log_response.status_code, 200, reject_log_response.get_json())
+        reject_logs = reject_log_response.get_json()
+        self.assertTrue(any(item.get("session_id") == session_id for item in reject_logs))
+        self.assertTrue(any(item.get("reject_reason_code") for item in reject_logs))
+

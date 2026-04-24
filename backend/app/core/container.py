@@ -13,6 +13,7 @@ from backend.app.repositories.hybrid_inspection_results_repository import Hybrid
 from backend.app.repositories.inspection_results_repository import InspectionResultsRepository
 from backend.app.repositories.models_repository import ModelsRepository
 from backend.app.repositories.profiles_repository import ProfilesRepository
+from backend.app.repositories.reject_log_repository import RejectLogRepository
 from backend.app.repositories.postgres.auth_audit_repository import PostgresAuthAuditRepository
 from backend.app.repositories.postgres.inspection_mirror_repository import PostgresInspectionMirrorRepository
 from backend.app.repositories.postgres.session_store import PostgresTokenStore
@@ -57,6 +58,7 @@ templates_repo = TemplatesRepository()
 deployments_repo = DeploymentsRepository()
 profiles_repo = ProfilesRepository()
 datasets_repo = DatasetsRepository()
+reject_log_repo = RejectLogRepository()
 dataset_versions_repo = DatasetVersionRepository(
     datasets_repo,
     geometric_augment_enabled=app_config.geometric_augment_enabled,
@@ -122,6 +124,7 @@ inspection_session_service = InspectionSessionService(
     sticker_inference_service,
     app_config=app_config,
     plc_worker=plc_worker,
+    reject_log_repo=reject_log_repo,
 )
 training_service = TrainingService(training_repo, models_repo, device_runtime, app_config=app_config)
 workstation_registry_repo = WorkstationRegistryRepository()

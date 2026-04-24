@@ -153,6 +153,8 @@ Catatan singkat:
 - `holding_register` cocok kalau gateway Anda menulis nilai register tertentu.
 - `QC_SUITE_PLC_DRY_RUN=1` tetap aman untuk simulasi, karena hanya log command.
 - Jika perangkat Anda punya status balik, aktifkan `QC_SUITE_PLC_MODBUS_READBACK_ENABLED=1` dan isi alamat readback yang benar.
+- Reject tidak lagi ditulis ke repository hasil inspeksi utama; alasan reject disimpan ke `data/json_store/reject_log.jsonl` dan bisa dilihat lewat `GET /inspection/reject-logs` untuk admin.
+- Untuk counter accept-only di dashboard, kirim `decision_code=ACCEPT` ke `/dashboard/summary` dan `/dashboard/buckets`.
 
 Setelah itu, cek status PLC dari backend admin endpoint dan pastikan satu cycle hold/release terkirim saat inspeksi commit terjadi.
 
