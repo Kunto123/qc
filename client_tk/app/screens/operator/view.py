@@ -17,7 +17,7 @@ from client_tk.app.components.scrollable_frame import ScrollableFrame
 from client_tk.app.config import DEFAULT_UPLOAD_INTERVAL_MS
 from client_tk.app.services.camera_capture import CameraCaptureService
 from client_tk.app.services.frame_upload import FrameUploadService
-from client_tk.app.theme import APP_BG, BORDER, PANEL_ALT_BG, PANEL_BG, SHELL_BG, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, ACCENT_HOVER, TEXT_ON_ACCENT
+from client_tk.app.theme import APP_BG, ACCENT_SOFT, BORDER, PANEL_ALT_BG, PANEL_BG, SHELL_BG, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, ACCENT_HOVER, TEXT_ON_ACCENT
 
 
 BADGE_COLORS = {
@@ -29,6 +29,7 @@ BADGE_COLORS = {
 }
 RESPONSIVE_BREAKPOINT = 1240
 HEARTBEAT_INTERVAL_MS = 20_000
+PLC_POLL_INTERVAL_MS = 8_000
 
 
 class OperatorScreen(ctk.CTkFrame):
@@ -43,6 +44,7 @@ class OperatorScreen(ctk.CTkFrame):
         self._lock = threading.Lock()
         self._after_id: str | None = None
         self._heartbeat_after_id: str | None = None
+        self._plc_poll_after_id: str | None = None
         self._closed = False
         self._machine_id = f"{platform.node() or 'workstation'}-{uuid.getnode():012x}"
         self._settings_window: tk.Toplevel | None = None
@@ -89,6 +91,7 @@ class OperatorScreen(ctk.CTkFrame):
         self.after_idle(self._apply_responsive_layout)
         self._schedule_poll()
         self._schedule_heartbeat(delay_ms=1_000)
+        self._schedule_plc_poll(delay_ms=4_000)
 
     def _build_top_bar(self) -> None:
         self.top_bar = ctk.CTkFrame(self, fg_color=APP_BG, corner_radius=0)
@@ -120,10 +123,10 @@ class OperatorScreen(ctk.CTkFrame):
         self.context_bar = ctk.CTkFrame(self, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
         self.context_bar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         self.context_labels = {
-            "operator": ctk.CTkLabel(self.context_bar, textvariable=self.operator_context, font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY),
-            "line": ctk.CTkLabel(self.context_bar, textvariable=self.line_context, text_color=TEXT_SECONDARY),
-            "station": ctk.CTkLabel(self.context_bar, textvariable=self.station_context, text_color=TEXT_SECONDARY),
-            "template": ctk.CTkLabel(self.context_bar, textvariable=self.template_context, text_color=TEXT_SECONDARY),
+            "operator": ctk.CTkLabel(self.context_bar, textvariable=self.operator_context, font=("Segoe UI", 13, "bold"), text_color=TEXT_PRIMARY),
+            "line": ctk.CTkLabel(self.context_bar, textvariable=self.line_context, font=("Segoe UI", 11), text_color=TEXT_SECONDARY),
+            "station": ctk.CTkLabel(self.context_bar, textvariable=self.station_context, font=("Segoe UI", 11), text_color=TEXT_SECONDARY),
+            "template": ctk.CTkLabel(self.context_bar, textvariable=self.template_context, font=("Segoe UI", 11), text_color=TEXT_SECONDARY),
         }
         self._layout_context_bar(compact=False)
 
@@ -146,6 +149,8 @@ class OperatorScreen(ctk.CTkFrame):
                 text_color=BADGE_COLORS["neutral"][1],
                 font=("Segoe UI", 10, "bold"),
                 corner_radius=999,
+                height=28,
+                padx=12,
             )
             self.badges[key] = label
         self._layout_status_strip(compact=False)
@@ -279,11 +284,27 @@ class OperatorScreen(ctk.CTkFrame):
         self.result_panel = ResultPanel(self.sidebar_inner)
         self.result_panel.grid(row=1, column=0, sticky="ew", pady=(0, 8))
 
-        events = ttk.LabelFrame(self.sidebar_inner, text="Recent Events", padding=8)
-        events.grid(row=2, column=0, sticky="nsew")
+        events_frame = ctk.CTkFrame(self.sidebar_inner, fg_color=PANEL_BG, corner_radius=16, border_width=1, border_color=BORDER)
+        events_frame.grid(row=2, column=0, sticky="nsew")
         self.sidebar_inner.rowconfigure(2, weight=1)
-        self.recent_list = tk.Listbox(events, height=12)
-        self.recent_list.pack(fill="both", expand=True)
+        ctk.CTkLabel(events_frame, text="Recent Events", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).pack(
+            anchor="w", padx=12, pady=(12, 6)
+        )
+        list_wrapper = ctk.CTkFrame(events_frame, fg_color=PANEL_ALT_BG, corner_radius=10, border_width=1, border_color=BORDER)
+        list_wrapper.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self.recent_list = tk.Listbox(
+            list_wrapper,
+            height=12,
+            bg=PANEL_ALT_BG,
+            fg=TEXT_PRIMARY,
+            selectbackground=ACCENT_SOFT,
+            selectforeground=TEXT_ON_ACCENT,
+            borderwidth=0,
+            relief="flat",
+            font=("Segoe UI", 9),
+            highlightthickness=0,
+        )
+        self.recent_list.pack(fill="both", expand=True, padx=4, pady=4)
 
     def _resolve_canvas_background(self) -> str:
         style = ttk.Style(self)
@@ -1034,12 +1055,6 @@ class OperatorScreen(ctk.CTkFrame):
         event_state = str((payload or {}).get("event_state") or "idle").upper()
         event_tone = "success" if event_state == "DECISION_COMMITTED" else "info" if event_state not in {"IDLE", "COOLDOWN"} else "neutral"
         self._set_badge("EVENT", event_state, event_tone)
-        # PLC badge: initialise to "-" only if it has never been set (text still shows key: -).
-        # Subsequent updates come exclusively from _execute_plc_release so the
-        # last-known state persists across frame-poll cycles.
-        current_plc_text = self.badges["PLC"].cget("text")
-        if not current_plc_text or current_plc_text == "PLC: -":
-            self._set_badge("PLC", "-", "neutral")
 
     def _sync_recent_events(self, payload: dict) -> None:
         items = payload.get("recent_events") or []
@@ -1275,6 +1290,53 @@ class OperatorScreen(ctk.CTkFrame):
         run_async(self, _load, callback=lambda _result, _error: None)
         self._schedule_heartbeat()
 
+    def _schedule_plc_poll(self, *, delay_ms: int | None = None) -> None:
+        if self._closed:
+            return
+        if self._plc_poll_after_id:
+            try:
+                self.after_cancel(self._plc_poll_after_id)
+            except tk.TclError:
+                pass
+        wait = PLC_POLL_INTERVAL_MS if delay_ms is None else max(500, int(delay_ms))
+        self._plc_poll_after_id = self.after(wait, self._poll_plc_status)
+
+    def _poll_plc_status(self) -> None:
+        self._plc_poll_after_id = None
+        if self._closed:
+            return
+        if not getattr(self.state, "token", None):
+            self._schedule_plc_poll()
+            return
+
+        def _load():
+            return self.api.plc_status()
+
+        def _on_done(result, error):
+            if self._closed:
+                return
+            if result and not error:
+                self._update_plc_badge_from_status(result)
+
+        run_async(self, _load, callback=_on_done)
+        self._schedule_plc_poll()
+
+    def _update_plc_badge_from_status(self, status: dict) -> None:
+        if not status.get("enabled", True):
+            self._set_badge("PLC", "DISABLED", "neutral")
+            return
+        if not status.get("running"):
+            self._set_badge("PLC", "STOPPED", "danger")
+            return
+        connected = status.get("connected", False)
+        clamp_engaged = status.get("clamp_engaged", False)
+        if not connected:
+            self._set_badge("PLC", "DISCONN", "warning")
+        elif clamp_engaged:
+            self._set_badge("PLC", "ENGAGED", "warning")
+        else:
+            self._set_badge("PLC", "READY", "success")
+
     def _poll_ui(self) -> None:
         if self._closed:
             return
@@ -1427,6 +1489,12 @@ class OperatorScreen(ctk.CTkFrame):
             except tk.TclError:
                 pass
             self._heartbeat_after_id = None
+        if self._plc_poll_after_id:
+            try:
+                self.after_cancel(self._plc_poll_after_id)
+            except tk.TclError:
+                pass
+            self._plc_poll_after_id = None
         if hasattr(self, "sidebar_canvas"):
             self.sidebar_canvas.unbind_all("<MouseWheel>")
         self._close_settings()

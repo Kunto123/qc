@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -9,10 +10,11 @@ from client_tk.app.components.async_bridge import run_async
 from client_tk.app.components.scrollable_frame import AutoHideScrollbar, ScrollableFrame
 from client_tk.app.screens.engineer.view import EngineerScreen
 from client_tk.app.components.template_forms import JsonEditor, LabeledValuePanel, TemplateEditorForm
-from client_tk.app.theme import APP_BG, ACCENT, ACCENT_HOVER, BORDER, SHELL_BG, TEXT_ON_ACCENT, TEXT_PRIMARY, TEXT_SECONDARY
-
-
-MUTED_TEXT = TEXT_SECONDARY
+from client_tk.app.theme import (
+    APP_BG, ACCENT, ACCENT_HOVER, BORDER, DANGER, DANGER_HOVER,
+    PANEL_ALT_BG, PANEL_BG, SHELL_BG, SUCCESS, SUCCESS_HOVER,
+    TEXT_ON_ACCENT, TEXT_PRIMARY, TEXT_SECONDARY,
+)
 
 
 def _safe_text(value: object, fallback: str = "-") -> str:
@@ -69,7 +71,10 @@ class AdminScreen(ctk.CTkFrame):
         self._overview_cards_visible = True
         self.workstation_tools_screen: EngineerScreen | None = None
 
+        self._last_refresh: dict[str, str] = {}
+        self._tab_refresh_after_id: str | None = None
         self.status_var = tk.StringVar(value="Admin workspace ready.")
+        self.refresh_time_var = tk.StringVar(value="")
         self.template_search_var = tk.StringVar()
         self.user_role_filter_var = tk.StringVar(value="all")
         self.template_count_var = tk.StringVar(value="0 templates")
@@ -97,6 +102,7 @@ class AdminScreen(ctk.CTkFrame):
         self.after_idle(self._apply_responsive_layout)
 
         self.refresh_all()
+        self._schedule_tab_refresh()
 
     def _build_header(self) -> None:
         self.header = ctk.CTkFrame(self, fg_color=SHELL_BG, corner_radius=0)
@@ -114,7 +120,7 @@ class AdminScreen(ctk.CTkFrame):
         self.header_identity = ctk.CTkLabel(
             self.header_top,
             text=f"{identity}  |  {_safe_text(self.state.base_url)}  |  Kelola template, deployment, user, hasil inspeksi, dashboard, dan workstation tools.",
-            text_color=MUTED_TEXT,
+            text_color=TEXT_SECONDARY,
             wraplength=860,
             justify="left",
         )
@@ -204,7 +210,9 @@ class AdminScreen(ctk.CTkFrame):
     def _build_status_bar(self) -> None:
         status_bar = ctk.CTkFrame(self, fg_color=APP_BG, corner_radius=0)
         status_bar.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 12))
-        ctk.CTkLabel(status_bar, textvariable=self.status_var, text_color=MUTED_TEXT).pack(anchor="w")
+        status_bar.columnconfigure(0, weight=1)
+        ctk.CTkLabel(status_bar, textvariable=self.status_var, text_color=TEXT_SECONDARY).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(status_bar, textvariable=self.refresh_time_var, text_color=TEXT_SECONDARY, font=("Segoe UI", 9)).grid(row=0, column=1, sticky="e")
 
     def _make_scrollable_page(self, tab: ttk.Frame, key: str) -> ttk.Frame:
         scroller = ScrollableFrame(tab)
@@ -300,27 +308,28 @@ class AdminScreen(ctk.CTkFrame):
         self.templates_left = ttk.Frame(self.templates_shell, padding=8)
         self.templates_right = ttk.Frame(self.templates_shell, padding=8)
 
-        library = ttk.LabelFrame(self.templates_left, text="Template Library", padding=12)
-        library.pack(fill="both", expand=True)
+        library = ctk.CTkFrame(self.templates_left, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        library.pack(fill="both", expand=True, padx=2, pady=2)
         library.columnconfigure(0, weight=1)
-        library.rowconfigure(3, weight=1)
+        library.rowconfigure(4, weight=1)
 
-        ttk.Label(library, text="Template aktif dan histori versi", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(
+        ctk.CTkLabel(library, text="Template Library", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(library, text="Template aktif dan histori versi", font=("Segoe UI", 11, "bold"), text_color=TEXT_PRIMARY).grid(row=1, column=0, sticky="w", padx=12)
+        ctk.CTkLabel(
             library,
             text="Cari template berdasarkan ID, nama, atau deskripsi. Double-click untuk memuat ke editor.",
-            foreground=MUTED_TEXT,
+            text_color=TEXT_SECONDARY,
             wraplength=320,
             justify="left",
-        ).grid(row=1, column=0, sticky="w", pady=(4, 8))
+        ).grid(row=2, column=0, sticky="w", padx=12, pady=(4, 8))
 
         search_row = ttk.Frame(library)
-        search_row.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        search_row.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 8))
         search_row.columnconfigure(2, weight=1)
         ttk.Label(search_row, textvariable=self.template_count_var, font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w")
         ttk.Label(search_row, text="Search").grid(row=0, column=1, sticky="w", padx=(12, 8))
         ttk.Entry(search_row, textvariable=self.template_search_var).grid(row=0, column=2, sticky="ew")
-        ttk.Button(search_row, text="Clear", command=lambda: self.template_search_var.set("")).grid(row=0, column=3, padx=(8, 0))
+        ctk.CTkButton(search_row, text="Clear", command=lambda: self.template_search_var.set(""), fg_color=PANEL_ALT_BG, hover_color=BORDER, text_color=TEXT_PRIMARY, height=28, corner_radius=6).grid(row=0, column=3, padx=(8, 0))
 
         self.template_table = self._build_table(
             library,
@@ -331,35 +340,37 @@ class AdminScreen(ctk.CTkFrame):
                 ("status", "Status", 90, "center"),
                 ("updated", "Updated", 150, "w"),
             ],
-            row=3,
+            row=4,
             height=16,
         )
         self.template_table.bind("<<TreeviewSelect>>", self._on_template_selected)
         self.template_table.bind("<Double-1>", lambda _event: self.load_selected_template(force=True))
 
-        actions = ttk.Frame(library)
-        actions.grid(row=4, column=0, sticky="ew", pady=(10, 0))
-        ttk.Button(actions, text="Refresh", command=self.refresh_templates).pack(side="left")
-        ttk.Button(actions, text="New Draft", command=self.new_template).pack(side="left", padx=6)
-        ttk.Button(actions, text="Load Selected", command=lambda: self.load_selected_template(force=True)).pack(side="left")
-        ttk.Button(actions, text="Delete Selected", command=self.delete_selected_template).pack(side="right")
+        actions = self._build_action_row(library, [
+            ("Refresh", self.refresh_templates, "neutral", "left"),
+            ("New Draft", self.new_template, "primary", "left"),
+            ("Load Selected", lambda: self.load_selected_template(force=True), "neutral", "left"),
+            ("Delete Selected", self.delete_selected_template, "danger", "right"),
+        ])
+        actions.grid(row=5, column=0, sticky="ew", padx=12, pady=(6, 10))
 
-        editor = ttk.LabelFrame(self.templates_right, text="Template Editor", padding=12)
-        editor.pack(fill="both", expand=True)
+        editor = ctk.CTkFrame(self.templates_right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        editor.pack(fill="both", expand=True, padx=2, pady=2)
         editor.columnconfigure(0, weight=1)
-        editor.rowconfigure(2, weight=1)
+        editor.rowconfigure(3, weight=1)
 
-        ttk.Label(
+        ctk.CTkLabel(editor, text="Template Editor", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(
             editor,
             text="Edit template dengan form terstruktur. Raw JSON tetap tersedia untuk advanced editing dan debugging kontrak.",
-            foreground=MUTED_TEXT,
+            text_color=TEXT_SECONDARY,
             wraplength=900,
             justify="left",
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Label(editor, textvariable=self.template_context_var, font=("Segoe UI", 9, "bold")).grid(row=1, column=0, sticky="w", pady=(8, 8))
+        ).grid(row=1, column=0, sticky="w", padx=12, pady=(4, 0))
+        ctk.CTkLabel(editor, textvariable=self.template_context_var, font=("Segoe UI", 9, "bold"), text_color=TEXT_PRIMARY).grid(row=2, column=0, sticky="w", padx=12, pady=(6, 6))
 
         editor_tabs = ctk.CTkTabview(editor, fg_color=APP_BG, corner_radius=0)
-        editor_tabs.grid(row=2, column=0, sticky="nsew")
+        editor_tabs.grid(row=3, column=0, sticky="nsew", padx=12)
 
         editor_tabs.add("Structured Form")
         editor_tabs.add("Raw JSON")
@@ -379,12 +390,13 @@ class AdminScreen(ctk.CTkFrame):
         self.template_raw_editor = JsonEditor(raw_tab, "Template Raw JSON", {})
         self.template_raw_editor.pack(fill="both", expand=True)
 
-        footer = ttk.Frame(editor)
-        footer.grid(row=3, column=0, sticky="ew", pady=(10, 0))
-        ttk.Button(footer, text="Preview Raw JSON", command=self.preview_template_json).pack(side="left")
-        ttk.Button(footer, text="Apply Raw to Form", command=self.apply_raw_template).pack(side="left", padx=6)
-        ttk.Button(footer, text="Reset Draft", command=self.new_template).pack(side="left")
-        ttk.Button(footer, text="Save Template", command=self.save_template).pack(side="right")
+        footer = self._build_action_row(editor, [
+            ("Preview Raw JSON", self.preview_template_json, "neutral", "left"),
+            ("Apply Raw to Form", self.apply_raw_template, "neutral", "left"),
+            ("Reset Draft", self.new_template, "neutral", "left"),
+            ("Save Template", self.save_template, "primary", "right"),
+        ])
+        footer.grid(row=4, column=0, sticky="ew", padx=12, pady=(6, 10))
 
     def _build_deployments_tab(self) -> None:
         self.deployments_shell = ttk.Frame(self.deployments_tab)
@@ -393,16 +405,18 @@ class AdminScreen(ctk.CTkFrame):
         self.deployments_left = ttk.Frame(self.deployments_shell, padding=8)
         self.deployments_right = ttk.Frame(self.deployments_shell, padding=8)
 
-        listing = ttk.LabelFrame(self.deployments_left, text="Active Deployments", padding=12)
-        listing.pack(fill="both", expand=True)
+        listing = ctk.CTkFrame(self.deployments_left, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        listing.pack(fill="both", expand=True, padx=2, pady=2)
         listing.columnconfigure(0, weight=1)
-        listing.rowconfigure(2, weight=1)
+        listing.rowconfigure(3, weight=1)
 
-        ttk.Label(listing, text="Deployment line/station aktif", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(listing, textvariable=self.deployment_context_var, foreground=MUTED_TEXT, wraplength=560, justify="left").grid(
-            row=1,
+        ctk.CTkLabel(listing, text="Active Deployments", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(listing, text="Deployment line/station aktif", font=("Segoe UI", 11, "bold"), text_color=TEXT_PRIMARY).grid(row=1, column=0, sticky="w", padx=12)
+        ctk.CTkLabel(listing, textvariable=self.deployment_context_var, text_color=TEXT_SECONDARY, wraplength=560, justify="left").grid(
+            row=2,
             column=0,
             sticky="w",
+            padx=12,
             pady=(4, 8),
         )
 
@@ -416,60 +430,62 @@ class AdminScreen(ctk.CTkFrame):
                 ("version", "Version", 90, "center"),
                 ("status", "Status", 90, "center"),
             ],
-            row=2,
+            row=3,
             height=16,
         )
         self.deployment_table.bind("<<TreeviewSelect>>", self._on_deployment_selected)
 
-        footer = ttk.Frame(listing)
-        footer.grid(row=3, column=0, sticky="ew", pady=(10, 0))
-        ttk.Label(footer, textvariable=self.deployment_count_var, font=("Segoe UI", 9, "bold")).pack(side="left")
-        ttk.Button(footer, text="Refresh", command=self.refresh_deployments).pack(side="right")
-        ttk.Button(footer, text="Deactivate Selected", command=self.deactivate_selected_deployment).pack(side="right", padx=(0, 6))
+        footer = ctk.CTkFrame(listing, fg_color="transparent", corner_radius=0)
+        footer.grid(row=4, column=0, sticky="ew", padx=12, pady=(6, 10))
+        ctk.CTkLabel(footer, textvariable=self.deployment_count_var, text_color=TEXT_PRIMARY, font=("Segoe UI", 9, "bold")).pack(side="left")
+        ctk.CTkButton(footer, text="Refresh", command=self.refresh_deployments, fg_color=PANEL_ALT_BG, hover_color=BORDER, text_color=TEXT_PRIMARY, height=28, corner_radius=6).pack(side="right", padx=(4, 0))
+        ctk.CTkButton(footer, text="Deactivate Selected", command=self.deactivate_selected_deployment, fg_color=DANGER, hover_color=DANGER_HOVER, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).pack(side="right", padx=(4, 0))
 
-        form_card = ttk.LabelFrame(self.deployments_right, text="Deploy Template to Line / Station", padding=12)
-        form_card.pack(fill="both", expand=True)
+        form_card = ctk.CTkFrame(self.deployments_right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        form_card.pack(fill="both", expand=True, padx=2, pady=2)
         form_card.columnconfigure(1, weight=1)
         form_card.columnconfigure(3, weight=1)
 
-        ttk.Label(
+        ctk.CTkLabel(form_card, text="Deploy Template to Line / Station", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=4, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(
             form_card,
             text=(
                 "Pilih template versi aktif lalu assign ke pasangan line/station. Operator akan menarik deployment "
                 "ini saat melakukan load deployment."
             ),
-            foreground=MUTED_TEXT,
+            text_color=TEXT_SECONDARY,
             wraplength=420,
             justify="left",
-        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+        ).grid(row=1, column=0, columnspan=4, sticky="w", padx=12, pady=(4, 10))
 
         self.dep_template_choice = tk.StringVar()
         self.dep_template_selector = ttk.Combobox(form_card, textvariable=self.dep_template_choice, state="readonly")
-        ttk.Label(form_card, text="Template").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.dep_template_selector.grid(row=1, column=1, columnspan=3, sticky="ew", pady=4)
+        ttk.Label(form_card, text="Template").grid(row=2, column=0, sticky="w", padx=(12, 8), pady=4)
+        self.dep_template_selector.grid(row=2, column=1, columnspan=3, sticky="ew", pady=4, padx=(0, 12))
         self.dep_template_selector.bind("<<ComboboxSelected>>", self._on_deployment_template_selected)
 
         self.dep_template_id = ttk.Entry(form_card)
         self.dep_version_id = ttk.Entry(form_card)
         self.dep_line = ttk.Entry(form_card)
         self.dep_station = ttk.Entry(form_card)
-        self._grid_entry(form_card, 2, 0, "Template ID", self.dep_template_id)
-        self._grid_entry(form_card, 2, 2, "Version ID", self.dep_version_id)
-        self._grid_entry(form_card, 3, 0, "Line", self.dep_line)
-        self._grid_entry(form_card, 3, 2, "Station", self.dep_station)
+        self._grid_entry(form_card, 3, 0, "Template ID", self.dep_template_id)
+        self._grid_entry(form_card, 3, 2, "Version ID", self.dep_version_id)
+        self._grid_entry(form_card, 4, 0, "Line", self.dep_line)
+        self._grid_entry(form_card, 4, 2, "Station", self.dep_station)
 
-        ttk.Label(
+        ctk.CTkLabel(
             form_card,
             text="Tip: pilih template dari dropdown agar Template ID dan Version ID terisi otomatis.",
-            foreground=MUTED_TEXT,
+            text_color=TEXT_SECONDARY,
             wraplength=420,
             justify="left",
-        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ).grid(row=5, column=0, columnspan=4, sticky="w", padx=12, pady=(8, 0))
 
-        action_bar = ttk.Frame(form_card)
-        action_bar.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(12, 0))
-        ttk.Button(action_bar, text="Deploy", command=self.deploy_template).pack(side="right")
-        ttk.Button(action_bar, text="Update Selected", command=self.update_selected_deployment).pack(side="right", padx=(0, 6))
+        action_bar = self._build_action_row(form_card, [
+            ("Update Selected", self.update_selected_deployment, "neutral", "right"),
+            ("Deploy", self.deploy_template, "primary", "right"),
+        ])
+        action_bar.grid(row=6, column=0, columnspan=4, sticky="ew", padx=12, pady=(10, 10))
 
     def _build_users_tab(self) -> None:
         self.users_shell = ttk.Frame(self.users_tab)
@@ -478,21 +494,23 @@ class AdminScreen(ctk.CTkFrame):
         self.users_left = ttk.Frame(self.users_shell, padding=8)
         self.users_right = ttk.Frame(self.users_shell, padding=8)
 
-        listing = ttk.LabelFrame(self.users_left, text="User Access", padding=12)
-        listing.pack(fill="both", expand=True)
+        listing = ctk.CTkFrame(self.users_left, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        listing.pack(fill="both", expand=True, padx=2, pady=2)
         listing.columnconfigure(0, weight=1)
-        listing.rowconfigure(3, weight=1)
+        listing.rowconfigure(4, weight=1)
 
-        ttk.Label(listing, text="Akun pengguna", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(listing, textvariable=self.user_context_var, foreground=MUTED_TEXT, wraplength=560, justify="left").grid(
-            row=1,
+        ctk.CTkLabel(listing, text="User Access", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(listing, text="Akun pengguna", font=("Segoe UI", 11, "bold"), text_color=TEXT_PRIMARY).grid(row=1, column=0, sticky="w", padx=12)
+        ctk.CTkLabel(listing, textvariable=self.user_context_var, text_color=TEXT_SECONDARY, wraplength=560, justify="left").grid(
+            row=2,
             column=0,
             sticky="w",
+            padx=12,
             pady=(4, 8),
         )
 
         filters = ttk.Frame(listing)
-        filters.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        filters.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 8))
         filters.columnconfigure(2, weight=1)
         ttk.Label(filters, textvariable=self.user_count_var, font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w")
         ttk.Label(filters, text="Role Filter").grid(row=0, column=1, sticky="w", padx=(12, 8))
@@ -512,67 +530,72 @@ class AdminScreen(ctk.CTkFrame):
                 ("status", "Status", 100, "center"),
                 ("created", "Created", 150, "w"),
             ],
-            row=3,
+            row=4,
             height=16,
         )
         self.users_table.bind("<<TreeviewSelect>>", self._on_user_selected)
 
-        action_bar = ttk.Frame(listing)
-        action_bar.grid(row=4, column=0, sticky="ew", pady=(10, 0))
-        ttk.Button(action_bar, text="Refresh", command=self.refresh_users).pack(side="left")
-        ttk.Button(action_bar, text="Enable Selected", command=lambda: self.set_selected_user_active(True)).pack(side="right")
-        ttk.Button(action_bar, text="Disable Selected", command=lambda: self.set_selected_user_active(False)).pack(side="right", padx=(0, 6))
+        action_bar = self._build_action_row(listing, [
+            ("Refresh", self.refresh_users, "neutral", "left"),
+            ("Disable Selected", lambda: self.set_selected_user_active(False), "danger", "right"),
+            ("Enable Selected", lambda: self.set_selected_user_active(True), "primary", "right"),
+        ])
+        action_bar.grid(row=5, column=0, sticky="ew", padx=12, pady=(6, 10))
 
-        form = ttk.LabelFrame(self.users_right, text="Create User", padding=12)
-        form.pack(fill="x")
+        form = ctk.CTkFrame(self.users_right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        form.pack(fill="x", padx=2, pady=2)
         form.columnconfigure(1, weight=1)
-        ttk.Label(
+        ctk.CTkLabel(form, text="Create User", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(
             form,
             text="Tambahkan akun baru untuk admin atau operator. Password wajib diisi saat create.",
-            foreground=MUTED_TEXT,
+            text_color=TEXT_SECONDARY,
             wraplength=380,
             justify="left",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(4, 10))
 
         self.user_name = ttk.Entry(form)
         self.user_pass = ttk.Entry(form, show="*")
         self.user_role = ttk.Combobox(form, values=["admin", "operator"], state="readonly")
         self.user_role.set("operator")
-        self._grid_entry(form, 1, 0, "Username", self.user_name)
-        self._grid_entry(form, 2, 0, "Password", self.user_pass)
-        ttk.Label(form, text="Role").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.user_role.grid(row=3, column=1, sticky="ew", pady=4)
-        ttk.Button(form, text="Create User", command=self.create_user).grid(row=4, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        self._grid_entry(form, 2, 0, "Username", self.user_name)
+        self._grid_entry(form, 3, 0, "Password", self.user_pass)
+        ttk.Label(form, text="Role").grid(row=4, column=0, sticky="w", padx=(12, 8), pady=4)
+        self.user_role.grid(row=4, column=1, sticky="ew", pady=4, padx=(0, 12))
+        ctk.CTkButton(form, text="Create User", command=self.create_user, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).grid(row=5, column=0, columnspan=2, sticky="e", padx=12, pady=(10, 10))
 
-        role_change = ttk.LabelFrame(self.users_right, text="Change Selected Role", padding=12)
-        role_change.pack(fill="x", pady=(10, 0))
+        role_change = ctk.CTkFrame(self.users_right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        role_change.pack(fill="x", padx=2, pady=(6, 2))
         role_change.columnconfigure(1, weight=1)
-        ttk.Label(role_change, text="Target Role").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        ctk.CTkLabel(role_change, text="Change Selected Role", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 0))
+        ttk.Label(role_change, text="Target Role").grid(row=1, column=0, sticky="w", padx=(12, 8), pady=4)
         self.user_role_change = ttk.Combobox(role_change, values=["admin", "operator"], state="readonly")
         self.user_role_change.set("operator")
-        self.user_role_change.grid(row=0, column=1, sticky="ew", pady=4)
-        ttk.Button(role_change, text="Apply to Selected User", command=self.change_selected_user_role).grid(
-            row=1,
+        self.user_role_change.grid(row=1, column=1, sticky="ew", pady=4, padx=(0, 12))
+        ctk.CTkButton(role_change, text="Apply to Selected User", command=self.change_selected_user_role, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).grid(
+            row=2,
             column=0,
             columnspan=2,
             sticky="e",
-            pady=(8, 0),
+            padx=12,
+            pady=(8, 10),
         )
 
     def _build_results_tab(self) -> None:
         self.results_tab.columnconfigure(0, weight=1)
         self.results_tab.rowconfigure(1, weight=1)
 
-        filters = ttk.LabelFrame(self.results_tab, text="Inspection Filters", padding=10)
+        filters = ctk.CTkFrame(self.results_tab, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
         filters.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
         for index in range(10):
             filters.columnconfigure(index, weight=1 if index % 2 else 0)
 
-        ttk.Label(
+        ctk.CTkLabel(filters, text="Inspection Filters", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=10, sticky="w", padx=10, pady=(10, 0))
+        ctk.CTkLabel(
             filters,
             text="Filter hasil inspeksi lalu double-click row untuk membuka detail lengkap.",
-            foreground=MUTED_TEXT,
-        ).grid(row=0, column=0, columnspan=10, sticky="w", pady=(0, 8))
+            text_color=TEXT_SECONDARY,
+        ).grid(row=1, column=0, columnspan=10, sticky="w", padx=10, pady=(4, 8))
 
         self.result_filter_line = ttk.Entry(filters)
         self.result_filter_station = ttk.Entry(filters)
@@ -587,17 +610,17 @@ class AdminScreen(ctk.CTkFrame):
         )
         self.result_filter_decision.set("")
         self.result_filter_push_status_var.set("")
-        self._grid_entry(filters, 1, 0, "Line", self.result_filter_line)
-        self._grid_entry(filters, 1, 2, "Station", self.result_filter_station)
-        self._grid_entry(filters, 1, 4, "Part", self.result_filter_part)
-        self._grid_entry(filters, 2, 0, "Template Ver", self.result_filter_template)
-        ttk.Label(filters, text="Decision").grid(row=2, column=2, sticky="w", padx=(0, 8), pady=4)
-        self.result_filter_decision.grid(row=2, column=3, sticky="ew", pady=4)
-        ttk.Label(filters, text="Push Status").grid(row=2, column=4, sticky="w", padx=(0, 8), pady=4)
-        self.result_filter_push_status.grid(row=2, column=5, sticky="ew", pady=4)
-        ttk.Button(filters, text="Reset", command=self._reset_results_filters).grid(row=2, column=7, sticky="e", pady=4)
-        ttk.Button(filters, text="Refresh", command=self.refresh_results).grid(row=2, column=8, sticky="e", pady=4, padx=(6, 0))
-        ttk.Button(filters, text="Export CSV", command=self._export_csv).grid(row=2, column=9, sticky="e", pady=4, padx=(6, 0))
+        self._grid_entry(filters, 2, 0, "Line", self.result_filter_line)
+        self._grid_entry(filters, 2, 2, "Station", self.result_filter_station)
+        self._grid_entry(filters, 2, 4, "Part", self.result_filter_part)
+        self._grid_entry(filters, 3, 0, "Template Ver", self.result_filter_template)
+        ttk.Label(filters, text="Decision").grid(row=3, column=2, sticky="w", padx=(0, 8), pady=4)
+        self.result_filter_decision.grid(row=3, column=3, sticky="ew", pady=4)
+        ttk.Label(filters, text="Push Status").grid(row=3, column=4, sticky="w", padx=(0, 8), pady=4)
+        self.result_filter_push_status.grid(row=3, column=5, sticky="ew", pady=4)
+        ctk.CTkButton(filters, text="Reset", command=self._reset_results_filters, fg_color=PANEL_ALT_BG, hover_color=BORDER, text_color=TEXT_PRIMARY, height=28, corner_radius=6).grid(row=3, column=7, sticky="e", pady=4)
+        ctk.CTkButton(filters, text="Refresh", command=self.refresh_results, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).grid(row=3, column=8, sticky="e", pady=4, padx=(6, 0))
+        ctk.CTkButton(filters, text="⬇ Export CSV", command=self._export_csv, fg_color=SUCCESS_HOVER, hover_color=SUCCESS, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).grid(row=3, column=9, sticky="e", pady=(4, 10), padx=(12, 10))
 
         self.results_shell = ttk.Frame(self.results_tab)
         self.results_shell.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
@@ -605,12 +628,13 @@ class AdminScreen(ctk.CTkFrame):
         self.results_left = ttk.Frame(self.results_shell, padding=8)
         self.results_right = ttk.Frame(self.results_shell, padding=8)
 
-        listing = ttk.LabelFrame(self.results_left, text="Inspection Results", padding=12)
-        listing.pack(fill="both", expand=True)
-        ttk.Label(listing, textvariable=self.results_context_var, foreground=MUTED_TEXT, wraplength=560, justify="left").pack(
-            anchor="w"
+        listing = ctk.CTkFrame(self.results_left, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        listing.pack(fill="both", expand=True, padx=2, pady=2)
+        ctk.CTkLabel(listing, text="Inspection Results", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).pack(anchor="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(listing, textvariable=self.results_context_var, text_color=TEXT_SECONDARY, wraplength=560, justify="left").pack(
+            anchor="w", padx=12
         )
-        ttk.Label(listing, textvariable=self.results_count_var, font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(8, 8))
+        ctk.CTkLabel(listing, textvariable=self.results_count_var, font=("Segoe UI", 9, "bold"), text_color=TEXT_PRIMARY).pack(anchor="w", padx=12, pady=(6, 6))
 
         self.results_table = self._build_table(
             listing,
@@ -631,15 +655,16 @@ class AdminScreen(ctk.CTkFrame):
         self.results_table.bind("<<TreeviewSelect>>", lambda _event: self.open_result())
         self.results_table.bind("<Double-1>", lambda _event: self.open_result())
 
-        result_actions = ttk.Frame(listing)
-        result_actions.pack(fill="x", pady=(10, 0))
-        ttk.Button(result_actions, text="Retry Failed Visible", command=self.retry_visible_failed_pushes).pack(side="left")
-        ttk.Button(result_actions, text="Open Selected", command=self.open_result).pack(side="right")
-        ttk.Button(result_actions, text="Delete Selected", command=self.delete_selected_result).pack(side="right", padx=(0, 6))
-        ttk.Button(result_actions, text="Retry Selected Push", command=self.retry_selected_push).pack(side="right", padx=(0, 6))
+        result_actions = self._build_action_row(listing, [
+            ("Retry Failed Visible", self.retry_visible_failed_pushes, "neutral", "left"),
+            ("Open Selected", self.open_result, "neutral", "right"),
+            ("Retry Selected Push", self.retry_selected_push, "neutral", "right"),
+            ("Delete Selected", self.delete_selected_result, "danger", "right"),
+        ])
+        result_actions.pack(fill="x", padx=12, pady=(8, 0))
 
         correction_actions = ttk.Frame(listing)
-        correction_actions.pack(fill="x", pady=(8, 0))
+        correction_actions.pack(fill="x", padx=12, pady=(6, 10))
         ttk.Label(correction_actions, text="Decision").pack(side="left")
         self.result_correction_decision = ttk.Combobox(
             correction_actions,
@@ -651,7 +676,7 @@ class AdminScreen(ctk.CTkFrame):
         ttk.Label(correction_actions, text="Reason").pack(side="left")
         self.result_correction_reason = ttk.Entry(correction_actions, width=34)
         self.result_correction_reason.pack(side="left", fill="x", expand=True, padx=(6, 8))
-        ttk.Button(correction_actions, text="Apply Correction", command=self.apply_result_correction).pack(side="left")
+        ctk.CTkButton(correction_actions, text="Apply Correction", command=self.apply_result_correction, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).pack(side="left")
 
         self.results_right.columnconfigure(0, weight=1)
         self.results_right.rowconfigure(0, weight=1)
@@ -699,16 +724,17 @@ class AdminScreen(ctk.CTkFrame):
         self.dashboard_tab.columnconfigure(0, weight=1)
         self.dashboard_tab.rowconfigure(2, weight=1)
 
-        filters = ttk.LabelFrame(self.dashboard_tab, text="Dashboard Filters", padding=10)
+        filters = ctk.CTkFrame(self.dashboard_tab, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
         filters.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
         for index in range(12):
             filters.columnconfigure(index, weight=1 if index % 2 else 0)
 
-        ttk.Label(
+        ctk.CTkLabel(filters, text="Dashboard Filters", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=12, sticky="w", padx=10, pady=(10, 0))
+        ctk.CTkLabel(
             filters,
             text="Gunakan filter yang sama dengan hasil inspeksi untuk melihat agregasi dan tren bucket.",
-            foreground=MUTED_TEXT,
-        ).grid(row=0, column=0, columnspan=12, sticky="w", pady=(0, 8))
+            text_color=TEXT_SECONDARY,
+        ).grid(row=1, column=0, columnspan=12, sticky="w", padx=10, pady=(4, 8))
 
         self.dashboard_filter_line = ttk.Entry(filters)
         self.dashboard_filter_station = ttk.Entry(filters)
@@ -716,14 +742,14 @@ class AdminScreen(ctk.CTkFrame):
         self.dashboard_filter_template = ttk.Entry(filters)
         self.dashboard_granularity = ttk.Combobox(filters, values=["minute", "hour", "day"], state="readonly")
         self.dashboard_granularity.set("hour")
-        self._grid_entry(filters, 1, 0, "Line", self.dashboard_filter_line)
-        self._grid_entry(filters, 1, 2, "Station", self.dashboard_filter_station)
-        self._grid_entry(filters, 1, 4, "Part", self.dashboard_filter_part)
-        self._grid_entry(filters, 2, 0, "Template Ver", self.dashboard_filter_template)
-        ttk.Label(filters, text="Granularity").grid(row=2, column=2, sticky="w", padx=(0, 8), pady=4)
-        self.dashboard_granularity.grid(row=2, column=3, sticky="ew", pady=4)
-        ttk.Button(filters, text="Reset", command=self._reset_dashboard_filters).grid(row=2, column=9, sticky="e", pady=4)
-        ttk.Button(filters, text="Refresh Dashboard", command=self.refresh_dashboard).grid(row=2, column=10, columnspan=2, sticky="e", pady=4, padx=(6, 0))
+        self._grid_entry(filters, 2, 0, "Line", self.dashboard_filter_line)
+        self._grid_entry(filters, 2, 2, "Station", self.dashboard_filter_station)
+        self._grid_entry(filters, 2, 4, "Part", self.dashboard_filter_part)
+        self._grid_entry(filters, 3, 0, "Template Ver", self.dashboard_filter_template)
+        ttk.Label(filters, text="Granularity").grid(row=3, column=2, sticky="w", padx=(0, 8), pady=4)
+        self.dashboard_granularity.grid(row=3, column=3, sticky="ew", pady=4)
+        ctk.CTkButton(filters, text="Reset", command=self._reset_dashboard_filters, fg_color=PANEL_ALT_BG, hover_color=BORDER, text_color=TEXT_PRIMARY, height=28, corner_radius=6).grid(row=3, column=9, sticky="e", pady=4)
+        ctk.CTkButton(filters, text="Refresh Dashboard", command=self.refresh_dashboard, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).grid(row=3, column=10, columnspan=2, sticky="e", pady=(4, 8), padx=(6, 10))
 
         self.dashboard_cards_frame = ttk.Frame(self.dashboard_tab, padding=(8, 0, 8, 6))
         self.dashboard_cards_frame.grid(row=1, column=0, sticky="ew")
@@ -748,12 +774,13 @@ class AdminScreen(ctk.CTkFrame):
         trend_tab = body_tabs.tab("Trend")
         raw_tab = body_tabs.tab("Raw JSON")
 
-        bucket_card = ttk.LabelFrame(trend_tab, text="Bucket Trend", padding=12)
-        bucket_card.pack(fill="both", expand=True)
-        ttk.Label(bucket_card, textvariable=self.dashboard_context_var, foreground=MUTED_TEXT, wraplength=760, justify="left").pack(
-            anchor="w"
+        bucket_card = ctk.CTkFrame(trend_tab, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        bucket_card.pack(fill="both", expand=True, padx=2, pady=2)
+        ctk.CTkLabel(bucket_card, text="Bucket Trend", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).pack(anchor="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(bucket_card, textvariable=self.dashboard_context_var, text_color=TEXT_SECONDARY, wraplength=760, justify="left").pack(
+            anchor="w", padx=12
         )
-        ttk.Label(bucket_card, textvariable=self.dashboard_count_var, font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(8, 8))
+        ctk.CTkLabel(bucket_card, textvariable=self.dashboard_count_var, font=("Segoe UI", 9, "bold"), text_color=TEXT_PRIMARY).pack(anchor="w", padx=12, pady=(6, 6))
 
         self.dashboard_bucket_table = self._build_table(
             bucket_card,
@@ -820,11 +847,32 @@ class AdminScreen(ctk.CTkFrame):
         return tree
 
     def _grid_entry(self, master, row: int, column: int, label: str, widget) -> None:
-        ttk.Label(master, text=label).grid(row=row, column=column, sticky="w", padx=(0, 8), pady=4)
+        left_pad = 12 if column == 0 else 4
+        ttk.Label(master, text=label).grid(row=row, column=column, sticky="w", padx=(left_pad, 8), pady=4)
         widget.grid(row=row, column=column + 1, sticky="ew", pady=4)
 
     def _clear_tree(self, tree: ttk.Treeview) -> None:
         tree.delete(*tree.get_children())
+
+    def _build_action_row(self, master, buttons: list[tuple]) -> ctk.CTkFrame:
+        """Create a consistent action row. buttons = [(label, command, tone, pack_side)]
+        tone: "primary" | "danger" | "neutral"
+        pack_side: "left" | "right"
+        """
+        _colors = {
+            "primary": (ACCENT, ACCENT_HOVER, TEXT_ON_ACCENT),
+            "danger": (DANGER, DANGER_HOVER, TEXT_ON_ACCENT),
+            "neutral": (PANEL_ALT_BG, BORDER, TEXT_PRIMARY),
+        }
+        frame = ctk.CTkFrame(master, fg_color="transparent", corner_radius=0)
+        for label, command, tone, side in buttons:
+            fg, hover, text_clr = _colors.get(tone, _colors["neutral"])
+            ctk.CTkButton(
+                frame, text=label, command=command,
+                fg_color=fg, hover_color=hover, text_color=text_clr,
+                height=28, corner_radius=6,
+            ).pack(side=side, padx=(0, 4) if side == "left" else (4, 0))
+        return frame
 
     def _selected_treeview_id(self, tree: ttk.Treeview) -> int | None:
         selection = tree.selection()
@@ -846,6 +894,67 @@ class AdminScreen(ctk.CTkFrame):
 
     def _set_status(self, message: str) -> None:
         self.status_var.set(message)
+
+    def _confirm_action(self, title: str, message: str) -> bool:
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(title)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        dialog.attributes("-topmost", True)
+        result: list[bool] = [False]
+
+        ctk.CTkLabel(dialog, text=message, wraplength=340, justify="left", text_color=TEXT_PRIMARY, font=("Segoe UI", 11)).pack(padx=20, pady=(20, 12))
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(padx=20, pady=(0, 16), fill="x")
+
+        def _cancel():
+            dialog.destroy()
+
+        def _confirm():
+            result[0] = True
+            dialog.destroy()
+
+        ctk.CTkButton(btn_frame, text="Cancel", command=_cancel, fg_color=PANEL_ALT_BG, hover_color=BORDER, text_color=TEXT_PRIMARY, height=30, corner_radius=6).pack(side="left", expand=True, fill="x", padx=(0, 4))
+        ctk.CTkButton(btn_frame, text="Confirm", command=_confirm, fg_color=DANGER, hover_color=DANGER_HOVER, text_color=TEXT_ON_ACCENT, height=30, corner_radius=6).pack(side="left", expand=True, fill="x", padx=(4, 0))
+
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dialog.winfo_reqwidth()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - dialog.winfo_reqheight()) // 3
+        dialog.geometry(f"+{x}+{y}")
+        self.wait_window(dialog)
+        return result[0]
+
+    def _schedule_tab_refresh(self, interval_ms: int = 60_000) -> None:
+        if self._tab_refresh_after_id is not None:
+            try:
+                self.after_cancel(self._tab_refresh_after_id)
+            except Exception:  # noqa: BLE001
+                pass
+        self._tab_refresh_after_id = self.after(interval_ms, self._do_tab_refresh)
+
+    def _do_tab_refresh(self) -> None:
+        if not self.winfo_exists():
+            return
+        try:
+            current_tab = self._notebook.get()
+        except Exception:  # noqa: BLE001
+            current_tab = None
+        _tab_refresh_map = {
+            "Templates": self.refresh_templates,
+            "Deployments": self.refresh_deployments,
+            "Users": self.refresh_users,
+            "Results": self.refresh_results,
+            "Dashboard": self.refresh_dashboard,
+        }
+        if current_tab in _tab_refresh_map:
+            _tab_refresh_map[current_tab]()
+        self._schedule_tab_refresh()
+
+    def _record_refresh(self, tab_key: str) -> None:
+        now = datetime.datetime.now().strftime("%H:%M:%S")
+        self._last_refresh[tab_key] = now
+        parts = [f"{k}: {v}" for k, v in self._last_refresh.items()]
+        self.refresh_time_var.set("Last refresh — " + "  |  ".join(parts))
 
     def _update_overview_cards(self) -> None:
         template_active = sum(1 for item in self._templates_cache if bool(item.get("is_active", True)))
@@ -913,6 +1022,8 @@ class AdminScreen(ctk.CTkFrame):
             items.append(item)
 
         self._clear_tree(self.template_table)
+        if not items:
+            self.template_table.insert("", "end", iid="__empty__", values=("—", "Tidak ada template. Coba refresh.", "", "", ""))
         for item in items:
             self.template_table.insert(
                 "",
@@ -960,6 +1071,7 @@ class AdminScreen(ctk.CTkFrame):
             self.refresh_template_dependencies()
             self._render_templates()
             self._update_overview_cards()
+            self._record_refresh("Templates")
             self._set_status(f"Loaded {len(self._templates_cache)} templates.")
 
         run_async(self, self.api.list_templates, callback=_done)
@@ -1060,7 +1172,7 @@ class AdminScreen(ctk.CTkFrame):
         template_id = self._selected_treeview_id(self.template_table)
         if template_id is None:
             return
-        if not messagebox.askyesno("Templates", f"Delete template #{template_id}?"):
+        if not self._confirm_action("Hapus Template", f"Hapus template #{template_id}?\n\nTindakan ini tidak bisa dibatalkan."):
             return
         try:
             self.api.delete_template(template_id)
@@ -1086,6 +1198,8 @@ class AdminScreen(ctk.CTkFrame):
 
     def _render_deployments(self) -> None:
         self._clear_tree(self.deployment_table)
+        if not self._deployments_cache:
+            self.deployment_table.insert("", "end", iid="__empty__", values=("—", "Tidak ada deployment.", "", "", "", ""))
         for item in self._deployments_cache:
             self.deployment_table.insert(
                 "",
@@ -1132,6 +1246,7 @@ class AdminScreen(ctk.CTkFrame):
             self._deployments_cache = list(items)
             self._render_deployments()
             self._update_overview_cards()
+            self._record_refresh("Deployments")
             self._set_status(f"Loaded {len(self._deployments_cache)} deployments.")
 
         run_async(self, self.api.list_deployments, callback=_done)
@@ -1144,11 +1259,14 @@ class AdminScreen(ctk.CTkFrame):
             "station_id": self.dep_station.get().strip(),
         }
         try:
-            self.api.deploy_template(payload)
+            result = self.api.deploy_template(payload)
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Deployments", str(exc))
             return
+        new_id = int(result.get("id") or 0) if isinstance(result, dict) else None
         self.refresh_deployments()
+        if new_id:
+            self.after(200, lambda: self._select_tree_item(self.deployment_table, new_id))
         self._set_status(
             f"Deployment dibuat untuk {payload['line_id']}/{payload['station_id']} memakai template version {payload['template_version_id']}."
         )
@@ -1196,7 +1314,7 @@ class AdminScreen(ctk.CTkFrame):
         deployment_id = self._selected_treeview_id(self.deployment_table)
         if deployment_id is None:
             return
-        if not messagebox.askyesno("Deployments", f"Deactivate deployment #{deployment_id}?"):
+        if not self._confirm_action("Nonaktifkan Deployment", f"Nonaktifkan deployment #{deployment_id}?\n\nOperator tidak akan bisa memuat deployment ini lagi."):
             return
         try:
             self.api.deactivate_deployment(deployment_id)
@@ -1221,6 +1339,8 @@ class AdminScreen(ctk.CTkFrame):
             items.append(item)
 
         self._clear_tree(self.users_table)
+        if not items:
+            self.users_table.insert("", "end", iid="__empty__", values=("—", "Tidak ada user ditemukan.", "", "", ""))
         for item in items:
             self.users_table.insert(
                 "",
@@ -1261,6 +1381,7 @@ class AdminScreen(ctk.CTkFrame):
             self._users_cache = list(items)
             self._render_users()
             self._update_overview_cards()
+            self._record_refresh("Users")
             self._set_status(f"Loaded {len(self._users_cache)} users.")
 
         run_async(self, self.api.list_users, callback=_done)
@@ -1273,13 +1394,16 @@ class AdminScreen(ctk.CTkFrame):
             messagebox.showerror("Users", "Username dan password wajib diisi.")
             return
         try:
-            self.api.create_user({"username": username, "password": password, "role": role})
+            new_user = self.api.create_user({"username": username, "password": password, "role": role})
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Users", str(exc))
             return
+        new_id = int(new_user.get("id") or 0) if isinstance(new_user, dict) else None
         self.user_name.delete(0, "end")
         self.user_pass.delete(0, "end")
         self.refresh_users()
+        if new_id:
+            self.after(200, lambda: self._select_tree_item(self.users_table, new_id))
         self._set_status(f"User `{username}` berhasil dibuat.")
 
     def change_selected_user_role(self) -> None:
@@ -1291,7 +1415,7 @@ class AdminScreen(ctk.CTkFrame):
         if new_role not in {"admin", "operator"}:
             messagebox.showerror("Users", "Role harus admin atau operator.")
             return
-        if not messagebox.askyesno("Users", f"Ubah role user #{user_id} menjadi '{new_role}'?"):
+        if not self._confirm_action("Ubah Role User", f"Ubah role user #{user_id} menjadi '{new_role}'?"):
             return
         try:
             self.api.change_user_role(user_id, new_role)
@@ -1306,7 +1430,7 @@ class AdminScreen(ctk.CTkFrame):
         if user_id is None:
             return
         action = "enable" if is_active else "disable"
-        if not messagebox.askyesno("Users", f"{action.title()} user #{user_id}?"):
+        if not self._confirm_action(f"{action.title()} User", f"{action.title()} user #{user_id}?"):
             return
         try:
             self.api.set_user_active(user_id, is_active)
@@ -1346,6 +1470,8 @@ class AdminScreen(ctk.CTkFrame):
 
     def _render_results(self) -> None:
         self._clear_tree(self.results_table)
+        if not self._results_cache:
+            self.results_table.insert("", "end", iid="__empty__", values=("—", "Tidak ada data. Coba refresh atau ubah filter.", "", "", "", "", "", "", ""))
         for item in self._results_cache:
             self.results_table.insert(
                 "",
@@ -1376,6 +1502,7 @@ class AdminScreen(ctk.CTkFrame):
             self._results_cache = list(items)
             self._render_results()
             self._update_overview_cards()
+            self._record_refresh("Results")
             if not self._results_cache:
                 self.result_summary.reset()
                 self.result_detail.set_payload({})
@@ -1470,7 +1597,7 @@ class AdminScreen(ctk.CTkFrame):
         if decision == "ACCEPT":
             reason = None
 
-        if not messagebox.askyesno("Results", f"Terapkan koreksi untuk result #{result_id}?"):
+        if not self._confirm_action("Terapkan Koreksi", f"Terapkan koreksi untuk result #{result_id}?\n\nDecision: {decision}"):
             return
 
         patch = {
@@ -1492,7 +1619,7 @@ class AdminScreen(ctk.CTkFrame):
         if result_id is None:
             messagebox.showwarning("Results", "Pilih hasil inspeksi yang ingin dihapus.")
             return
-        if not messagebox.askyesno("Results", f"Hapus inspection result #{result_id}? Tindakan ini tidak bisa dibatalkan."):
+        if not self._confirm_action("Hapus Result", f"Hapus inspection result #{result_id}?\n\nTindakan ini tidak bisa dibatalkan."):
             return
         try:
             self.api.delete_inspection(result_id)
@@ -1587,6 +1714,8 @@ class AdminScreen(ctk.CTkFrame):
 
     def _render_dashboard_buckets(self, buckets: list[dict]) -> None:
         self._clear_tree(self.dashboard_bucket_table)
+        if not buckets:
+            self.dashboard_bucket_table.insert("", "end", iid="__empty__", values=("—", "Tidak ada data. Coba refresh.", "", "", "", ""))
         for index, item in enumerate(buckets):
             self.dashboard_bucket_table.insert(
                 "",
@@ -1630,6 +1759,7 @@ class AdminScreen(ctk.CTkFrame):
             )
             self._render_dashboard_buckets(buckets)
             self.dashboard_raw.set_payload({"summary": summary, "buckets": buckets})
+            self._record_refresh("Dashboard")
             self.dashboard_context_var.set(
                 f"Summary loaded | total={summary.get('total_inspections', 0)} | granularity={bucket_params.get('granularity')}"
             )
@@ -1638,6 +1768,12 @@ class AdminScreen(ctk.CTkFrame):
         run_async(self, _load, callback=_done)
 
     def shutdown(self) -> None:
+        if self._tab_refresh_after_id is not None:
+            try:
+                self.after_cancel(self._tab_refresh_after_id)
+            except Exception:  # noqa: BLE001
+                pass
+            self._tab_refresh_after_id = None
         if self.workstation_tools_screen is None:
             return
         if not self.workstation_tools_screen.winfo_exists():
