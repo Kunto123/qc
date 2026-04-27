@@ -351,6 +351,13 @@ class InspectionSessionService:
             state.part_ready_settle_started_at = None
             part_ready_settled = False
             settle_remaining_ms = 0.0
+            state.plc_part_ready_triggered = False
+
+        # Trigger PLC clamp hold on the first frame where part is settled.
+        if part_ready_settled and not state.plc_part_ready_triggered:
+            state.plc_part_ready_triggered = True
+            if self._plc_worker is not None:
+                self._plc_worker.enqueue_part_ready(event_id=state.current_event_id)
 
         # Augment part_ready dict in-place with settle observability fields.
         part_ready["part_ready_settled"] = part_ready_settled
@@ -466,11 +473,6 @@ class InspectionSessionService:
                 sticker_roi_meta=sticker_roi_meta,
                 committed_at=datetime.now(UTC),
             )
-            if self._plc_worker is not None:
-                self._plc_worker.enqueue_commit(
-                    event_id=event_id,
-                    decision=str(validation.get("decision") or ""),
-                )
         timings["persistence_ms"] = _elapsed_ms(persistence_started)
 
         normalized_response_mode = str(response_mode or "").strip().lower()

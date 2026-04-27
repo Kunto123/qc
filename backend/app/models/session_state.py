@@ -43,3 +43,6 @@ class SessionState:
     # in the current ready-run.  Reset to None whenever part_ready becomes False or
     # presence is lost.
     part_ready_settle_started_at: datetime | None = None
+    # PLC constant-output mode: True once enqueue_part_ready() has been called for
+    # the current ready-run, preventing duplicate triggers.  Reset when part leaves.
+    plc_part_ready_triggered: bool = False

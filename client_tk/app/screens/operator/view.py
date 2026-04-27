@@ -17,7 +17,7 @@ from client_tk.app.components.scrollable_frame import ScrollableFrame
 from client_tk.app.config import DEFAULT_UPLOAD_INTERVAL_MS
 from client_tk.app.services.camera_capture import CameraCaptureService
 from client_tk.app.services.frame_upload import FrameUploadService
-from client_tk.app.theme import APP_BG, ACCENT_SOFT, BORDER, PANEL_ALT_BG, PANEL_BG, SHELL_BG, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, ACCENT_HOVER, TEXT_ON_ACCENT
+from client_tk.app.theme import APP_BG, ACCENT_SOFT, BORDER, PANEL_ALT_BG, PANEL_BG, SHELL_BG, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, ACCENT_HOVER, TEXT_ON_ACCENT, SUCCESS, SUCCESS_HOVER
 
 
 BADGE_COLORS = {
@@ -220,6 +220,20 @@ class OperatorScreen(ctk.CTkFrame):
             text_color=TEXT_SECONDARY,
         )
         self.decision_subtitle.pack(anchor="w", padx=12, pady=(0, 6))
+
+        self.stiker_terpasang_btn = ctk.CTkButton(
+            self.decision_status_frame,
+            text="✓ Stiker Terpasang",
+            command=self._on_stiker_terpasang,
+            fg_color=SUCCESS,
+            hover_color=SUCCESS_HOVER,
+            text_color=TEXT_ON_ACCENT,
+            font=("Segoe UI", 11, "bold"),
+            corner_radius=10,
+            height=34,
+            state="disabled",
+        )
+        self.stiker_terpasang_btn.pack(fill="x", padx=12, pady=(0, 4))
 
         self.plc_release_btn = ctk.CTkButton(
             self.decision_status_frame,
@@ -875,6 +889,22 @@ class OperatorScreen(ctk.CTkFrame):
         bg, fg = BADGE_COLORS.get(tone, BADGE_COLORS["neutral"])
         self.badges[key].configure(text=f"{key}: {value}", fg_color=bg, text_color=fg)
 
+    def _on_stiker_terpasang(self) -> None:
+        self.stiker_terpasang_btn.configure(state="disabled")
+
+        def _work():
+            return self.api.plc_sticker_done()
+
+        def _on_done(result, error):
+            if error:
+                self.plc_status_label.configure(text=f"Gagal release: {error}")
+                self.stiker_terpasang_btn.configure(state="normal")
+            else:
+                self.plc_status_label.configure(text="Stiker terpasang — clamp dilepas.")
+                self._set_badge("PLC", "READY", "success")
+
+        run_async(self, _work, callback=_on_done)
+
     def _open_plc_release_dialog(self) -> None:
         if self._plc_release_window and self._plc_release_window.winfo_exists():
             self._plc_release_window.lift()
@@ -1324,18 +1354,23 @@ class OperatorScreen(ctk.CTkFrame):
     def _update_plc_badge_from_status(self, status: dict) -> None:
         if not status.get("enabled", True):
             self._set_badge("PLC", "DISABLED", "neutral")
+            self.stiker_terpasang_btn.configure(state="disabled")
             return
         if not status.get("running"):
             self._set_badge("PLC", "STOPPED", "danger")
+            self.stiker_terpasang_btn.configure(state="disabled")
             return
         connected = status.get("connected", False)
         clamp_engaged = status.get("clamp_engaged", False)
         if not connected:
             self._set_badge("PLC", "DISCONN", "warning")
+            self.stiker_terpasang_btn.configure(state="disabled")
         elif clamp_engaged:
             self._set_badge("PLC", "ENGAGED", "warning")
+            self.stiker_terpasang_btn.configure(state="normal")
         else:
             self._set_badge("PLC", "READY", "success")
+            self.stiker_terpasang_btn.configure(state="disabled")
 
     def _poll_ui(self) -> None:
         if self._closed:

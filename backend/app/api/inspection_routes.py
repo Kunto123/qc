@@ -396,6 +396,23 @@ def plc_manual_release():
     return jsonify({"ok": True, "queued": "clamp_release", "reason": reason})
 
 
+@inspection_blueprint.post("/inspection/plc/sticker-done")
+@require_roles(UserRole.OPERATOR, UserRole.ADMIN)
+def plc_sticker_done():
+    """Operator signals sticker placement is complete — releases the clamp."""
+    if plc_worker is None:
+        return jsonify({"error": "PLC worker is disabled (QC_SUITE_PLC_ENABLED=0)"}), 503
+    plc_worker.force_release(reason="sticker_done")
+    _try_audit(
+        "plc_sticker_done",
+        actor_id=g.current_user.id,
+        actor_username=g.current_user.username,
+        ip_address=_client_ip(),
+        details=json.dumps({"reason": "sticker_done"}, ensure_ascii=True),
+    )
+    return jsonify({"ok": True, "queued": "clamp_release", "reason": "sticker_done"})
+
+
 @inspection_blueprint.get("/inspection/plc/status")
 @require_roles(UserRole.ADMIN)
 def plc_status():
