@@ -129,21 +129,40 @@ cd qc-suite-python
 py -3.11 -m unittest client_tk.tests.test_ui_smoke
 ```
 
-## Remote I/O via Modbus TCP
+## Remote I/O via Modbus TCP or RTU
 
-Jika remote I/O Anda dikendalikan lewat Modbus TCP/IP, set PLC mode di `.env` lalu sesuaikan peta output sesuai datasheet perangkat.
+Pilih transport secara manual di `.env`: `tcp` untuk Modbus TCP gateway / Ethernet remote I/O, atau `rtu` untuk relay module serial RS232/RS485.
 
-Contoh minimal:
+Contoh TCP minimal:
 
 ```env
 QC_SUITE_PLC_ENABLED=1
 QC_SUITE_PLC_DRY_RUN=0
+QC_SUITE_PLC_TRANSPORT=tcp
 QC_SUITE_PLC_HOST=192.168.1.50
 QC_SUITE_PLC_PORT=502
 QC_SUITE_PLC_MODBUS_UNIT_ID=1
 QC_SUITE_PLC_MODBUS_COMMAND_MODE=coil
 QC_SUITE_PLC_MODBUS_HOLD_ADDRESS=0
 QC_SUITE_PLC_MODBUS_RELEASE_ADDRESS=0
+QC_SUITE_PLC_MODBUS_ZERO_BASED_ADDRESSING=1
+```
+
+Contoh RTU untuk relay module serial (misalnya slave id 255, coil 0/1):
+
+```env
+QC_SUITE_PLC_ENABLED=1
+QC_SUITE_PLC_DRY_RUN=0
+QC_SUITE_PLC_TRANSPORT=rtu
+QC_SUITE_PLC_SERIAL_PORT=COM3
+QC_SUITE_PLC_SERIAL_BAUDRATE=9600
+QC_SUITE_PLC_SERIAL_PARITY=N
+QC_SUITE_PLC_SERIAL_BYTESIZE=8
+QC_SUITE_PLC_SERIAL_STOPBITS=1
+QC_SUITE_PLC_MODBUS_UNIT_ID=255
+QC_SUITE_PLC_MODBUS_COMMAND_MODE=coil
+QC_SUITE_PLC_MODBUS_HOLD_ADDRESS=0
+QC_SUITE_PLC_MODBUS_RELEASE_ADDRESS=1
 QC_SUITE_PLC_MODBUS_ZERO_BASED_ADDRESSING=1
 ```
 

@@ -91,13 +91,21 @@ class AppConfig:
     # QC_SUITE_PLC_ENABLED=1  — activate the PLC worker (default off).
     # QC_SUITE_PLC_DRY_RUN=1  — log commands only, no real socket (default on so
     #   accidentally enabling PLC without hardware never opens a TCP connection).
+    # QC_SUITE_PLC_TRANSPORT=tcp|rtu — choose Modbus TCP gateway vs serial RTU relay.
     # QC_SUITE_PLC_HOST / QC_SUITE_PLC_PORT — Modbus TCP endpoint or gateway address.
+    # QC_SUITE_PLC_SERIAL_PORT / BAUDRATE / PARITY / BYTESIZE / STOPBITS — RTU serial line.
     # QC_SUITE_PLC_TIMEOUT_MS — socket connect/send timeout.
     # QC_SUITE_PLC_CLAMP_HOLD_MS — ms to keep clamp engaged before auto-release.
     plc_enabled: bool = os.getenv("QC_SUITE_PLC_ENABLED", "0").strip() == "1"
     plc_dry_run: bool = os.getenv("QC_SUITE_PLC_DRY_RUN", "1").strip() != "0"
+    plc_transport: str = os.getenv("QC_SUITE_PLC_TRANSPORT", "tcp").strip().lower() or "tcp"
     plc_host: str = os.getenv("QC_SUITE_PLC_HOST", "127.0.0.1").strip()
     plc_port: int = max(1, int(os.getenv("QC_SUITE_PLC_PORT", "5020")))
+    plc_serial_port: str = os.getenv("QC_SUITE_PLC_SERIAL_PORT", "").strip()
+    plc_serial_baudrate: int = int(os.getenv("QC_SUITE_PLC_SERIAL_BAUDRATE", "9600").strip() or "9600")
+    plc_serial_parity: str = os.getenv("QC_SUITE_PLC_SERIAL_PARITY", "N").strip().upper() or "N"
+    plc_serial_bytesize: int = int(os.getenv("QC_SUITE_PLC_SERIAL_BYTESIZE", "8").strip() or "8")
+    plc_serial_stopbits: int = int(os.getenv("QC_SUITE_PLC_SERIAL_STOPBITS", "1").strip() or "1")
     plc_timeout_ms: int = max(100, int(os.getenv("QC_SUITE_PLC_TIMEOUT_MS", "1000")))
     plc_clamp_hold_ms: int = max(0, int(os.getenv("QC_SUITE_PLC_CLAMP_HOLD_MS", "2000")))
     # Modbus TCP mapping for clamp control.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -10,7 +11,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.app.services.plc_adapter import ModbusTcpPlcAdapter
+from pymodbus.framer import FramerType
+
+from backend.app.services.plc_adapter import DryRunPlcAdapter, ModbusRtuPlcAdapter, ModbusTcpPlcAdapter, build_plc_adapter
 
 
 def _make_mock_client(*, coil_value: bool = True, register_value: int = 0) -> mock.MagicMock:
@@ -48,16 +51,90 @@ def _make_adapter(mock_client: mock.MagicMock, host: str = "10.0.0.5", port: int
         return ModbusTcpPlcAdapter(host, port, **kwargs)
 
 
+def _make_rtu_adapter(
+    mock_client: mock.MagicMock,
+    serial_port: str = "COM3",
+    **kwargs,
+) -> ModbusRtuPlcAdapter:
+    """Construct a ModbusRtuPlcAdapter with the given mock client injected."""
+    with mock.patch("backend.app.services.plc_adapter.ModbusSerialClient", return_value=mock_client):
+        return ModbusRtuPlcAdapter(serial_port, **kwargs)
+
+
+def _make_config(**overrides) -> SimpleNamespace:
+    defaults = dict(
+        plc_enabled=True,
+        plc_dry_run=False,
+        plc_transport="tcp",
+        plc_timeout_ms=750,
+        plc_modbus_unit_id=7,
+        plc_modbus_command_mode="coil",
+        plc_modbus_hold_address=12,
+        plc_modbus_release_address=12,
+        plc_modbus_hold_value=1,
+        plc_modbus_release_value=0,
+        plc_modbus_zero_based_addressing=True,
+        plc_modbus_readback_enabled=False,
+        plc_modbus_readback_mode="discrete_input",
+        plc_modbus_readback_address=4,
+        plc_modbus_readback_expected_hold_value=1,
+        plc_modbus_readback_expected_release_value=0,
+        plc_host="10.0.0.5",
+        plc_port=502,
+        plc_serial_port="COM3",
+        plc_serial_baudrate=9600,
+        plc_serial_parity="N",
+        plc_serial_bytesize=8,
+        plc_serial_stopbits=1,
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
 class ModbusTcpPlcAdapterTest(unittest.TestCase):
     def test_status_reports_adapter_name(self) -> None:
         mc = _make_mock_client()
         with mock.patch("backend.app.services.plc_adapter.ModbusTcpClient", return_value=mc):
             adapter = ModbusTcpPlcAdapter("127.0.0.1", 502, unit_id=1)
             self.assertEqual(adapter.status()["adapter"], "ModbusTcpPlcAdapter")
+            self.assertEqual(adapter.status()["transport"], "tcp")
 
             from backend.app.services.plc_adapter import TcpPlcAdapter
             compat_adapter = TcpPlcAdapter("127.0.0.1", 502, unit_id=1)
             self.assertEqual(compat_adapter.status()["adapter"], "TcpPlcAdapter")
+
+    def test_build_plc_adapter_selects_dry_run_when_disabled(self) -> None:
+        adapter = build_plc_adapter(_make_config(plc_enabled=False))
+        self.assertIsInstance(adapter, DryRunPlcAdapter)
+
+    def test_build_plc_adapter_selects_tcp(self) -> None:
+        mc = _make_mock_client()
+        with mock.patch("backend.app.services.plc_adapter.ModbusTcpClient", return_value=mc) as MockClass:
+            adapter = build_plc_adapter(_make_config(plc_transport="tcp"))
+
+        self.assertIsInstance(adapter, ModbusTcpPlcAdapter)
+        MockClass.assert_called_once_with("10.0.0.5", port=502, timeout=0.75)
+
+    def test_build_plc_adapter_selects_rtu(self) -> None:
+        mc = _make_mock_client()
+        with mock.patch("backend.app.services.plc_adapter.ModbusSerialClient", return_value=mc) as MockClass:
+            adapter = build_plc_adapter(_make_config(plc_transport="rtu", plc_modbus_unit_id=255))
+
+        self.assertIsInstance(adapter, ModbusRtuPlcAdapter)
+        self.assertEqual(adapter.status()["transport"], "rtu")
+        MockClass.assert_called_once_with(
+            port="COM3",
+            framer=FramerType.RTU,
+            baudrate=9600,
+            bytesize=8,
+            parity="N",
+            stopbits=1,
+            timeout=0.75,
+        )
+
+    def test_build_plc_adapter_rejects_invalid_transport(self) -> None:
+        with self.assertRaises(ValueError):
+            build_plc_adapter(_make_config(plc_transport="invalid"))
 
     def test_coil_mode_writes_hold_and_release(self) -> None:
         mc = _make_mock_client()
@@ -77,6 +154,36 @@ class ModbusTcpPlcAdapterTest(unittest.TestCase):
         mc.connect.assert_called_once()
         mc.write_coil.assert_any_call(12, True, device_id=7)
         mc.write_coil.assert_any_call(12, False, device_id=7)
+        self.assertEqual(mc.write_coil.call_count, 2)
+        mc.close.assert_called_once()
+
+    def test_rtu_mode_writes_hold_and_release(self) -> None:
+        mc = _make_mock_client()
+        with mock.patch("backend.app.services.plc_adapter.ModbusSerialClient", return_value=mc) as MockClass:
+            adapter = ModbusRtuPlcAdapter(
+                "COM3",
+                timeout_s=0.75,
+                unit_id=255,
+                command_mode="coil",
+                hold_address=0,
+                release_address=1,
+            )
+
+        adapter.send_clamp_hold(event_id="evt-rtu", decision="ACCEPT")
+        adapter.send_clamp_release(event_id="evt-rtu", reason="auto")
+        adapter.disconnect()
+
+        MockClass.assert_called_once_with(
+            port="COM3",
+            framer=FramerType.RTU,
+            baudrate=9600,
+            bytesize=8,
+            parity="N",
+            stopbits=1,
+            timeout=0.75,
+        )
+        mc.write_coil.assert_any_call(0, True, device_id=255)
+        mc.write_coil.assert_any_call(1, False, device_id=255)
         self.assertEqual(mc.write_coil.call_count, 2)
         mc.close.assert_called_once()
 
