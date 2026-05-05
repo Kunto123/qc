@@ -218,6 +218,79 @@ class ApiSmokeTest(unittest.TestCase):
         payload = change_response.get_json() or {}
         self.assertIn("must be one of", str(payload.get("error") or ""))
 
+    def test_00e5_rfid_binding_login_and_disable_flow(self) -> None:
+        username = f"rfid_{uuid4().hex[:8]}"
+        password = "rfidpass123"
+        rfid_uid = f"A1B2{uuid4().hex[:8]}".upper()
+        create_response = self.client.post(
+            "/auth/users",
+            json={"username": username, "password": password, "role": "operator"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(create_response.status_code, 201, create_response.get_json())
+        user = create_response.get_json()
+
+        password_login_response = self.client.post("/auth/login", json={"username": username, "password": password})
+        self.assertEqual(password_login_response.status_code, 200, password_login_response.get_json())
+        password_token = str(password_login_response.get_json()["token"])
+        password_me_response = self.client.get("/auth/me", headers=_headers(password_token))
+        self.assertEqual(password_me_response.status_code, 200, password_me_response.get_json())
+        self.assertEqual(password_me_response.get_json()["username"], username)
+
+        bind_response = self.client.post(
+            f"/auth/users/{user['id']}/rfid",
+            json={"rfid_uid": f"{rfid_uid[:4]}-{rfid_uid[4:]}"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(bind_response.status_code, 200, bind_response.get_json())
+        bound_user = bind_response.get_json()["user"]
+        self.assertTrue(bound_user["rfid_bound"])
+        self.assertEqual(bound_user["rfid_uid_last4"], rfid_uid[-4:])
+        self.assertNotIn("rfid_uid_hash", bound_user)
+
+        login_response = self.client.post("/auth/login", json={"rfid_uid": rfid_uid.lower()})
+        self.assertEqual(login_response.status_code, 200, login_response.get_json())
+        token = str(login_response.get_json()["token"])
+        me_response = self.client.get("/auth/me", headers=_headers(token))
+        self.assertEqual(me_response.status_code, 200, me_response.get_json())
+        self.assertEqual(me_response.get_json()["username"], username)
+
+        password_login_after_bind = self.client.post("/auth/login", json={"username": username, "password": password})
+        self.assertEqual(password_login_after_bind.status_code, 200, password_login_after_bind.get_json())
+
+        duplicate_user_response = self.client.post(
+            "/auth/users",
+            json={"username": f"rfid_dup_{uuid4().hex[:8]}", "password": "dup-pass-123", "role": "operator"},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(duplicate_user_response.status_code, 201, duplicate_user_response.get_json())
+        duplicate_bind_response = self.client.post(
+            f"/auth/users/{duplicate_user_response.get_json()['id']}/rfid",
+            json={"rfid_uid": rfid_uid},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(duplicate_bind_response.status_code, 409, duplicate_bind_response.get_json())
+
+        users_response = self.client.get("/auth/users", headers=_headers(self.admin_token))
+        self.assertEqual(users_response.status_code, 200, users_response.get_json())
+        self.assertTrue(all("rfid_uid_hash" not in item for item in users_response.get_json()))
+
+        disable_response = self.client.put(
+            f"/auth/users/{user['id']}",
+            json={"is_active": False},
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(disable_response.status_code, 200, disable_response.get_json())
+        disabled_login_response = self.client.post("/auth/login", json={"rfid_uid": rfid_uid})
+        self.assertEqual(disabled_login_response.status_code, 401, disabled_login_response.get_json())
+        disabled_password_login_response = self.client.post(
+            "/auth/login",
+            json={"username": username, "password": password},
+        )
+        self.assertEqual(disabled_password_login_response.status_code, 401, disabled_password_login_response.get_json())
+        me_after_disable_response = self.client.get("/auth/me", headers=_headers(token))
+        self.assertEqual(me_after_disable_response.status_code, 401, me_after_disable_response.get_json())
+
     def test_00f_admin_can_retry_failed_push_via_api(self) -> None:
         from backend.app.api import inspection_routes as inspection_routes_module
 

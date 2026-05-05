@@ -30,6 +30,8 @@ BADGE_COLORS = {
 RESPONSIVE_BREAKPOINT = 1240
 HEARTBEAT_INTERVAL_MS = 20_000
 PLC_POLL_INTERVAL_MS = 8_000
+AUTO_START_FRAME_WAIT_MS = 150
+AUTO_START_MAX_ATTEMPTS = 40
 
 
 class OperatorScreen(ctk.CTkFrame):
@@ -55,6 +57,8 @@ class OperatorScreen(ctk.CTkFrame):
         self._is_compact_layout: bool | None = None
         self._is_preview_compact: bool | None = None
         self._auth_error_notified = False
+        self._auto_start_done = False
+        self._auto_start_after_id: str | None = None
 
         self.line_value = tk.StringVar()
         self.station_value = tk.StringVar()
@@ -92,6 +96,7 @@ class OperatorScreen(ctk.CTkFrame):
         self._schedule_poll()
         self._schedule_heartbeat(delay_ms=1_000)
         self._schedule_plc_poll(delay_ms=4_000)
+        self.after_idle(self._auto_start_first_template)
 
     def _build_top_bar(self) -> None:
         self.top_bar = ctk.CTkFrame(self, fg_color=APP_BG, corner_radius=0)
@@ -571,6 +576,38 @@ class OperatorScreen(ctk.CTkFrame):
         self.template_selector.configure(values=values)
         self._sync_template_selector()
 
+    def _auto_start_first_template(self) -> None:
+        if self._closed or self._auto_start_done:
+            return
+        self._auto_start_done = True
+        values = list(self.template_selector.cget("values") or [])
+        if not values:
+            self.info_var.set("Tidak ada template tersedia untuk auto start.")
+            return
+        first_label = str(values[0])
+        self.template_choice.set(first_label)
+        self.info_var.set("Auto start: memilih template pertama.")
+        self._on_template_selected()
+        if not self._start_camera(show_errors=False):
+            self.info_var.set("Auto start: kamera gagal dibuka. Start Camera bisa dilakukan manual.")
+            return
+        self._wait_for_auto_start_frame(attempt=0)
+
+    def _wait_for_auto_start_frame(self, *, attempt: int) -> None:
+        if self._closed or self.state.active_session:
+            return
+        if self.capture.get_latest_frame() is not None:
+            self.info_var.set("Auto start: frame kamera siap, memulai session.")
+            self._start_session()
+            return
+        if attempt >= AUTO_START_MAX_ATTEMPTS:
+            self.info_var.set("Auto start: kamera belum menghasilkan frame. Start Session bisa dilakukan manual.")
+            return
+        self._auto_start_after_id = self.after(
+            AUTO_START_FRAME_WAIT_MS,
+            lambda: self._wait_for_auto_start_frame(attempt=attempt + 1),
+        )
+
     def _fetch_template_detail(self, template_id: int) -> dict:
         template_id = int(template_id)
         cached = self._template_detail_lookup.get(template_id)
@@ -868,6 +905,8 @@ class OperatorScreen(ctk.CTkFrame):
         item = self._template_lookup.get(label)
         if not item:
             return
+        session_was_running = self.state.active_session is not None
+        previous_camera_index = self.camera_value.get().strip()
         self.state.active_deployment = None
         try:
             detail = self._fetch_template_detail(int(item["id"]))
@@ -875,9 +914,33 @@ class OperatorScreen(ctk.CTkFrame):
             self.template_version_value.set(str(item.get("version_id") or ""))
             self.info_var.set(f"Failed to load template detail: {exc}")
         else:
+            if session_was_running:
+                self._stop_session()
             self._apply_template_detail(detail)
-            self.info_var.set(f"Template selected manually: {item.get('name')} v{item.get('version_number')}")
+            camera_changed = self.camera_value.get().strip() != previous_camera_index
+            if camera_changed:
+                self._restart_camera_for_template_change()
+            if session_was_running:
+                self.info_var.set(f"Template changed: restarting session with {item.get('name')} v{item.get('version_number')}")
+                self._restart_session_after_template_change()
+            else:
+                self.info_var.set(f"Template selected manually: {item.get('name')} v{item.get('version_number')}")
         self._refresh_context_summary()
+
+    def _restart_camera_for_template_change(self) -> bool:
+        self.capture.stop()
+        self.main_view.reset()
+        self.part_ready_preview.reset()
+        return self._start_camera(show_errors=False)
+
+    def _restart_session_after_template_change(self) -> None:
+        if self.capture.get_latest_frame() is not None:
+            self._start_session()
+            return
+        if not self._start_camera(show_errors=False):
+            self.info_var.set("Template changed, tapi kamera belum siap. Start Camera/Session bisa dilakukan manual.")
+            return
+        self._wait_for_auto_start_frame(attempt=0)
 
     def _selected_template_name(self) -> str | None:
         selected = self._template_lookup.get(self.template_choice.get().strip())
@@ -1135,14 +1198,18 @@ class OperatorScreen(ctk.CTkFrame):
         self._refresh_context_summary()
         self._update_status_badges()
 
-    def _start_camera(self) -> None:
+    def _start_camera(self, *, show_errors: bool = True) -> bool:
         try:
             self.capture.start(int(self.camera_value.get() or 0))
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Camera", str(exc))
-            return
+            if show_errors:
+                messagebox.showerror("Camera", str(exc))
+            self.info_var.set(f"Camera failed: {exc}")
+            self._update_status_badges()
+            return False
         self.info_var.set("Camera started. Menunggu frame pertama.")
         self._update_status_badges()
+        return True
 
     def _stop_camera(self) -> None:
         self.capture.stop()
@@ -1530,6 +1597,12 @@ class OperatorScreen(ctk.CTkFrame):
             except tk.TclError:
                 pass
             self._plc_poll_after_id = None
+        if self._auto_start_after_id:
+            try:
+                self.after_cancel(self._auto_start_after_id)
+            except tk.TclError:
+                pass
+            self._auto_start_after_id = None
         if hasattr(self, "sidebar_canvas"):
             self.sidebar_canvas.unbind_all("<MouseWheel>")
         self._close_settings()

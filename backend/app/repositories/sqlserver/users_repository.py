@@ -25,6 +25,9 @@ def _seed_users() -> list[dict[str, Any]]:
             "created_at": now,
             "updated_at": now,
             "last_login_at": None,
+            "rfid_uid_hash": None,
+            "rfid_uid_last4": None,
+            "rfid_bound_at": None,
         },
         {
             "id": 2,
@@ -35,6 +38,9 @@ def _seed_users() -> list[dict[str, Any]]:
             "created_at": now,
             "updated_at": now,
             "last_login_at": None,
+            "rfid_uid_hash": None,
+            "rfid_uid_last4": None,
+            "rfid_bound_at": None,
         },
         {
             "id": 3,
@@ -46,6 +52,9 @@ def _seed_users() -> list[dict[str, Any]]:
             "created_at": now,
             "updated_at": now,
             "last_login_at": None,
+            "rfid_uid_hash": None,
+            "rfid_uid_last4": None,
+            "rfid_bound_at": None,
         },
     ]
 
@@ -125,6 +134,9 @@ class SqlServerUsersRepository:
             for column_name, sql_type in (
                 ("updated_at", "DATETIMEOFFSET NOT NULL CONSTRAINT DF_qc_user_accounts_updated_at DEFAULT SYSUTCDATETIME()"),
                 ("last_login_at", "DATETIMEOFFSET NULL"),
+                ("rfid_uid_hash", "NVARCHAR(64) NULL"),
+                ("rfid_uid_last4", "NVARCHAR(16) NULL"),
+                ("rfid_bound_at", "DATETIMEOFFSET NULL"),
             ):
                 cursor.execute(
                     f"""
@@ -134,6 +146,21 @@ class SqlServerUsersRepository:
                     END
                     """
                 )
+            cursor.execute(
+                """
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM sys.indexes
+                    WHERE name = 'UX_qc_user_accounts_rfid_uid_hash'
+                      AND object_id = OBJECT_ID('dbo.qc_user_accounts')
+                )
+                BEGIN
+                    CREATE UNIQUE INDEX UX_qc_user_accounts_rfid_uid_hash
+                    ON dbo.qc_user_accounts (rfid_uid_hash)
+                    WHERE rfid_uid_hash IS NOT NULL
+                END
+                """
+            )
             conn.commit()
 
     def _seed_defaults_if_empty(self) -> None:
@@ -178,6 +205,9 @@ class SqlServerUsersRepository:
             "created_at": record.get("created_at"),
             "updated_at": record.get("updated_at"),
             "last_login_at": record.get("last_login_at"),
+            "rfid_uid_last4": record.get("rfid_uid_last4"),
+            "rfid_bound_at": record.get("rfid_bound_at"),
+            "rfid_bound": bool(record.get("rfid_uid_hash")),
         }
 
     def list_users(self) -> list[dict[str, Any]]:
@@ -193,7 +223,10 @@ class SqlServerUsersRepository:
                     is_active,
                     CONVERT(NVARCHAR(33), created_at, 127) AS created_at,
                     CONVERT(NVARCHAR(33), updated_at, 127) AS updated_at,
-                    CONVERT(NVARCHAR(33), last_login_at, 127) AS last_login_at
+                    CONVERT(NVARCHAR(33), last_login_at, 127) AS last_login_at,
+                    rfid_uid_hash,
+                    rfid_uid_last4,
+                    CONVERT(NVARCHAR(33), rfid_bound_at, 127) AS rfid_bound_at
                 FROM dbo.qc_user_accounts
                 ORDER BY id ASC
                 """
@@ -215,7 +248,10 @@ class SqlServerUsersRepository:
                     is_active,
                     CONVERT(NVARCHAR(33), created_at, 127) AS created_at,
                     CONVERT(NVARCHAR(33), updated_at, 127) AS updated_at,
-                    CONVERT(NVARCHAR(33), last_login_at, 127) AS last_login_at
+                    CONVERT(NVARCHAR(33), last_login_at, 127) AS last_login_at,
+                    rfid_uid_hash,
+                    rfid_uid_last4,
+                    CONVERT(NVARCHAR(33), rfid_bound_at, 127) AS rfid_bound_at
                 FROM dbo.qc_user_accounts
                 WHERE LOWER(username) = ?
                 """,
@@ -237,11 +273,42 @@ class SqlServerUsersRepository:
                     is_active,
                     CONVERT(NVARCHAR(33), created_at, 127) AS created_at,
                     CONVERT(NVARCHAR(33), updated_at, 127) AS updated_at,
-                    CONVERT(NVARCHAR(33), last_login_at, 127) AS last_login_at
+                    CONVERT(NVARCHAR(33), last_login_at, 127) AS last_login_at,
+                    rfid_uid_hash,
+                    rfid_uid_last4,
+                    CONVERT(NVARCHAR(33), rfid_bound_at, 127) AS rfid_bound_at
                 FROM dbo.qc_user_accounts
                 WHERE id = ?
                 """,
                 int(user_id),
+            )
+            row = cursor.fetchone()
+        return None if row is None else self._row_to_dict(row)
+
+    def get_by_rfid_uid_hash(self, rfid_uid_hash: str) -> dict[str, Any] | None:
+        normalized_hash = str(rfid_uid_hash or "").strip()
+        if not normalized_hash:
+            return None
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT TOP 1
+                    id,
+                    username,
+                    password_hash,
+                    role,
+                    is_active,
+                    CONVERT(NVARCHAR(33), created_at, 127) AS created_at,
+                    CONVERT(NVARCHAR(33), updated_at, 127) AS updated_at,
+                    CONVERT(NVARCHAR(33), last_login_at, 127) AS last_login_at,
+                    rfid_uid_hash,
+                    rfid_uid_last4,
+                    CONVERT(NVARCHAR(33), rfid_bound_at, 127) AS rfid_bound_at
+                FROM dbo.qc_user_accounts
+                WHERE rfid_uid_hash = ?
+                """,
+                normalized_hash,
             )
             row = cursor.fetchone()
         return None if row is None else self._row_to_dict(row)
@@ -264,6 +331,28 @@ class SqlServerUsersRepository:
         if not record or not record.get("is_active"):
             return None
         if not verify_password(password, str(record.get("password_hash") or "")):
+            return None
+        now = _utcnow_iso()
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE dbo.qc_user_accounts
+                SET last_login_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                now,
+                now,
+                int(record["id"]),
+            )
+            conn.commit()
+        record["last_login_at"] = now
+        record["updated_at"] = now
+        return self.to_user_info(record)
+
+    def authenticate_rfid_hash(self, rfid_uid_hash: str) -> UserInfo | None:
+        record = self.get_by_rfid_uid_hash(rfid_uid_hash)
+        if not record or not record.get("is_active"):
             return None
         now = _utcnow_iso()
         with self._connect() as conn:
@@ -323,6 +412,9 @@ class SqlServerUsersRepository:
             "created_at": now,
             "updated_at": now,
             "last_login_at": None,
+            "rfid_uid_last4": None,
+            "rfid_bound_at": None,
+            "rfid_bound": False,
         }
 
     def set_active(self, user_id: int, is_active: bool) -> dict[str, Any]:
@@ -392,6 +484,63 @@ class SqlServerUsersRepository:
             raise ValueError("User not found.")
         return self._public_record(record)
 
+    def set_rfid_uid_hash(self, user_id: int, rfid_uid_hash: str, rfid_uid_last4: str) -> dict[str, Any]:
+        normalized_hash = str(rfid_uid_hash or "").strip()
+        if not normalized_hash:
+            raise ValueError("RFID UID is required.")
+        existing = self.get_by_rfid_uid_hash(normalized_hash)
+        if existing is not None and int(existing["id"]) != int(user_id):
+            raise ValueError("RFID card is already bound to another user.")
+        if self.get_by_id(user_id) is None:
+            raise ValueError("User not found.")
+        now = _utcnow_iso()
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE dbo.qc_user_accounts
+                SET rfid_uid_hash = ?,
+                    rfid_uid_last4 = ?,
+                    rfid_bound_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                normalized_hash,
+                str(rfid_uid_last4 or "")[-4:] or None,
+                now,
+                now,
+                int(user_id),
+            )
+            conn.commit()
+        record = self.get_by_id(user_id)
+        if record is None:
+            raise ValueError("User not found.")
+        return self._public_record(record)
+
+    def clear_rfid_uid(self, user_id: int) -> dict[str, Any]:
+        if self.get_by_id(user_id) is None:
+            raise ValueError("User not found.")
+        now = _utcnow_iso()
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE dbo.qc_user_accounts
+                SET rfid_uid_hash = NULL,
+                    rfid_uid_last4 = NULL,
+                    rfid_bound_at = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                now,
+                int(user_id),
+            )
+            conn.commit()
+        record = self.get_by_id(user_id)
+        if record is None:
+            raise ValueError("User not found.")
+        return self._public_record(record)
+
     def _row_to_dict(self, row) -> dict[str, Any]:
         return {
             "id": int(row.id),
@@ -402,4 +551,7 @@ class SqlServerUsersRepository:
             "created_at": str(row.created_at) if row.created_at is not None else None,
             "updated_at": str(row.updated_at) if row.updated_at is not None else None,
             "last_login_at": str(row.last_login_at) if row.last_login_at is not None else None,
+            "rfid_uid_hash": str(row.rfid_uid_hash) if getattr(row, "rfid_uid_hash", None) is not None else None,
+            "rfid_uid_last4": str(row.rfid_uid_last4) if getattr(row, "rfid_uid_last4", None) is not None else None,
+            "rfid_bound_at": str(row.rfid_bound_at) if getattr(row, "rfid_bound_at", None) is not None else None,
         }

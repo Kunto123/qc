@@ -333,7 +333,8 @@ class UiSmokeTest(unittest.TestCase):
         screen.update_idletasks()
         self.assertTrue(screen.winfo_exists())
         self.assertEqual(str(screen.template_selector["state"]), "readonly")
-        self.assertTrue(screen.template_context.get().startswith("Template: -"))
+        self.assertTrue(screen.template_context.get().startswith("Template: QC Line A"))
+        self.assertEqual(screen.template_choice.get(), "QC Line A | v1 | version_id=1")
         screen.destroy()
 
     def test_operator_layout_switches_to_compact(self) -> None:

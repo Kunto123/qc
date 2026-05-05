@@ -22,6 +22,9 @@ def _seed_users() -> list[dict[str, Any]]:
             "created_at": now,
             "updated_at": now,
             "last_login_at": None,
+            "rfid_uid_hash": None,
+            "rfid_uid_last4": None,
+            "rfid_bound_at": None,
         },
         {
             "id": 2,
@@ -32,6 +35,9 @@ def _seed_users() -> list[dict[str, Any]]:
             "created_at": now,
             "updated_at": now,
             "last_login_at": None,
+            "rfid_uid_hash": None,
+            "rfid_uid_last4": None,
+            "rfid_bound_at": None,
         },
         {
             "id": 3,
@@ -42,6 +48,9 @@ def _seed_users() -> list[dict[str, Any]]:
             "created_at": now,
             "updated_at": now,
             "last_login_at": None,
+            "rfid_uid_hash": None,
+            "rfid_uid_last4": None,
+            "rfid_bound_at": None,
         },
     ]
 
@@ -88,6 +97,31 @@ class PostgresUsersRepository(PostgresRepositoryBase):
                     f"""
                     ALTER TABLE {self.TABLE_NAME}
                     ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ NULL
+                    """
+                )
+                cursor.execute(
+                    f"""
+                    ALTER TABLE {self.TABLE_NAME}
+                    ADD COLUMN IF NOT EXISTS rfid_uid_hash TEXT NULL
+                    """
+                )
+                cursor.execute(
+                    f"""
+                    ALTER TABLE {self.TABLE_NAME}
+                    ADD COLUMN IF NOT EXISTS rfid_uid_last4 TEXT NULL
+                    """
+                )
+                cursor.execute(
+                    f"""
+                    ALTER TABLE {self.TABLE_NAME}
+                    ADD COLUMN IF NOT EXISTS rfid_bound_at TIMESTAMPTZ NULL
+                    """
+                )
+                cursor.execute(
+                    f"""
+                    CREATE UNIQUE INDEX IF NOT EXISTS UX_{self.TABLE_NAME}_rfid_uid_hash
+                    ON {self.TABLE_NAME} (rfid_uid_hash)
+                    WHERE rfid_uid_hash IS NOT NULL
                     """
                 )
             conn.commit()
@@ -137,6 +171,9 @@ class PostgresUsersRepository(PostgresRepositoryBase):
             "created_at": _format_datetime(row.get("created_at")),
             "updated_at": _format_datetime(row.get("updated_at")),
             "last_login_at": _format_datetime(row.get("last_login_at")),
+            "rfid_uid_hash": row.get("rfid_uid_hash"),
+            "rfid_uid_last4": row.get("rfid_uid_last4"),
+            "rfid_bound_at": _format_datetime(row.get("rfid_bound_at")),
         }
 
     def _public_record(self, record: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -150,6 +187,9 @@ class PostgresUsersRepository(PostgresRepositoryBase):
             "created_at": record.get("created_at"),
             "updated_at": record.get("updated_at"),
             "last_login_at": record.get("last_login_at"),
+            "rfid_uid_last4": record.get("rfid_uid_last4"),
+            "rfid_bound_at": record.get("rfid_bound_at"),
+            "rfid_bound": bool(record.get("rfid_uid_hash")),
         }
 
     def migrate_legacy_roles(self) -> int:
@@ -185,7 +225,10 @@ class PostgresUsersRepository(PostgresRepositoryBase):
                         is_active,
                         created_at,
                         updated_at,
-                        last_login_at
+                        last_login_at,
+                        rfid_uid_hash,
+                        rfid_uid_last4,
+                        rfid_bound_at
                     FROM {self.TABLE_NAME}
                     ORDER BY id ASC
                     """
@@ -207,7 +250,10 @@ class PostgresUsersRepository(PostgresRepositoryBase):
                         is_active,
                         created_at,
                         updated_at,
-                        last_login_at
+                        last_login_at,
+                        rfid_uid_hash,
+                        rfid_uid_last4,
+                        rfid_bound_at
                     FROM {self.TABLE_NAME}
                     WHERE LOWER(username) = %s
                     LIMIT 1
@@ -230,12 +276,44 @@ class PostgresUsersRepository(PostgresRepositoryBase):
                         is_active,
                         created_at,
                         updated_at,
-                        last_login_at
+                        last_login_at,
+                        rfid_uid_hash,
+                        rfid_uid_last4,
+                        rfid_bound_at
                     FROM {self.TABLE_NAME}
                     WHERE id = %s
                     LIMIT 1
                     """,
                     (int(user_id),),
+                )
+                row = cursor.fetchone()
+        return self._row_to_record(row)
+
+    def get_by_rfid_uid_hash(self, rfid_uid_hash: str) -> dict[str, Any] | None:
+        normalized_hash = str(rfid_uid_hash or "").strip()
+        if not normalized_hash:
+            return None
+        with self._connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT
+                        id,
+                        username,
+                        password_hash,
+                        role,
+                        is_active,
+                        created_at,
+                        updated_at,
+                        last_login_at,
+                        rfid_uid_hash,
+                        rfid_uid_last4,
+                        rfid_bound_at
+                    FROM {self.TABLE_NAME}
+                    WHERE rfid_uid_hash = %s
+                    LIMIT 1
+                    """,
+                    (normalized_hash,),
                 )
                 row = cursor.fetchone()
         return self._row_to_record(row)
@@ -258,6 +336,26 @@ class PostgresUsersRepository(PostgresRepositoryBase):
         if not record or not record.get("is_active"):
             return None
         if not verify_password(password, str(record.get("password_hash") or "")):
+            return None
+        now = _utcnow_iso()
+        with self._connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    UPDATE {self.TABLE_NAME}
+                    SET last_login_at = %s, updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (now, now, int(record["id"])),
+                )
+            conn.commit()
+        record["last_login_at"] = now
+        record["updated_at"] = now
+        return self.to_user_info(record)
+
+    def authenticate_rfid_hash(self, rfid_uid_hash: str) -> UserInfo | None:
+        record = self.get_by_rfid_uid_hash(rfid_uid_hash)
+        if not record or not record.get("is_active"):
             return None
         now = _utcnow_iso()
         with self._connect() as conn:
@@ -304,7 +402,10 @@ class PostgresUsersRepository(PostgresRepositoryBase):
                               is_active,
                               created_at,
                               updated_at,
-                              last_login_at
+                              last_login_at,
+                              rfid_uid_hash,
+                              rfid_uid_last4,
+                              rfid_bound_at
                     """,
                     (
                         normalized_username,
@@ -341,7 +442,10 @@ class PostgresUsersRepository(PostgresRepositoryBase):
                               is_active,
                               created_at,
                               updated_at,
-                              last_login_at
+                              last_login_at,
+                              rfid_uid_hash,
+                              rfid_uid_last4,
+                              rfid_bound_at
                     """,
                     (bool(is_active), now, int(user_id)),
                 )
@@ -371,7 +475,10 @@ class PostgresUsersRepository(PostgresRepositoryBase):
                               is_active,
                               created_at,
                               updated_at,
-                              last_login_at
+                              last_login_at,
+                              rfid_uid_hash,
+                              rfid_uid_last4,
+                              rfid_bound_at
                     """,
                     (role_enum.value, now, int(user_id)),
                 )
@@ -400,9 +507,88 @@ class PostgresUsersRepository(PostgresRepositoryBase):
                               is_active,
                               created_at,
                               updated_at,
-                              last_login_at
+                              last_login_at,
+                              rfid_uid_hash,
+                              rfid_uid_last4,
+                              rfid_bound_at
                     """,
                     (hash_password(new_password), now, int(user_id)),
+                )
+                row = cursor.fetchone()
+            conn.commit()
+        record = self._public_record(self._row_to_record(row))
+        if record is None:
+            raise ValueError("User not found.")
+        return record
+
+    def set_rfid_uid_hash(self, user_id: int, rfid_uid_hash: str, rfid_uid_last4: str) -> dict[str, Any]:
+        normalized_hash = str(rfid_uid_hash or "").strip()
+        if not normalized_hash:
+            raise ValueError("RFID UID is required.")
+        existing = self.get_by_rfid_uid_hash(normalized_hash)
+        if existing is not None and int(existing["id"]) != int(user_id):
+            raise ValueError("RFID card is already bound to another user.")
+        if self.get_by_id(user_id) is None:
+            raise ValueError("User not found.")
+        now = _utcnow_iso()
+        with self._connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    UPDATE {self.TABLE_NAME}
+                    SET rfid_uid_hash = %s,
+                        rfid_uid_last4 = %s,
+                        rfid_bound_at = %s,
+                        updated_at = %s
+                    WHERE id = %s
+                    RETURNING id,
+                              username,
+                              password_hash,
+                              role,
+                              is_active,
+                              created_at,
+                              updated_at,
+                              last_login_at,
+                              rfid_uid_hash,
+                              rfid_uid_last4,
+                              rfid_bound_at
+                    """,
+                    (normalized_hash, str(rfid_uid_last4 or "")[-4:] or None, now, now, int(user_id)),
+                )
+                row = cursor.fetchone()
+            conn.commit()
+        record = self._public_record(self._row_to_record(row))
+        if record is None:
+            raise ValueError("User not found.")
+        return record
+
+    def clear_rfid_uid(self, user_id: int) -> dict[str, Any]:
+        if self.get_by_id(user_id) is None:
+            raise ValueError("User not found.")
+        now = _utcnow_iso()
+        with self._connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    UPDATE {self.TABLE_NAME}
+                    SET rfid_uid_hash = NULL,
+                        rfid_uid_last4 = NULL,
+                        rfid_bound_at = NULL,
+                        updated_at = %s
+                    WHERE id = %s
+                    RETURNING id,
+                              username,
+                              password_hash,
+                              role,
+                              is_active,
+                              created_at,
+                              updated_at,
+                              last_login_at,
+                              rfid_uid_hash,
+                              rfid_uid_last4,
+                              rfid_bound_at
+                    """,
+                    (now, int(user_id)),
                 )
                 row = cursor.fetchone()
             conn.commit()

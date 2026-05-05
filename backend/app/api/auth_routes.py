@@ -4,8 +4,9 @@ import sys
 
 from flask import Blueprint, g, jsonify, request
 
-from backend.app.core.container import audit_repo, token_store, users_repo
+from backend.app.core.container import app_config, audit_repo, token_store, users_repo
 from backend.app.core.http import require_auth, require_roles
+from backend.app.core.security import hash_rfid_uid, normalize_rfid_uid, rfid_uid_last4
 from shared.contracts.enums import UserRole
 
 
@@ -42,6 +43,11 @@ def _try_audit(event_type: str, **kwargs) -> None:
         print(f"[audit] WARNING: failed to write audit event '{event_type}': {exc}", file=sys.stderr)
 
 
+def _rfid_hash_from_payload(payload: dict) -> tuple[str, str]:
+    normalized_uid = normalize_rfid_uid(payload.get("rfid_uid"))
+    return hash_rfid_uid(normalized_uid, app_config.secret_key), rfid_uid_last4(normalized_uid)
+
+
 # ---------------------------------------------------------------------------
 # Auth endpoints
 # ---------------------------------------------------------------------------
@@ -50,18 +56,59 @@ def _try_audit(event_type: str, **kwargs) -> None:
 def login():
     payload = request.get_json(force=True) or {}
     username_input = str(payload.get("username") or "").strip()
+    password_input = str(payload.get("password") or "").strip()
+    rfid_uid_input = str(payload.get("rfid_uid") or "").strip()
     ip = _client_ip()
     client = _client_name(payload)
     ua = request.user_agent.string or None
 
-    user = users_repo.authenticate(username_input, str(payload.get("password") or ""))
+    user = None
+    credential_label = ""
+    if rfid_uid_input:
+        try:
+            rfid_uid_hash, _uid_last4 = _rfid_hash_from_payload(payload)
+        except ValueError as exc:
+            _try_audit(
+                "login_failure",
+                username=None,
+                ip_address=ip,
+                client_name=client,
+                details=str(exc),
+            )
+            return jsonify({"error": "Invalid RFID card"}), 401
+        user = users_repo.authenticate_rfid_hash(rfid_uid_hash)
+        credential_label = "rfid"
+    else:
+        if not username_input or not password_input:
+            _try_audit(
+                "login_failure",
+                username=username_input or None,
+                ip_address=ip,
+                client_name=client,
+                details="Missing username or password",
+            )
+            return jsonify({"error": "Username and password are required"}), 400
+        user = users_repo.authenticate(username_input, password_input)
+        credential_label = "password"
+
     if user is None:
         _try_audit(
             "login_failure",
-            username=username_input,
+            username=username_input if credential_label == "password" else None,
             ip_address=ip,
             client_name=client,
-            details="Invalid credentials",
+            details=f"Invalid {credential_label} credentials",
+        )
+        return jsonify({"error": "Invalid credentials"}), 401
+
+    if user.role.value not in ALLOWED_MANAGED_ROLES:
+        _try_audit(
+            "login_failure",
+            user_id=user.id,
+            username=user.username,
+            ip_address=ip,
+            client_name=client,
+            details=f"Unsupported role for {credential_label} login",
         )
         return jsonify({"error": "Invalid credentials"}), 401
 
@@ -73,6 +120,7 @@ def login():
         session_id=session.session_id,
         ip_address=ip,
         client_name=client,
+        details=f"credential={credential_label}",
     )
     return jsonify(
         {
@@ -240,6 +288,54 @@ def reset_user_password(user_id: int):
         ip_address=_client_ip(),
     )
     return jsonify({"ok": True, "user_id": user_id, "sessions_revoked": True})
+
+
+@auth_blueprint.post("/users/<int:user_id>/rfid")
+@require_roles(UserRole.ADMIN)
+def bind_user_rfid(user_id: int):
+    payload = request.get_json(force=True) or {}
+    try:
+        rfid_uid_hash, last4 = _rfid_hash_from_payload(payload)
+        record = users_repo.set_rfid_uid_hash(user_id, rfid_uid_hash, last4)
+    except ValueError as exc:
+        message = str(exc)
+        if "already bound" in message.lower():
+            return jsonify({"error": message}), 409
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+    revoked = token_store.revoke_user(user_id)
+    _try_audit(
+        "rfid_bound",
+        user_id=user_id,
+        username=record.get("username"),
+        actor_id=g.current_user.id,
+        actor_username=g.current_user.username,
+        ip_address=_client_ip(),
+        details=f"last4={record.get('rfid_uid_last4')}; revoked={revoked}",
+    )
+    return jsonify({"user": record, "sessions_revoked": revoked})
+
+
+@auth_blueprint.delete("/users/<int:user_id>/rfid")
+@require_roles(UserRole.ADMIN)
+def clear_user_rfid(user_id: int):
+    try:
+        record = users_repo.clear_rfid_uid(user_id)
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        return jsonify({"error": message}), status_code
+    revoked = token_store.revoke_user(user_id)
+    _try_audit(
+        "rfid_cleared",
+        user_id=user_id,
+        username=record.get("username"),
+        actor_id=g.current_user.id,
+        actor_username=g.current_user.username,
+        ip_address=_client_ip(),
+        details=f"revoked={revoked}",
+    )
+    return jsonify({"user": record, "sessions_revoked": revoked})
 
 
 @auth_blueprint.post("/users/<int:user_id>/revoke-sessions")

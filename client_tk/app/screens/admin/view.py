@@ -528,6 +528,7 @@ class AdminScreen(ctk.CTkFrame):
                 ("username", "Username", 170, "w"),
                 ("role", "Role", 110, "center"),
                 ("status", "Status", 100, "center"),
+                ("rfid", "RFID", 120, "center"),
                 ("created", "Created", 150, "w"),
             ],
             row=4,
@@ -548,7 +549,7 @@ class AdminScreen(ctk.CTkFrame):
         ctk.CTkLabel(form, text="Create User", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 0))
         ctk.CTkLabel(
             form,
-            text="Tambahkan akun baru untuk admin atau operator. Password wajib diisi saat create.",
+            text="Tambahkan akun baru untuk admin atau operator. Password tetap dipakai, lalu kartu RFID bisa dibind setelah akun dibuat.",
             text_color=TEXT_SECONDARY,
             wraplength=380,
             justify="left",
@@ -580,6 +581,25 @@ class AdminScreen(ctk.CTkFrame):
             padx=12,
             pady=(8, 10),
         )
+
+        rfid_card = ctk.CTkFrame(self.users_right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        rfid_card.pack(fill="x", padx=2, pady=(6, 2))
+        rfid_card.columnconfigure(1, weight=1)
+        ctk.CTkLabel(rfid_card, text="RFID Card Binding", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(
+            rfid_card,
+            text="Pilih user, scan kartu Ajfwm RFID Reader, lalu bind.",
+            text_color=TEXT_SECONDARY,
+            wraplength=380,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(4, 10))
+        self.user_rfid_uid = ttk.Entry(rfid_card)
+        self._grid_entry(rfid_card, 2, 0, "RFID UID", self.user_rfid_uid)
+        self.user_rfid_uid.bind("<Return>", lambda _event: self.bind_selected_user_rfid())
+        button_row = ttk.Frame(rfid_card)
+        button_row.grid(row=3, column=0, columnspan=2, sticky="e", padx=12, pady=(8, 10))
+        ctk.CTkButton(button_row, text="Bind / Replace", command=self.bind_selected_user_rfid, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(button_row, text="Clear Card", command=self.clear_selected_user_rfid, fg_color=DANGER, hover_color=DANGER_HOVER, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).pack(side="left")
 
     def _build_results_tab(self) -> None:
         self.results_tab.columnconfigure(0, weight=1)
@@ -1340,8 +1360,13 @@ class AdminScreen(ctk.CTkFrame):
 
         self._clear_tree(self.users_table)
         if not items:
-            self.users_table.insert("", "end", iid="__empty__", values=("—", "Tidak ada user ditemukan.", "", "", ""))
+            self.users_table.insert("", "end", iid="__empty__", values=("—", "Tidak ada user ditemukan.", "", "", "", ""))
         for item in items:
+            rfid_status = "Unbound"
+            if item.get("rfid_bound"):
+                rfid_status = "Bound"
+                if item.get("rfid_uid_last4"):
+                    rfid_status = f"*{_safe_text(item.get('rfid_uid_last4'))}"
             self.users_table.insert(
                 "",
                 "end",
@@ -1351,6 +1376,7 @@ class AdminScreen(ctk.CTkFrame):
                     _safe_text(item.get("username")),
                     _safe_text(item.get("role")),
                     _format_status(item.get("is_active", True)),
+                    rfid_status,
                     _format_timestamp(item.get("created_at")),
                 ),
             )
@@ -1366,9 +1392,12 @@ class AdminScreen(ctk.CTkFrame):
             role_value = str(item.get("role") or "").strip().lower()
             if hasattr(self, "user_role_change") and role_value in {"admin", "operator"}:
                 self.user_role_change.set(role_value)
+            rfid_status = "unbound"
+            if item.get("rfid_bound"):
+                rfid_status = f"bound (*{_safe_text(item.get('rfid_uid_last4'))})"
             self.user_context_var.set(
                 f"Selected user #{item['id']} | {_safe_text(item.get('username'))} | {_safe_text(item.get('role'))} | "
-                f"{_format_status(item.get('is_active', True))}"
+                f"{_format_status(item.get('is_active', True))} | RFID {rfid_status}"
             )
 
     def refresh_users(self) -> None:
@@ -1424,6 +1453,41 @@ class AdminScreen(ctk.CTkFrame):
             return
         self.refresh_users()
         self._set_status(f"Role user #{user_id} diubah menjadi {new_role}.")
+
+    def bind_selected_user_rfid(self) -> None:
+        user_id = self._selected_treeview_id(self.users_table)
+        if user_id is None:
+            messagebox.showwarning("Users", "Pilih user dulu.")
+            return
+        rfid_uid = self.user_rfid_uid.get().strip()
+        if not rfid_uid:
+            messagebox.showerror("Users", "Scan kartu RFID dulu.")
+            return
+        if not self._confirm_action("Bind RFID", f"Bind atau replace kartu RFID untuk user #{user_id}? Session user akan dicabut."):
+            return
+        try:
+            self.api.bind_user_rfid(user_id, rfid_uid)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Users", str(exc))
+            return
+        self.user_rfid_uid.delete(0, "end")
+        self.refresh_users()
+        self._set_status(f"RFID user #{user_id} berhasil dibind.")
+
+    def clear_selected_user_rfid(self) -> None:
+        user_id = self._selected_treeview_id(self.users_table)
+        if user_id is None:
+            messagebox.showwarning("Users", "Pilih user dulu.")
+            return
+        if not self._confirm_action("Clear RFID", f"Hapus binding RFID user #{user_id}? Session user akan dicabut."):
+            return
+        try:
+            self.api.clear_user_rfid(user_id)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Users", str(exc))
+            return
+        self.refresh_users()
+        self._set_status(f"RFID user #{user_id} dihapus.")
 
     def set_selected_user_active(self, is_active: bool) -> None:
         user_id = self._selected_treeview_id(self.users_table)

@@ -65,45 +65,90 @@ class LoginFrame(ctk.CTkFrame):
             text_color=TEXT_SECONDARY,
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=24, pady=(0, 20))
 
-        ctk.CTkLabel(card, text="Runtime" if self._local_only else "Server URL", text_color=TEXT_PRIMARY).grid(row=2, column=0, sticky="w", padx=24, pady=8)
-        ctk.CTkLabel(card, text="Username", text_color=TEXT_PRIMARY).grid(row=3, column=0, sticky="w", padx=24, pady=8)
-        ctk.CTkLabel(card, text="Password", text_color=TEXT_PRIMARY).grid(row=4, column=0, sticky="w", padx=24, pady=8)
+        ctk.CTkLabel(
+            card,
+            text="Login dengan username/password atau scan RFID.",
+            font=("Segoe UI", 11, "bold"),
+            text_color=TEXT_SECONDARY,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=24, pady=(0, 8))
+
+        ctk.CTkLabel(card, text="Runtime" if self._local_only else "Server URL", text_color=TEXT_PRIMARY).grid(row=3, column=0, sticky="w", padx=24, pady=8)
+        ctk.CTkLabel(card, text="Username", text_color=TEXT_PRIMARY).grid(row=4, column=0, sticky="w", padx=24, pady=8)
+        ctk.CTkLabel(card, text="Password", text_color=TEXT_PRIMARY).grid(row=5, column=0, sticky="w", padx=24, pady=8)
+        ctk.CTkLabel(card, text="RFID Card", text_color=TEXT_PRIMARY).grid(row=6, column=0, sticky="w", padx=24, pady=8)
 
         self.base_url_var = tk.StringVar(value=DEFAULT_SERVER_URL)
         self.username_var = tk.StringVar(value="operator")
         self.password_var = tk.StringVar(value="operator123")
+        self.rfid_uid_var = tk.StringVar()
 
         self.base_url_entry = ctk.CTkEntry(card, textvariable=self.base_url_var, width=420, fg_color="#0f1c2b", border_color="#26445f", text_color=TEXT_PRIMARY)
         self.username_entry = ctk.CTkEntry(card, textvariable=self.username_var, width=420, fg_color="#0f1c2b", border_color="#26445f", text_color=TEXT_PRIMARY)
         self.password_entry = ctk.CTkEntry(card, textvariable=self.password_var, show="*", width=420, fg_color="#0f1c2b", border_color="#26445f", text_color=TEXT_PRIMARY)
-        self.base_url_entry.grid(row=2, column=1, sticky="ew", padx=(0, 24), pady=8)
-        self.username_entry.grid(row=3, column=1, sticky="ew", padx=(0, 24), pady=8)
-        self.password_entry.grid(row=4, column=1, sticky="ew", padx=(0, 24), pady=8)
+        self.rfid_entry = ctk.CTkEntry(card, textvariable=self.rfid_uid_var, width=420, fg_color="#0f1c2b", border_color="#26445f", text_color=TEXT_PRIMARY)
+        self.base_url_entry.grid(row=3, column=1, sticky="ew", padx=(0, 24), pady=8)
+        self.username_entry.grid(row=4, column=1, sticky="ew", padx=(0, 24), pady=8)
+        self.password_entry.grid(row=5, column=1, sticky="ew", padx=(0, 24), pady=8)
+        self.rfid_entry.grid(row=6, column=1, sticky="ew", padx=(0, 24), pady=8)
         if self._local_only:
             self.base_url_entry.configure(state="disabled")
+        ctk.CTkLabel(
+            card,
+            text="Scan kartu RFID di field ini untuk login langsung.",
+            font=("Segoe UI", 11),
+            text_color=TEXT_SECONDARY,
+        ).grid(row=7, column=1, sticky="w", padx=(0, 24), pady=(0, 8))
 
         ctk.CTkButton(
             card,
-            text="Login",
-            command=self._submit,
+            text="Login Username/Password",
+            command=self._submit_password,
+            fg_color=ACCENT,
+            hover_color=ACCENT_HOVER,
+            text_color=TEXT_ON_ACCENT,
+            width=200,
+        ).grid(row=8, column=1, sticky="w", padx=(0, 24), pady=(18, 24))
+
+        ctk.CTkButton(
+            card,
+            text="Login RFID",
+            command=self._submit_rfid,
             fg_color=ACCENT,
             hover_color=ACCENT_HOVER,
             text_color=TEXT_ON_ACCENT,
             width=140,
-        ).grid(row=5, column=1, sticky="e", padx=(0, 24), pady=(18, 24))
+        ).grid(row=8, column=1, sticky="e", padx=(0, 24), pady=(18, 24))
 
-        self.username_entry.bind("<Return>", lambda _event: self._submit())
-        self.password_entry.bind("<Return>", lambda _event: self._submit())
+        self.username_entry.bind("<Return>", lambda _event: self._submit_password())
+        self.password_entry.bind("<Return>", lambda _event: self._submit_password())
+        self.rfid_entry.bind("<Return>", lambda _event: self._submit())
 
-    def _submit(self) -> None:
+    def _submit_password(self) -> None:
         self._on_login(
             self.base_url_var.get().strip(),
+            "password",
             self.username_var.get().strip(),
             self.password_var.get().strip(),
+            "",
         )
 
+    def _submit_rfid(self) -> None:
+        rfid_uid = self.rfid_uid_var.get().strip()
+        self.rfid_uid_var.set("")
+        self._on_login(
+            self.base_url_var.get().strip(),
+            "rfid",
+            "",
+            "",
+            rfid_uid,
+        )
+
+    def _submit(self) -> None:
+        self._submit_rfid()
+
     def focus_credentials(self) -> None:
-        self.username_entry.focus_set()
+        self.rfid_entry.focus_set()
+        self.rfid_entry.select_range(0, "end")
 
     def set_base_url(self, value: str) -> None:
         self.base_url_var.set(value)
@@ -118,6 +163,7 @@ class QcSuiteDesktopApp(ctk.CTk):
         self.geometry("1440x900")
         self.minsize(1160, 720)
         self.configure(fg_color=APP_BG)
+        self._enter_kiosk_mode()
 
         style = ttk.Style(self)
         configure_ttk_navy_theme(style)
@@ -155,28 +201,62 @@ class QcSuiteDesktopApp(ctk.CTk):
         self.screen_host.pack(fill="both", expand=True)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind_all("<Control-Shift-Q>", lambda _event: self._on_close())
+        self.bind_all("<Control-Shift-q>", lambda _event: self._on_close())
         self._show_login()
+
+    def _enter_kiosk_mode(self) -> None:
+        try:
+            self.overrideredirect(True)
+            screen_width = self.winfo_screenwidth()
+            screen_height = self.winfo_screenheight()
+            self.geometry(f"{screen_width}x{screen_height}+0+0")
+            self.lift()
+            self.after_idle(self.focus_force)
+        except tk.TclError:
+            try:
+                self.attributes("-fullscreen", True)
+            except tk.TclError:
+                pass
+
+    def _focus_login_rfid(self) -> None:
+        try:
+            if self.login_frame.winfo_ismapped():
+                self.focus_force()
+                self.login_frame.focus_credentials()
+        except tk.TclError:
+            return
 
     def _show_login(self) -> None:
         self._teardown_screen()
         self.shell.pack_forget()
         self.login_frame.set_base_url(self.session_state.base_url if not self.local_only else DEFAULT_SERVER_URL)
         self.login_frame.pack(fill="both", expand=True)
-        self.login_frame.focus_credentials()
+        self.after_idle(self._focus_login_rfid)
+        self.after(100, self._focus_login_rfid)
 
     def _show_shell(self) -> None:
         self.login_frame.pack_forget()
         self.shell.pack(fill="both", expand=True)
 
-    def _handle_login(self, base_url: str, username: str, password: str) -> None:
+    def _handle_login(self, base_url: str, login_method: str, username: str, password: str, rfid_uid: str) -> None:
         if self.local_only:
             base_url = DEFAULT_SERVER_URL
-        if (not self.local_only and not base_url) or not username or not password:
-            messagebox.showerror("Login", "Username dan password wajib diisi." if self.local_only else "Server URL, username, dan password wajib diisi.")
+        if (not self.local_only and not base_url):
+            messagebox.showerror("Login", "Server URL wajib diisi.")
             return
         try:
             self.api = ApiClient(base_url)
-            auth_payload = self.api.login(username, password)
+            if login_method == "rfid":
+                if not rfid_uid:
+                    messagebox.showerror("Login", "Kartu RFID wajib discan.")
+                    return
+                auth_payload = self.api.login_rfid(rfid_uid)
+            else:
+                if not username or not password:
+                    messagebox.showerror("Login", "Username dan password wajib diisi.")
+                    return
+                auth_payload = self.api.login(username, password)
             token = auth_payload["token"]
             self.api.set_token(token)
             user = self.api.me()

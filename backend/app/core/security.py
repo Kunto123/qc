@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from shared.contracts.auth import UserInfo
+
+
+_RFID_ALLOWED_PATTERN = re.compile(r"^[A-Z0-9]{4,64}$")
 
 
 def hash_password(password: str, salt: str | None = None) -> str:
@@ -28,6 +32,25 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
     candidate = hash_password(password, salt)
     return hmac.compare_digest(candidate, stored_hash)
+
+
+def normalize_rfid_uid(raw_uid: object) -> str:
+    """Normalize RFID keyboard-wedge output into a stable UID string."""
+    value = str(raw_uid or "").strip()
+    normalized = re.sub(r"[\s:\-]", "", value).upper()
+    if not _RFID_ALLOWED_PATTERN.fullmatch(normalized):
+        raise ValueError("RFID UID must be 4-64 alphanumeric characters.")
+    return normalized
+
+
+def hash_rfid_uid(normalized_uid: str, secret_key: str) -> str:
+    secret = str(secret_key or "").encode("utf-8")
+    payload = str(normalized_uid or "").encode("utf-8")
+    return hmac.new(secret, payload, hashlib.sha256).hexdigest()
+
+
+def rfid_uid_last4(normalized_uid: str) -> str:
+    return str(normalized_uid or "")[-4:]
 
 
 def _utcnow() -> datetime:

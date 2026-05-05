@@ -106,11 +106,12 @@ Lalu set `QC_SUITE_LOCAL_ONLY=0` dan `QC_SUITE_SERVER_URL=http://IP:8100` pada c
 
 ### 5. Login ke aplikasi
 
-Gunakan akun seed bawaan:
+Login page mendukung dua cara:
 
-- `admin / admin123`
-- `operator / operator123`
-- `engineer / engineer123`
+- Username/password yang lama masih bisa dipakai seperti sebelumnya.
+- RFID lewat Ajfwm RFID Reader mode USB keyboard HID. Pastikan cursor berada di field `RFID Card`, lalu scan kartu. UID kartu dikirim ke backend, dicocokkan dengan binding user, dan session/token tetap memakai mekanisme auth yang sama.
+
+Kalau ingin login langsung dengan kartu, fokuskan field RFID lalu scan. Kalau ingin login manual, gunakan field username dan password di halaman yang sama.
 
 ### 6. Smoke check lokal
 

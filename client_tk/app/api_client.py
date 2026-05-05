@@ -143,6 +143,9 @@ class ApiClient:
     def login(self, username: str, password: str) -> dict:
         return self._post("/auth/login", {"username": username, "password": password})
 
+    def login_rfid(self, rfid_uid: str) -> dict:
+        return self._post("/auth/login", {"rfid_uid": rfid_uid})
+
     def me(self) -> dict:
         return self._get("/auth/me")
 
@@ -278,6 +281,12 @@ class ApiClient:
 
     def revoke_user_sessions(self, user_id: int) -> dict:
         return self._post(f"/auth/users/{user_id}/revoke-sessions", {})
+
+    def bind_user_rfid(self, user_id: int, rfid_uid: str) -> dict:
+        return self._post(f"/auth/users/{user_id}/rfid", {"rfid_uid": rfid_uid})
+
+    def clear_user_rfid(self, user_id: int) -> dict:
+        return self._delete(f"/auth/users/{user_id}/rfid")
 
     def list_profiles(self) -> list[dict]:
         return self._get("/calibration/profiles")
