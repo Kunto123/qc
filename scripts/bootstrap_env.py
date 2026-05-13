@@ -138,37 +138,25 @@ def main(check: bool = False) -> int:
         print("[bootstrap] SQL Server mirroring enabled — ensuring schema …")
         if not check:
             try:
-                from backend.app.repositories.sqlserver.auth_audit_repository import SqlServerAuthAuditRepository
                 from backend.app.repositories.sqlserver.inspection_mirror_repository import SqlServerInspectionMirrorRepository
-                from backend.app.repositories.sqlserver.session_store import SqlServerTokenStore
                 from backend.app.repositories.sqlserver.users_repository import SqlServerUsersRepository
                 SqlServerUsersRepository(cfg)
                 print("[bootstrap]   dbo.qc_user_accounts ✓")
-                SqlServerTokenStore(cfg)
-                print("[bootstrap]   dbo.qc_user_sessions ✓")
                 SqlServerInspectionMirrorRepository(cfg)
                 print("[bootstrap]   dbo.qc_inspection_push ✓")
-                SqlServerAuthAuditRepository(cfg)
-                print("[bootstrap]   dbo.qc_auth_audit ✓")
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"SQL Server schema migration failed: {exc}")
     elif backend == "postgresql":
         print("[bootstrap] PostgreSQL backend enabled — ensuring schema …")
         if not check:
             try:
-                from backend.app.repositories.postgres.auth_audit_repository import PostgresAuthAuditRepository
                 from backend.app.repositories.postgres.inspection_mirror_repository import PostgresInspectionMirrorRepository
-                from backend.app.repositories.postgres.session_store import PostgresTokenStore
                 from backend.app.repositories.postgres.users_repository import PostgresUsersRepository
 
                 PostgresUsersRepository(cfg)
                 print("[bootstrap]   public.qc_user_accounts ✓")
-                PostgresTokenStore(cfg)
-                print("[bootstrap]   public.qc_user_sessions ✓")
                 PostgresInspectionMirrorRepository(cfg)
                 print("[bootstrap]   public.qc_inspection_push ✓")
-                PostgresAuthAuditRepository(cfg)
-                print("[bootstrap]   public.qc_auth_audit ✓")
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"PostgreSQL schema migration failed: {exc}")
     else:

@@ -227,6 +227,10 @@ MSSQL_PASSWORD=...
 MSSQL_DRIVER=ODBC Driver 17 for SQL Server
 ```
 
+Relational backend hanya dipakai untuk `qc_user_accounts` dan `qc_inspection_push`.
+Auth audit tetap lokal di `data/json_store/auth_audit.jsonl`, dan session auth
+memory-only sehingga login aktif akan reset saat backend restart.
+
 ### 2. Jalankan backend di PC server
 
 Untuk development/internal testing:

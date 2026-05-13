@@ -14,13 +14,9 @@ from backend.app.repositories.inspection_results_repository import InspectionRes
 from backend.app.repositories.models_repository import ModelsRepository
 from backend.app.repositories.profiles_repository import ProfilesRepository
 from backend.app.repositories.reject_log_repository import RejectLogRepository
-from backend.app.repositories.postgres.auth_audit_repository import PostgresAuthAuditRepository
 from backend.app.repositories.postgres.inspection_mirror_repository import PostgresInspectionMirrorRepository
-from backend.app.repositories.postgres.session_store import PostgresTokenStore
 from backend.app.repositories.postgres.users_repository import PostgresUsersRepository
-from backend.app.repositories.sqlserver.auth_audit_repository import SqlServerAuthAuditRepository
 from backend.app.repositories.sqlserver.inspection_mirror_repository import SqlServerInspectionMirrorRepository
-from backend.app.repositories.sqlserver.session_store import SqlServerTokenStore
 from backend.app.repositories.sqlserver.users_repository import SqlServerUsersRepository
 from backend.app.repositories.templates_repository import TemplatesRepository
 from backend.app.repositories.training_repository import TrainingRepository
@@ -47,13 +43,7 @@ users_repo = (
     if database_backend == "sqlserver"
     else UsersRepository()
 )
-audit_repo = (
-    PostgresAuthAuditRepository(app_config)
-    if database_backend == "postgresql"
-    else SqlServerAuthAuditRepository(app_config)
-    if database_backend == "sqlserver"
-    else AuthAuditRepository()
-)
+audit_repo = AuthAuditRepository()
 templates_repo = TemplatesRepository()
 deployments_repo = DeploymentsRepository()
 profiles_repo = ProfilesRepository()
@@ -78,13 +68,7 @@ inspection_results_repo = HybridInspectionResultsRepository(
     inspection_sql_mirror_repo,
 )
 
-token_store = (
-    PostgresTokenStore(app_config, ttl_seconds=app_config.access_token_ttl_seconds)
-    if database_backend == "postgresql"
-    else SqlServerTokenStore(app_config, ttl_seconds=app_config.access_token_ttl_seconds)
-    if database_backend == "sqlserver"
-    else TokenStore(ttl_seconds=app_config.access_token_ttl_seconds)
-)
+token_store = TokenStore(ttl_seconds=app_config.access_token_ttl_seconds)
 
 template_runtime_service = TemplateRuntimeService(templates_repo, deployments_repo)
 sticker_inference_service = StickerInferenceService(app_config, models_repo, device_runtime)

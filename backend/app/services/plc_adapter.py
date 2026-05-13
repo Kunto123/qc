@@ -5,9 +5,22 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any
 
-from pymodbus.client import ModbusSerialClient, ModbusTcpClient
-from pymodbus.exceptions import ConnectionException, ModbusIOException
-from pymodbus.framer import FramerType
+try:
+    from pymodbus.client import ModbusSerialClient, ModbusTcpClient
+    from pymodbus.exceptions import ConnectionException, ModbusIOException
+    from pymodbus.framer import FramerType
+except ModuleNotFoundError:  # pragma: no cover - exercised by environments without PLC deps
+    ModbusSerialClient = None
+    ModbusTcpClient = None
+
+    class ConnectionException(Exception):
+        pass
+
+    class ModbusIOException(Exception):
+        pass
+
+    class FramerType:
+        RTU = "rtu"
 
 # Exception types that indicate a transport failure and warrant a reconnect+retry.
 # RuntimeError (raised on Modbus protocol errors) is intentionally excluded so a
@@ -105,6 +118,8 @@ class ModbusTcpPlcAdapter(PlcAdapter):
     ) -> None:
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
+        if client_factory is None and ModbusTcpClient is None:
+            raise RuntimeError("pymodbus is required when PLC Modbus TCP is enabled")
 
         self._host = self._validate_host(host)
         self._port = self._validate_port(port)
@@ -406,6 +421,8 @@ class ModbusRtuPlcAdapter(ModbusTcpPlcAdapter):
         readback_expected_hold_value: int = 1,
         readback_expected_release_value: int = 0,
     ) -> None:
+        if ModbusSerialClient is None:
+            raise RuntimeError("pymodbus is required when PLC Modbus RTU is enabled")
         serial_port = self._validate_serial_port(serial_port)
         baudrate = self._validate_baudrate(baudrate)
         parity = self._normalize_parity(parity)

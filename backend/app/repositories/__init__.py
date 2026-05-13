@@ -6,7 +6,6 @@ from backend.app.repositories.inspection_results_repository import InspectionRes
 from backend.app.repositories.models_repository import ModelsRepository
 from backend.app.repositories.profiles_repository import ProfilesRepository
 from backend.app.repositories.sqlserver.inspection_mirror_repository import SqlServerInspectionMirrorRepository
-from backend.app.repositories.sqlserver.session_store import SqlServerTokenStore
 from backend.app.repositories.templates_repository import TemplatesRepository
 from backend.app.repositories.training_repository import TrainingRepository
 from backend.app.repositories.users_repository import UsersRepository
@@ -21,7 +20,6 @@ __all__ = [
     "ModelsRepository",
     "ProfilesRepository",
     "SqlServerInspectionMirrorRepository",
-    "SqlServerTokenStore",
     "TemplatesRepository",
     "TrainingRepository",
     "UsersRepository",
