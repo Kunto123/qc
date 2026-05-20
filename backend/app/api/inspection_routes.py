@@ -361,6 +361,7 @@ def export_inspections():
         "id", "inspected_at", "line_id", "station_id", "part_name",
         "decision_code", "reject_reason_code",
         "part_ready_match_ratio", "sticker_confidence",
+        "ocr_text", "ocr_confidence", "ocr_status", "anchor_offset", "pose_angle",
         "detected_class", "expected_class",
         "template_version_id", "push_status",
     ]

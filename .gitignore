@@ -26,6 +26,7 @@ model-minipc/*
 .coverage.*
 coverage/
 htmlcov/
+.tmp-local-only-test/
 
 # Build / packaging artifacts
 build/

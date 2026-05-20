@@ -70,6 +70,15 @@ class InspectionResult:
     sticker_tilt_expected: float | None = None
     sticker_tilt_deviation: float | None = None
     sticker_tilt_threshold: float | None = None
+    ocr_text: str | None = None
+    ocr_confidence: float | None = None
+    ocr_engine: str | None = None
+    ocr_status: str | None = None
+    text_bbox: dict[str, Any] | None = None
+    dot_bbox: dict[str, Any] | None = None
+    dot_position: dict[str, Any] | None = None
+    anchor_offset: dict[str, Any] | None = None
+    pose_angle: float | None = None
     validation_details: dict[str, Any] | None = None
     part_ready_roi_meta: dict[str, Any] | None = None
     sticker_roi_meta: dict[str, Any] | None = None

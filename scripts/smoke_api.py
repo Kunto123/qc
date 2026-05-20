@@ -118,6 +118,10 @@ def main() -> None:
         raise RuntimeError(f"Expected committed count on first part: {frame_payload}")
     if not frame_payload.get("sticker_detection", {}).get("model_path"):
         raise RuntimeError(f"Expected sticker model path metadata in payload: {frame_payload.get('sticker_detection')}")
+    validation = frame_payload.get("validation", {})
+    for field in ("ocr_status", "ocr_engine", "anchor_offset", "pose_angle"):
+        if field not in validation:
+            raise RuntimeError(f"Expected OCR/anchor observability field `{field}` in validation: {validation}")
 
     duplicate_response = client.post(
         f"/inspection/sessions/{session_payload['session_id']}/frame",

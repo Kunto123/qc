@@ -30,10 +30,14 @@ logger = logging.getLogger(__name__)
 KNOWN_REJECT_CODES = (
     RejectReasonCode.NOT_FOUND.value,
     RejectReasonCode.WRONG_TYPE.value,
+    RejectReasonCode.WRONG_TEXT.value,
     RejectReasonCode.LOW_ROI_CONF.value,
     RejectReasonCode.LOW_CLASS_CONF.value,
+    RejectReasonCode.LOW_OCR_CONF.value,
     RejectReasonCode.OUT_OF_POSITION.value,
     RejectReasonCode.OUT_OF_ANGLE.value,
+    RejectReasonCode.ANCHOR_NOT_FOUND.value,
+    RejectReasonCode.ANCHOR_MISMATCH.value,
     RejectReasonCode.PART_NOT_READY.value,
     RejectReasonCode.ERROR.value,
 )
@@ -170,6 +174,16 @@ class InspectionSessionService:
             max(0, int(app_config.part_ready_settle_ms_default))
             if app_config is not None
             else 0
+        )
+        self._default_ocr_mode = (
+            str(getattr(app_config, "sticker_ocr_mode", "legacy") or "legacy").strip().lower()
+            if app_config is not None
+            else "legacy"
+        )
+        self._default_ocr_min_confidence = (
+            max(0.0, min(1.0, float(getattr(app_config, "default_ocr_min_confidence", 0.70))))
+            if app_config is not None
+            else 0.70
         )
         self._plc_worker = plc_worker
         self._reject_log_repo = reject_log_repo
@@ -385,6 +399,12 @@ class InspectionSessionService:
             inference_payload = self._run_sticker_inference(sticker_frame, state)
             inference_ms = _elapsed_ms(inference_started)
             detections = list(inference_payload.get("detections") or [])
+            stage_timings = dict(inference_payload.get("timings") or {})
+            for key, value in stage_timings.items():
+                try:
+                    timings[f"inference_{key}"] = float(value)
+                except (TypeError, ValueError):
+                    continue
             sticker_detection = self._build_sticker_detection_payload(
                 detections,
                 skipped=False,
@@ -395,6 +415,10 @@ class InspectionSessionService:
                 fallback_reason=inference_payload.get("fallback_reason"),
                 raw_detection_count=inference_payload.get("raw_detection_count"),
                 allowed_labels_filter=inference_payload.get("allowed_labels_filter"),
+                anchor=inference_payload.get("anchor"),
+                ocr=inference_payload.get("ocr"),
+                geometry=inference_payload.get("geometry"),
+                stage_timings=stage_timings,
             )
             sticker_detection.update(
                 {
@@ -432,6 +456,7 @@ class InspectionSessionService:
             username=username,
             user_id=user_id,
         )
+        validation = self._attach_ocr_observability(validation, sticker_detection, state)
         timings["validation_ms"] = _elapsed_ms(validation_started)
         validation_details = validation.get("validation_details") or {}
         if validation_details:
@@ -618,6 +643,7 @@ class InspectionSessionService:
             frame,
             state.template.vision,
             expected_class=state.template.sticker.expected_class,
+            sticker_rule=state.template.sticker,
         )
 
     def _build_sticker_detection_payload(
@@ -633,6 +659,10 @@ class InspectionSessionService:
         fallback_reason: str | None = None,
         raw_detection_count: int | None = None,
         allowed_labels_filter: list[str] | None = None,
+        anchor: dict[str, Any] | None = None,
+        ocr: dict[str, Any] | None = None,
+        geometry: dict[str, Any] | None = None,
+        stage_timings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         best = max(detections, key=lambda item: float(item.get("confidence") or 0.0), default=None)
         return {
@@ -646,6 +676,10 @@ class InspectionSessionService:
             "count": len(detections),
             "raw_detection_count": raw_detection_count,
             "allowed_labels_filter": allowed_labels_filter,
+            "anchor": dict(anchor or {}),
+            "ocr": dict(ocr or {}),
+            "geometry": dict(geometry or {}),
+            "stage_timings": dict(stage_timings or {}),
             "items": detections,
             "best": best,
         }
@@ -751,6 +785,224 @@ class InspectionSessionService:
     def _normalize_label(self, value: Any) -> str:
         return str(value or "").strip().lower()
 
+    def _resolve_ocr_mode(self, state: SessionState) -> str:
+        sticker = state.template.sticker
+        explicit = str(getattr(sticker, "ocr_mode", "") or "").strip().lower()
+        validator_mode = str(getattr(sticker, "validator_mode", "") or "").strip().lower()
+        raw_mode = explicit or self._default_ocr_mode
+        if not explicit and validator_mode in {"ocr", "ocr_anchor", "anchor_ocr", "ocr_primary"}:
+            raw_mode = "primary"
+        if raw_mode in {"primary", "ocr", "ocr_primary", "anchor_ocr"}:
+            return "primary"
+        if raw_mode in {"shadow", "ocr_shadow"}:
+            return "shadow"
+        return "legacy"
+
+    @staticmethod
+    def _ocr_validation_fields(detection_payload: dict[str, Any]) -> dict[str, Any]:
+        anchor = detection_payload.get("anchor") or {}
+        ocr = detection_payload.get("ocr") or {}
+        geometry = detection_payload.get("geometry") or {}
+        return {
+            "ocr_text": ocr.get("canonical_text") or ocr.get("text") or None,
+            "ocr_confidence": ocr.get("confidence"),
+            "ocr_engine": ocr.get("engine"),
+            "ocr_status": ocr.get("status"),
+            "text_bbox": anchor.get("text_bbox"),
+            "dot_bbox": anchor.get("dot_bbox"),
+            "dot_position": geometry.get("dot_position") or anchor.get("dot_position"),
+            "anchor_offset": geometry.get("anchor_offset"),
+            "pose_angle": geometry.get("pose_angle"),
+        }
+
+    def _attach_ocr_observability(
+        self,
+        validation: dict[str, Any],
+        detection_payload: dict[str, Any],
+        state: SessionState,
+    ) -> dict[str, Any]:
+        result = dict(validation)
+        for key, value in self._ocr_validation_fields(detection_payload).items():
+            if result.get(key) is None:
+                result[key] = value
+        details = result.get("validation_details")
+        if isinstance(details, dict):
+            ocr_mode = self._resolve_ocr_mode(state)
+            ocr_payload = dict(detection_payload.get("ocr") or {})
+            anchor_payload = dict(detection_payload.get("anchor") or {})
+            geometry_payload = dict(detection_payload.get("geometry") or {})
+            details.setdefault("ocr_mode", ocr_mode)
+            details.setdefault("ocr", ocr_payload)
+            details.setdefault("anchor", anchor_payload)
+            details.setdefault("geometry", geometry_payload)
+            if ocr_mode == "shadow":
+                details["ocr_shadow"] = {
+                    "anchor_status": anchor_payload.get("status"),
+                    "ocr_status": ocr_payload.get("status"),
+                    "geometry_status": geometry_payload.get("status"),
+                    "ocr_text": ocr_payload.get("canonical_text") or ocr_payload.get("text"),
+                    "ocr_confidence": ocr_payload.get("confidence"),
+                    "match_expected": bool(ocr_payload.get("match_expected")),
+                    "anchor_offset": geometry_payload.get("anchor_offset"),
+                    "pose_angle": geometry_payload.get("pose_angle"),
+                }
+        return result
+
+    def _validate_ocr_anchor(
+        self,
+        *,
+        state: SessionState,
+        detection_payload: dict[str, Any],
+        part_ready_payload: dict[str, Any],
+        username: str | None,
+        user_id: int | None,
+        line_id: str,
+        thresholds: dict[str, Any],
+        detection_context: dict[str, Any],
+        max_tilt_degrees_value: float | None,
+    ) -> dict[str, Any]:
+        sticker = state.template.sticker
+        anchor = detection_payload.get("anchor") or {}
+        ocr = detection_payload.get("ocr") or {}
+        geometry = detection_payload.get("geometry") or {}
+
+        anchor_min_confidence = (
+            thresholds["min_roi_confidence"]
+            if getattr(sticker, "anchor_min_confidence", None) is None
+            else float(getattr(sticker, "anchor_min_confidence") or 0.0)
+        )
+        dot_min_confidence = (
+            anchor_min_confidence
+            if getattr(sticker, "dot_min_confidence", None) is None
+            else float(getattr(sticker, "dot_min_confidence") or 0.0)
+        )
+        ocr_min_confidence = (
+            self._default_ocr_min_confidence
+            if getattr(sticker, "ocr_min_confidence", None) is None
+            else float(getattr(sticker, "ocr_min_confidence") or 0.0)
+        )
+        offset_limit_x = (
+            getattr(sticker, "max_anchor_offset_x", None)
+            if getattr(sticker, "max_anchor_offset_x", None) is not None
+            else sticker.max_offset_x
+        )
+        offset_limit_y = (
+            getattr(sticker, "max_anchor_offset_y", None)
+            if getattr(sticker, "max_anchor_offset_y", None) is not None
+            else sticker.max_offset_y
+        )
+        offset_x = None
+        offset_y = None
+        anchor_offset = geometry.get("anchor_offset") or {}
+        if anchor_offset:
+            offset_x = float(anchor_offset.get("x", 0.0))
+            offset_y = float(anchor_offset.get("y", 0.0))
+
+        reject_reason = None
+        if anchor.get("text_anchor") is None or anchor.get("center_dot") is None:
+            reject_reason = RejectReasonCode.ANCHOR_NOT_FOUND.value
+        elif float(anchor.get("text_confidence") or 0.0) < anchor_min_confidence:
+            reject_reason = RejectReasonCode.LOW_ROI_CONF.value
+        elif float(anchor.get("dot_confidence") or 0.0) < dot_min_confidence:
+            reject_reason = RejectReasonCode.LOW_ROI_CONF.value
+        elif str(ocr.get("status") or "") != "ok":
+            reject_reason = RejectReasonCode.LOW_OCR_CONF.value
+        elif ocr.get("confidence") is not None and float(ocr.get("confidence") or 0.0) < ocr_min_confidence:
+            reject_reason = RejectReasonCode.LOW_OCR_CONF.value
+        elif not bool(ocr.get("match_expected")):
+            reject_reason = RejectReasonCode.WRONG_TEXT.value
+        elif offset_x is None or offset_y is None:
+            reject_reason = RejectReasonCode.ANCHOR_MISMATCH.value
+        elif offset_limit_x is not None and abs(offset_x) > float(offset_limit_x):
+            reject_reason = RejectReasonCode.OUT_OF_POSITION.value
+        elif offset_limit_y is not None and abs(offset_y) > float(offset_limit_y):
+            reject_reason = RejectReasonCode.OUT_OF_POSITION.value
+        elif (
+            thresholds["tilt_gate_enabled"]
+            and max_tilt_degrees_value is not None
+            and geometry.get("pose_deviation") is not None
+            and float(geometry.get("pose_deviation") or 0.0) > max_tilt_degrees_value
+        ):
+            reject_reason = RejectReasonCode.OUT_OF_ANGLE.value
+
+        decision = DecisionCode.ACCEPT.value if reject_reason is None else DecisionCode.REJECT.value
+        status = "accepted" if reject_reason is None else reject_reason.lower()
+        detected_text = ocr.get("canonical_text") or ocr.get("text")
+        selected_candidate = {
+            "label": detected_text,
+            "normalized_label": self._normalize_label(detected_text),
+            "confidence": ocr.get("confidence"),
+            "class_confidence": ocr.get("confidence"),
+            "bbox": anchor.get("text_bbox"),
+            "center": geometry.get("dot_position") or anchor.get("dot_position"),
+            "offset": {"x": round(offset_x or 0.0, 2), "y": round(offset_y or 0.0, 2)} if offset_x is not None and offset_y is not None else None,
+            "match_expected": bool(ocr.get("match_expected")),
+            "source": "ocr_anchor",
+        }
+        target = {
+            "target_id": "target-1",
+            "part_name": sticker.part_name,
+            "expected_class": sticker.expected_class,
+            "detected_class": detected_text,
+            "decision": decision,
+            "decision_code": decision,
+            "reject_reason_code": reject_reason,
+            "data1": ocr.get("confidence"),
+            "data2": anchor.get("dot_confidence"),
+            "position": geometry.get("dot_position") or {},
+            "offset": selected_candidate.get("offset") or {},
+            "candidate_source": "ocr_anchor",
+        }
+        return {
+            "decision": decision,
+            "decision_code": decision,
+            "reject_reason_code": reject_reason,
+            "part_name": sticker.part_name,
+            "line_id": line_id,
+            "station_id": state.station_id,
+            "data1": part_ready_payload.get("part_ready_confidence"),
+            "data2": ocr.get("confidence"),
+            "targets": [target],
+            "operator_user_id": user_id,
+            "mp_check": username,
+            "detected_class": detected_text,
+            "expected_class": sticker.expected_class,
+            "sticker_confidence": ocr.get("confidence"),
+            "sticker_bbox": anchor.get("text_bbox"),
+            "sticker_backend": detection_context["backend"],
+            "sticker_tilt_angle": geometry.get("pose_angle"),
+            "sticker_tilt_expected": thresholds["expected_tilt_degrees"],
+            "sticker_tilt_deviation": geometry.get("pose_deviation"),
+            "sticker_tilt_threshold": max_tilt_degrees_value,
+            "validation_details": {
+                "status": status,
+                "candidate_source": "ocr_anchor",
+                "selected_candidate": selected_candidate,
+                "candidate_count": int(detection_payload.get("count") or 0),
+                "matching_candidate_count": 1 if ocr.get("match_expected") else 0,
+                "expected_center": geometry.get("expected_dot_position"),
+                "tilt": {
+                    "status": geometry.get("status"),
+                    "angle_degrees": geometry.get("pose_angle"),
+                    "expected_tilt_degrees": thresholds["expected_tilt_degrees"],
+                    "deviation_degrees": geometry.get("pose_deviation"),
+                    "source": "anchor_geometry",
+                },
+                "thresholds": {
+                    **thresholds,
+                    "anchor_min_confidence": anchor_min_confidence,
+                    "dot_min_confidence": dot_min_confidence,
+                    "ocr_min_confidence": ocr_min_confidence,
+                    "max_anchor_offset_x": None if offset_limit_x is None else float(offset_limit_x),
+                    "max_anchor_offset_y": None if offset_limit_y is None else float(offset_limit_y),
+                },
+                "ocr": ocr,
+                "anchor": anchor,
+                "geometry": geometry,
+                "model": detection_context,
+            },
+        }
+
     def _build_validation_candidate_summaries(
         self,
         detections: list[dict[str, Any]],
@@ -833,6 +1085,7 @@ class InspectionSessionService:
         max_tilt_degrees_value = None if max_tilt_degrees is None else float(max_tilt_degrees)
         tilt_gate_enabled = bool(getattr(sticker, "tilt_gate_enabled", False))
         tilt_info = _estimate_tilt_from_roi(roi_frame, expected_tilt_degrees)
+        ocr_mode = self._resolve_ocr_mode(state)
         thresholds = {
             "min_roi_confidence": float(sticker.min_roi_confidence or 0.0),
             "min_class_confidence": (
@@ -845,6 +1098,7 @@ class InspectionSessionService:
             "tilt_gate_enabled": tilt_gate_enabled,
             "max_tilt_degrees": max_tilt_degrees_value,
             "expected_tilt_degrees": expected_tilt_degrees,
+            "ocr_mode": ocr_mode,
         }
         detection_context = {
             "backend": detection_payload.get("backend"),
@@ -921,6 +1175,18 @@ class InspectionSessionService:
                     "thresholds": thresholds,
                 },
             }
+        if ocr_mode == "primary":
+            return self._validate_ocr_anchor(
+                state=state,
+                detection_payload=detection_payload,
+                part_ready_payload=part_ready_payload,
+                username=username,
+                user_id=user_id,
+                line_id=line_id,
+                thresholds=thresholds,
+                detection_context=detection_context,
+                max_tilt_degrees_value=max_tilt_degrees_value,
+            )
         if not detections:
             return {
                 "decision": DecisionCode.REJECT.value,
@@ -1282,6 +1548,30 @@ class InspectionSessionService:
             1,
             cv2.LINE_AA,
         )
+        ocr_text = validation.get("ocr_text") or "-"
+        ocr_conf = validation.get("ocr_confidence")
+        cv2.putText(
+            overlay,
+            f"ocr={ocr_text} conf={ocr_conf if ocr_conf is not None else '-'}",
+            (12, 92),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        anchor_offset = validation.get("anchor_offset") or {}
+        if anchor_offset:
+            cv2.putText(
+                overlay,
+                f"anchor dx={anchor_offset.get('x', '-')} dy={anchor_offset.get('y', '-')}",
+                (12, 114),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
 
         for det in detections:
             pos = det["position"]
@@ -1402,6 +1692,15 @@ class InspectionSessionService:
                 "sticker_confidence": validation.get("sticker_confidence"),
                 "sticker_bbox": validation.get("sticker_bbox"),
                 "sticker_backend": validation.get("sticker_backend"),
+                "ocr_text": validation.get("ocr_text"),
+                "ocr_confidence": validation.get("ocr_confidence"),
+                "ocr_engine": validation.get("ocr_engine"),
+                "ocr_status": validation.get("ocr_status"),
+                "text_bbox": validation.get("text_bbox"),
+                "dot_bbox": validation.get("dot_bbox"),
+                "dot_position": validation.get("dot_position"),
+                "anchor_offset": validation.get("anchor_offset"),
+                "pose_angle": validation.get("pose_angle"),
                 "validation_details": validation.get("validation_details"),
                 "part_ready_roi_meta": dict(part_ready_roi_meta),
                 "sticker_roi_meta": dict(sticker_roi_meta),

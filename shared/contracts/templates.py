@@ -35,6 +35,14 @@ class VisionConfig:
     enable_ergonomic_check: bool = False
     ergonomic_pose_model_path: str | None = None
     ergonomic_min_keypoint_conf: float = 0.35
+    ocr_engine: str = "default"
+    ocr_language: str = "eng"
+    ocr_psm: int = 7
+    ocr_allowlist: str = ""
+    text_anchor_class: str = "text_anchor"
+    center_dot_class: str = "center_dot"
+    anchor_crop_padding_ratio: float = 0.08
+    anchor_crop_scale: float = 2.0
 
 
 @dataclass(slots=True)
@@ -62,6 +70,17 @@ class StickerRule:
     expected_center_y: float | None = None
     expected_tilt_degrees: float = 0.0
     max_tilt_degrees: float | None = None
+    ocr_mode: str | None = None
+    ocr_expected_text: str | None = None
+    ocr_min_confidence: float | None = None
+    ocr_regex: str | None = None
+    ocr_canonical_map: dict[str, str] = field(default_factory=dict)
+    anchor_min_confidence: float | None = None
+    dot_min_confidence: float | None = None
+    expected_dot_x: float | None = None
+    expected_dot_y: float | None = None
+    max_anchor_offset_x: float | None = None
+    max_anchor_offset_y: float | None = None
     # Tilt gate toggle: when False (default) the OUT_OF_ANGLE decision is never
     # raised — tilt telemetry is still calculated and forwarded as observability data.
     # Set True to make max_tilt_degrees an active reject gate.

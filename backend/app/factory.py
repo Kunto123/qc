@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 
 from flask import Flask, jsonify
 
@@ -21,7 +22,9 @@ logger = logging.getLogger(__name__)
 def create_app() -> Flask:
     ensure_data_dirs()
     app = Flask(__name__)
-    app.config["QC_SUITE"] = AppConfig()
+    config = AppConfig()
+    _enforce_startup_guards(config)
+    app.config["QC_SUITE"] = config
     configure_logging(app)
     app.register_blueprint(auth_blueprint)
     app.register_blueprint(template_blueprint)
@@ -56,6 +59,38 @@ def create_app() -> Flask:
 
         checks["database_backend"] = {"ok": True, "backend": backend_name}
 
+        model_path = str(app_config.default_sticker_model_path or "").strip()
+        model_exists = bool(model_path and Path(model_path).exists())
+        checks["sticker_model"] = {
+            "ok": model_exists or app_config.sticker_inference_mode in {"classic", "auto"},
+            "path": model_path or None,
+            "exists": model_exists,
+            "mode": app_config.sticker_inference_mode,
+        }
+
+        ocr_mode = str(app_config.sticker_ocr_mode or "legacy").strip().lower()
+        ocr_engine = str(app_config.default_ocr_engine or "disabled").strip().lower()
+        ocr_ok = True
+        ocr_note = "not required"
+        if app_config.sticker_ocr_required or ocr_mode in {"primary", "shadow"}:
+            ocr_ok = ocr_engine not in {"", "disabled", "none", "off"}
+            ocr_note = "configured" if ocr_ok else "OCR engine disabled"
+            if ocr_ok and ocr_engine == "tesseract":
+                try:
+                    import pytesseract  # type: ignore
+
+                    pytesseract.get_tesseract_version()
+                except Exception as exc:  # noqa: BLE001
+                    ocr_ok = False
+                    ocr_note = str(exc)
+        checks["ocr_runtime"] = {
+            "ok": ocr_ok,
+            "mode": ocr_mode,
+            "engine": ocr_engine,
+            "required": app_config.sticker_ocr_required,
+            "note": ocr_note,
+        }
+
         # Push worker
         worker_alive = push_worker._thread is not None and push_worker._thread.is_alive()  # noqa: SLF001
         checks["push_worker"] = {"ok": worker_alive, "note": "running" if worker_alive else "not started"}
@@ -89,6 +124,22 @@ def create_app() -> Flask:
 
     _register_worker_lifecycle(app)
     return app
+
+
+def _enforce_startup_guards(config: AppConfig) -> None:
+    if not config.sticker_ocr_fail_fast:
+        return
+    ocr_mode = str(config.sticker_ocr_mode or "legacy").strip().lower()
+    ocr_required = config.sticker_ocr_required or ocr_mode in {"primary", "shadow"}
+    if not ocr_required:
+        return
+    engine = str(config.default_ocr_engine or "disabled").strip().lower()
+    if engine in {"", "disabled", "none", "off"}:
+        raise RuntimeError("OCR fail-fast is enabled but QC_SUITE_OCR_ENGINE is disabled.")
+    if engine == "tesseract":
+        import pytesseract  # type: ignore
+
+        pytesseract.get_tesseract_version()
 
 
 def _register_worker_lifecycle(app: Flask) -> None:
@@ -127,4 +178,3 @@ def _register_worker_lifecycle(app: Flask) -> None:
     @app.teardown_appcontext
     def _stop_workers(_exc=None):
         pass  # process-level teardown is handled by backend.app.core.shutdown
-

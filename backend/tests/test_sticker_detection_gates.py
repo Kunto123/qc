@@ -641,5 +641,120 @@ class TiltGateToggleTest(unittest.TestCase):
         self.assertEqual(result.get("reject_reason_code"), "LOW_ROI_CONF")
 
 
+class OcrAnchorPrimaryGateTest(unittest.TestCase):
+    def _make_state(self):
+        from backend.app.models.session_state import SessionState
+        from shared.contracts.enums import SessionStatus
+        from shared.contracts.templates import (
+            CameraDefaults, InspectionTemplate, PartReadyConfig,
+            PersistenceConfig, RoiGeometry, StickerRule, VisionConfig,
+        )
+
+        sticker = StickerRule(
+            part_name="P1",
+            expected_class="K0W-HB0",
+            line="L1",
+            enabled=True,
+            validator_mode="ocr_anchor",
+            ocr_mode="primary",
+            ocr_min_confidence=0.70,
+            expected_dot_x=0.5,
+            expected_dot_y=0.5,
+            max_anchor_offset_x=5.0,
+            max_anchor_offset_y=5.0,
+        )
+        template = InspectionTemplate(
+            id=1,
+            version_id=1,
+            version_number=1,
+            name="T",
+            description="",
+            is_active=True,
+            camera=CameraDefaults(),
+            part_ready_roi=RoiGeometry(),
+            sticker_roi=RoiGeometry(),
+            vision=VisionConfig(ocr_engine="passthrough"),
+            part_ready=PartReadyConfig(),
+            sticker=sticker,
+            persistence=PersistenceConfig(),
+        )
+        return SessionState(
+            session_id="s1",
+            client_id="c1",
+            camera_index=0,
+            template=template,
+            status=SessionStatus.RUNNING,
+        )
+
+    def _detection_payload(self, *, text="K0W-HB0", match=True, anchor=True) -> dict:
+        anchor_payload = {
+            "status": "ok" if anchor else "missing_anchor",
+            "text_anchor": {"label": "text_anchor", "confidence": 0.90} if anchor else None,
+            "center_dot": {"label": "center_dot", "confidence": 0.91} if anchor else None,
+            "text_bbox": {"x1": 10.0, "y1": 10.0, "x2": 40.0, "y2": 24.0} if anchor else None,
+            "dot_bbox": {"x1": 48.0, "y1": 48.0, "x2": 52.0, "y2": 52.0} if anchor else None,
+            "text_confidence": 0.90 if anchor else None,
+            "dot_confidence": 0.91 if anchor else None,
+            "dot_position": {"x": 50.0, "y": 50.0} if anchor else None,
+        }
+        return {
+            "backend": "patched",
+            "model_path": "m.pt",
+            "meta_path": None,
+            "class_names": ["text_anchor", "center_dot"],
+            "fallback_reason": None,
+            "count": 2 if anchor else 0,
+            "anchor": anchor_payload,
+            "ocr": {
+                "status": "ok" if anchor else "anchor_not_found",
+                "engine": "passthrough",
+                "text": text,
+                "canonical_text": text,
+                "confidence": 0.86 if anchor else None,
+                "expected_text": "K0W-HB0",
+                "match_expected": match if anchor else False,
+            },
+            "geometry": {
+                "status": "ok" if anchor else "missing_anchor",
+                "dot_position": {"x": 50.0, "y": 50.0} if anchor else None,
+                "expected_dot_position": {"x": 50.0, "y": 50.0},
+                "anchor_offset": {"x": 0.0, "y": 0.0, "source": "center_dot"} if anchor else None,
+                "pose_angle": 0.0 if anchor else None,
+                "pose_deviation": 0.0 if anchor else None,
+            },
+        }
+
+    def _call_validate(self, payload: dict) -> dict:
+        service = _make_inspection_service()
+        return service._validate_sticker(
+            roi_frame=np.zeros((100, 100, 3), dtype=np.uint8),
+            state=self._make_state(),
+            detections=list(payload.get("items") or []),
+            detection_payload=payload,
+            part_ready_payload={"part_ready": True, "part_ready_confidence": 1.0},
+            username=None,
+            user_id=None,
+        )
+
+    def test_primary_ocr_anchor_accepts_matching_text_and_geometry(self) -> None:
+        result = self._call_validate(self._detection_payload())
+        result = _make_inspection_service()._attach_ocr_observability(result, self._detection_payload(), self._make_state())
+
+        self.assertEqual(result["decision"], "ACCEPT")
+        self.assertEqual(result["validation_details"]["candidate_source"], "ocr_anchor")
+        self.assertEqual(result["ocr_text"], "K0W-HB0")
+        self.assertEqual(result["anchor_offset"]["x"], 0.0)
+
+    def test_primary_ocr_anchor_rejects_wrong_text(self) -> None:
+        result = self._call_validate(self._detection_payload(text="K1Z-FA0", match=False))
+        self.assertEqual(result["decision"], "REJECT")
+        self.assertEqual(result["reject_reason_code"], "WRONG_TEXT")
+
+    def test_primary_ocr_anchor_rejects_missing_anchor(self) -> None:
+        result = self._call_validate(self._detection_payload(anchor=False))
+        self.assertEqual(result["decision"], "REJECT")
+        self.assertEqual(result["reject_reason_code"], "ANCHOR_NOT_FOUND")
+
+
 if __name__ == "__main__":
     unittest.main()
