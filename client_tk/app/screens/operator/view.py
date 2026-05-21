@@ -1492,6 +1492,8 @@ class OperatorScreen(ctk.CTkFrame):
                 self._refresh_context_summary()
                 self._update_status_badges(payload)
                 display_frame = frame
+                if display_frame is None:
+                    display_frame = self.capture.get_latest_frame()
                 timings = payload.get("timings") or {}
                 total_ms = timings.get("total_ms")
                 inference_ms = timings.get("inference_ms")

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import base64
-from collections import Counter, OrderedDict
+from collections import OrderedDict
+import copy
 import datetime
 import secrets
 import string
@@ -142,6 +143,15 @@ class AdminScreen(ctk.CTkFrame):
         self._annotation_files: list[dict] = []
         self._annotation_index: int | None = None
         self._annotation_dataset_id: str | None = None
+        self._annotation_class_name: str = "object"
+        self._annotation_manual_classes: list[str] = []
+        self._annotation_selected_label_index: int | None = None
+        self._annotation_cache: OrderedDict[tuple[str, str], dict] = OrderedDict()
+        self._annotation_cache_bytes = 0
+        self._annotation_cache_max_items = 8
+        self._annotation_cache_max_bytes = 48 * 1024 * 1024
+        self._annotation_load_sequence = 0
+        self._annotation_files_refresh_sequence = 0
         self._train_dataset_display_to_id: dict[str, str] = {}
         self._train_dataset_id_to_display: dict[str, str] = {}
 
@@ -1288,6 +1298,10 @@ class AdminScreen(ctk.CTkFrame):
                 master.columnconfigure(index, weight=1 if index % 2 else 0)
         return entry
 
+    def _grid_entry(self, master, row: int, column: int, label: str, widget) -> None:
+        ttk.Label(master, text=label).grid(row=row, column=column, sticky="w", padx=(0, 4), pady=2)
+        widget.grid(row=row, column=column + 1, sticky="ew", padx=(0, 8), pady=2)
+
     def _roi_entries(self, master, row: int, x_var: tk.StringVar, y_var: tk.StringVar, w_var: tk.StringVar, h_var: tk.StringVar) -> None:
         labels = (("x", x_var), ("y", y_var), ("w", w_var), ("h", h_var))
         for offset, (label, variable) in enumerate(labels):
@@ -1448,18 +1462,22 @@ class AdminScreen(ctk.CTkFrame):
     def _build_data_tab(self) -> None:
         self.data_tab.columnconfigure(0, weight=1)
         self.data_tab.rowconfigure(0, weight=1)
+        self.data_tab.rowconfigure(1, weight=0)
 
-        shell = ttk.Frame(self.data_tab)
-        shell.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-        shell.columnconfigure(0, weight=3)
-        shell.columnconfigure(1, weight=2)
-        shell.rowconfigure(0, weight=1)
+        # Top section: dataset list + upload + versions (existing layout)
+        top_shell = ttk.Frame(self.data_tab)
+        top_shell.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 4))
+        top_shell.columnconfigure(0, weight=3)
+        top_shell.columnconfigure(1, weight=2)
+        top_shell.rowconfigure(0, weight=1)
 
-        left_panel = ttk.LabelFrame(shell, text="Datasets", padding=8)
+        left_panel = ttk.LabelFrame(top_shell, text="Datasets", padding=8)
         left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         left_panel.columnconfigure(0, weight=1)
+        left_panel.rowconfigure(0, weight=1)
 
-        self._admin_dataset_list = tk.Listbox(left_panel, height=12)
+        # Dataset list
+        self._admin_dataset_list = tk.Listbox(left_panel, height=8)
         self._admin_dataset_list.grid(row=0, column=0, sticky="nsew")
         self._admin_dataset_list.bind("<<ListboxSelect>>", self._on_admin_dataset_selected)
 
@@ -1479,15 +1497,49 @@ class AdminScreen(ctk.CTkFrame):
         ttk.Button(ds_btn, text="Delete", command=self._admin_delete_dataset).pack(side="left", padx=4)
         ttk.Button(ds_btn, text="Refresh", command=self._admin_refresh_datasets).pack(side="left")
 
-        upload_frame = ttk.LabelFrame(left_panel, text="Upload Images", padding=6)
-        upload_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        # Upload + Image list + Class management in a combined frame below dataset list
+        bottom_left = ttk.Frame(left_panel)
+        bottom_left.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
+        bottom_left.columnconfigure(0, weight=1)
+        left_panel.rowconfigure(3, weight=1)
+
+        upload_frame = ttk.LabelFrame(bottom_left, text="Upload Images", padding=6)
+        upload_frame.pack(fill="x")
         self._admin_upload_path_var = tk.StringVar(value="No files selected")
         ttk.Button(upload_frame, text="Choose Files", command=self._admin_choose_upload_files).pack(anchor="w")
         ttk.Label(upload_frame, textvariable=self._admin_upload_path_var, wraplength=300).pack(anchor="w", pady=(2, 0))
         ttk.Button(upload_frame, text="Upload", command=self._admin_upload_files).pack(anchor="w", pady=(4, 0))
         self._admin_upload_paths: list[str] = []
 
-        right_panel = ttk.LabelFrame(shell, text="Dataset Versions", padding=8)
+        # Image listbox + coverage + class management
+        img_frame = ttk.LabelFrame(bottom_left, text="Images", padding=6)
+        img_frame.pack(fill="both", expand=True, pady=(6, 0))
+        img_frame.columnconfigure(0, weight=1)
+        img_frame.rowconfigure(1, weight=1)
+
+        img_header = ttk.Frame(img_frame)
+        img_header.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ttk.Label(img_header, text="Images", font=("Segoe UI", 9, "bold")).pack(side="left")
+        self._admin_annot_coverage_var = tk.StringVar(value="Coverage: -")
+        ttk.Label(img_header, textvariable=self._admin_annot_coverage_var, foreground="#64748b").pack(side="right")
+
+        self._admin_annot_image_listbox = tk.Listbox(img_frame, height=10, exportselection=False, font=("Segoe UI", 9))
+        self._admin_annot_image_listbox.grid(row=1, column=0, sticky="nsew")
+        self._admin_annot_image_listbox.bind("<<ListboxSelect>>", self._on_admin_annot_image_list_selected)
+        img_scroll = ttk.Scrollbar(img_frame, orient="vertical", command=self._admin_annot_image_listbox.yview)
+        img_scroll.grid(row=1, column=1, sticky="ns")
+        self._admin_annot_image_listbox.configure(yscrollcommand=img_scroll.set)
+
+        # Class management
+        class_frame = ttk.Frame(img_frame)
+        class_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self._admin_annot_new_class_var = tk.StringVar()
+        ttk.Entry(class_frame, textvariable=self._admin_annot_new_class_var, width=12).pack(side="left")
+        ttk.Button(class_frame, text="Add", command=self._admin_add_annotation_class, width=5).pack(side="left", padx=(4, 0))
+        ttk.Button(class_frame, text="Del", command=self._admin_remove_annotation_class, width=5).pack(side="left", padx=(4, 0))
+
+        # Right panel: Dataset versions
+        right_panel = ttk.LabelFrame(top_shell, text="Dataset Versions", padding=8)
         right_panel.grid(row=0, column=1, sticky="nsew")
         right_panel.columnconfigure(0, weight=1)
 
@@ -1522,6 +1574,73 @@ class AdminScreen(ctk.CTkFrame):
         ttk.Button(ver_btn, text="Export", command=self._admin_rebuild_export).pack(side="left", padx=4)
         ttk.Button(ver_btn, text="Refresh", command=self._admin_refresh_versions).pack(side="left")
 
+        # Bottom section: Annotation workflow (full width)
+        annot_shell = ttk.LabelFrame(self.data_tab, text="Annotation Workflow", padding=6)
+        annot_shell.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        annot_shell.columnconfigure(0, weight=1)
+        annot_shell.rowconfigure(1, weight=1)
+
+        # Toolbar
+        toolbar = ttk.Frame(annot_shell)
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        toolbar.columnconfigure(1, weight=1)
+        toolbar.columnconfigure(3, weight=1)
+        toolbar.columnconfigure(5, weight=1)
+        toolbar.columnconfigure(7, weight=1)
+        self._admin_annot_dataset_var = tk.StringVar(value="")
+        self._admin_annot_image_var = tk.StringVar(value="")
+        self._admin_annot_class_var = tk.StringVar(value="object")
+        self._admin_annot_dataset_combo = ttk.Combobox(toolbar, textvariable=self._admin_annot_dataset_var, values=[], state="readonly")
+        self._admin_annot_dataset_combo.bind("<<ComboboxSelected>>", self._on_admin_annot_dataset_selected)
+        self._admin_annot_image_entry = ttk.Entry(toolbar, textvariable=self._admin_annot_image_var, state="readonly")
+        self._admin_annot_shape = ttk.Combobox(toolbar, values=["bbox", "polygon"], state="readonly", width=8)
+        self._admin_annot_shape.set("bbox")
+        self._admin_annot_class_combo = ttk.Combobox(toolbar, textvariable=self._admin_annot_class_var, values=["object"], state="normal")
+        self._grid_entry(toolbar, 0, 0, "Dataset", self._admin_annot_dataset_combo)
+        self._grid_entry(toolbar, 0, 2, "Image", self._admin_annot_image_entry)
+        self._grid_entry(toolbar, 0, 4, "Type", self._admin_annot_shape)
+        self._grid_entry(toolbar, 0, 6, "Class", self._admin_annot_class_combo)
+
+        # Action buttons
+        action_bar = ttk.Frame(annot_shell)
+        action_bar.grid(row=0, column=1, sticky="e", pady=(0, 4))
+        ttk.Button(action_bar, text="Save", command=self._admin_save_current_annotation_interactive).pack(side="left")
+        ttk.Button(action_bar, text="Apply Class", command=self._admin_apply_class_to_selected_annotation).pack(side="left", padx=(4, 0))
+        ttk.Button(action_bar, text="Delete Label", command=self._admin_delete_selected_annotation).pack(side="left", padx=(4, 0))
+
+        # Canvas + Nav row
+        canvas_row = ttk.Frame(annot_shell)
+        canvas_row.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        canvas_row.columnconfigure(0, weight=1)
+        canvas_row.rowconfigure(0, weight=1)
+
+        self._admin_annotation_canvas = AnnotationCanvas(canvas_row, title="Image Annotation", size=(900, 480))
+        self._admin_annotation_canvas.grid(row=0, column=0, sticky="nsew")
+
+        # Nav bar
+        nav = ttk.Frame(annot_shell)
+        nav.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Button(nav, text="\u2190 Prev", command=self.admin_previous_annotation_image).pack(side="left")
+        self._admin_annotation_status_var = tk.StringVar(value="Select a dataset to start annotating.")
+        ttk.Label(nav, textvariable=self._admin_annotation_status_var, foreground="#64748b").pack(side="left", padx=12)
+        ttk.Button(nav, text="Next \u2192", command=self.admin_next_annotation_image).pack(side="right")
+
+        # Bindings
+        self._admin_annot_shape.bind("<<ComboboxSelected>>", lambda _e: self._admin_sync_annotation_mode())
+        self._admin_annot_class_combo.bind("<<ComboboxSelected>>", self._on_admin_annot_class_input)
+        self._admin_annot_class_combo.bind("<Return>", self._on_admin_annot_class_input)
+        self._admin_annot_class_combo.bind("<FocusOut>", self._on_admin_annot_class_input)
+        self._admin_annotation_canvas.set_mode("bbox")
+        self._admin_annotation_canvas.on_labels_changed = self._on_admin_annot_labels_changed
+        self._admin_annotation_canvas.on_selection_changed = self._on_admin_annot_selection_changed
+        self._admin_annotation_canvas._canvas.bind("<KeyPress-s>", self._on_admin_annot_shortcut_save)
+        self._admin_annotation_canvas._canvas.bind("<KeyPress-Left>", self._on_admin_annot_shortcut_prev)
+        self._admin_annotation_canvas._canvas.bind("<KeyPress-Right>", self._on_admin_annot_shortcut_next)
+        self._admin_annotation_canvas._canvas.bind("<KeyPress-b>", self._on_admin_annot_shortcut_bbox)
+        self._admin_annotation_canvas._canvas.bind("<KeyPress-p>", self._on_admin_annot_shortcut_polygon)
+        self._admin_annotation_canvas._canvas.bind("<KeyPress-Delete>", self._on_admin_annot_shortcut_delete)
+        self._admin_annotation_canvas._canvas.bind("<KeyPress-BackSpace>", self._on_admin_annot_shortcut_delete)
+
     def _admin_refresh_datasets(self) -> None:
         def _load():
             return self.api.list_datasets()
@@ -1545,10 +1664,32 @@ class AdminScreen(ctk.CTkFrame):
                 self._dataset_display_to_id[display] = ds_id
                 self._dataset_id_to_display[ds_id] = display
             self._sync_admin_training_datasets()
+            self._sync_admin_annotation_dataset_combo()
         run_async(self, _load, callback=_done)
 
     def _on_admin_dataset_selected(self, _event=None) -> None:
+        dataset_id = self._admin_resolve_annotation_dataset_id()
+        if dataset_id:
+            display = self._dataset_id_to_display.get(dataset_id, "")
+            if display:
+                self._admin_annot_dataset_combo.set(display)
         self._admin_refresh_versions()
+        self.admin_refresh_annotation_images()
+
+    def _on_admin_annot_dataset_selected(self, _event=None) -> None:
+        display = self._admin_annot_dataset_var.get().strip()
+        dataset_id = self._dataset_display_to_id.get(display, "")
+        if not dataset_id:
+            return
+        self._annotation_dataset_id = dataset_id
+        self._admin_dataset_list.selection_clear(0, "end")
+        for index in range(self._admin_dataset_list.size()):
+            if self._admin_dataset_list.get(index) == display:
+                self._admin_dataset_list.selection_set(index)
+                self._admin_dataset_list.see(index)
+                break
+        self._admin_refresh_versions()
+        self.admin_refresh_annotation_images()
 
     def _admin_create_dataset(self) -> None:
         name = self._admin_ds_name_var.get().strip()
@@ -1557,7 +1698,7 @@ class AdminScreen(ctk.CTkFrame):
             return
         desc = self._admin_ds_desc_var.get().strip()
         try:
-            self.api.create_dataset(name, desc)
+            self.api.create_dataset({"name": name, "description": desc})
         except Exception as exc:
             messagebox.showerror("Dataset", str(exc))
             return
@@ -1602,9 +1743,7 @@ class AdminScreen(ctk.CTkFrame):
         if not ds_id:
             return
         try:
-            for path in self._admin_upload_paths:
-                content = Path(path).read_bytes()
-                self.api.upload_dataset_file(ds_id, "images", Path(path).name, content)
+            self.api.upload_dataset_files(ds_id, list(self._admin_upload_paths), target="images")
         except Exception as exc:
             messagebox.showerror("Upload", str(exc))
             return
@@ -1712,6 +1851,7 @@ class AdminScreen(ctk.CTkFrame):
         ttk.Label(aug_form, text="Dataset ID").grid(row=0, column=0, sticky="w")
         self._admin_aug_dataset_combo = ttk.Combobox(aug_form, textvariable=self._admin_aug_dataset_var, state="readonly")
         self._admin_aug_dataset_combo.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self._admin_aug_dataset_combo.bind("<<ComboboxSelected>>", lambda _event: self._admin_update_augment_estimator())
         ttk.Label(aug_form, text="Multiplier").grid(row=1, column=0, sticky="w")
         ttk.Combobox(aug_form, textvariable=self._admin_aug_multiplier_var, values=[str(i) for i in range(1, 11)], state="readonly", width=6).grid(row=1, column=1, sticky="w", padx=(4, 0))
         aug_form.columnconfigure(1, weight=1)
@@ -1735,6 +1875,15 @@ class AdminScreen(ctk.CTkFrame):
 
         self._admin_augment_jobs_list = tk.Listbox(aug_panel, height=8)
         self._admin_augment_jobs_list.pack(fill="both", expand=True, pady=(6, 0))
+
+        # Augment output estimator
+        self._admin_aug_estimator_var = tk.StringVar(value="Select dataset + transforms to see output estimate.")
+        ttk.Label(aug_panel, textvariable=self._admin_aug_estimator_var, foreground="#475569", wraplength=280, justify="left").pack(anchor="w", pady=(4, 0))
+
+        # Bind transform changes to update estimator
+        self._admin_aug_multiplier_var.trace_add("write", lambda *_: self._admin_update_augment_estimator())
+        for var in self._admin_aug_transform_vars.values():
+            var.trace_add("write", lambda *_: self._admin_update_augment_estimator())
 
         train_panel = ttk.LabelFrame(top, text="Training", padding=8)
         train_panel.grid(row=0, column=1, sticky="nsew")
@@ -1854,6 +2003,8 @@ class AdminScreen(ctk.CTkFrame):
         else:
             coverage = ds.get("annotation_coverage", 0)
             self._admin_train_readiness_var.set(f"READY - {images} images, {ann} annotations, coverage {coverage:.0%}")
+        self._admin_aug_dataset_var.set(display)
+        self._admin_update_augment_estimator()
         self._admin_update_flow_steps()
 
     def _admin_update_flow_steps(self) -> None:
@@ -1879,7 +2030,13 @@ class AdminScreen(ctk.CTkFrame):
             return
         multiplier = int(self._admin_aug_multiplier_var.get() or "2")
         try:
-            self.api.create_augment_job(ds_id, transforms, multiplier)
+            self.api.create_augment_job(
+                {
+                    "dataset_id": ds_id,
+                    "transforms": transforms,
+                    "multiplier": multiplier,
+                }
+            )
         except Exception as exc:
             messagebox.showerror("Augment", str(exc))
             return
@@ -2217,3 +2374,442 @@ class AdminScreen(ctk.CTkFrame):
         except Exception as exc:
             messagebox.showerror("Calibration", str(exc))
         self._admin_refresh_calibration()
+
+    # ==================================================================
+    # Annotation Methods
+    # ==================================================================
+
+    def _admin_resolve_annotation_dataset_id(self) -> str | None:
+        sel = self._admin_dataset_list.curselection()
+        if not sel:
+            return self._annotation_dataset_id
+        display = self._admin_dataset_list.get(sel[0])
+        return self._dataset_display_to_id.get(display, self._annotation_dataset_id)
+
+    def _admin_annot_cache_key(self, dataset_id: str | None, image_name: str | None) -> tuple[str, str] | None:
+        if not dataset_id or not image_name:
+            return None
+        return (str(dataset_id), str(image_name))
+
+    def _admin_annot_cache_entry_size(self, asset: dict) -> int:
+        frame = asset.get("frame")
+        if frame is None:
+            return 0
+        return frame.nbytes + 256
+
+    def _admin_annot_cache_get(self, key: tuple[str, str] | None) -> dict | None:
+        if key is None:
+            return None
+        return self._annotation_cache.get(key)
+
+    def _admin_annot_cache_store(self, key: tuple[str, str] | None, asset: dict) -> None:
+        if key is None:
+            return
+        while len(self._annotation_cache) >= self._annotation_cache_max_items:
+            _, old = self._annotation_cache.popitem(last=False)
+            self._annotation_cache_bytes -= self._admin_annot_cache_entry_size(old)
+        size = self._admin_annot_cache_entry_size(asset)
+        while self._annotation_cache and self._annotation_cache_bytes + size > self._annotation_cache_max_bytes:
+            _, old = self._annotation_cache.popitem(last=False)
+            self._annotation_cache_bytes -= self._admin_annot_cache_entry_size(old)
+        self._annotation_cache[key] = asset
+        self._annotation_cache_bytes += size
+
+    def _admin_annot_cache_update_labels(self, dataset_id: str | None, image_name: str | None, labels: list[dict]) -> None:
+        key = self._admin_annot_cache_key(dataset_id, image_name)
+        entry = self._admin_annot_cache_get(key)
+        if entry is not None:
+            entry["labels"] = copy.deepcopy(labels)
+
+    def admin_refresh_annotation_images(self) -> None:
+        dataset_id = self._admin_resolve_annotation_dataset_id()
+        self._annotation_files = []
+        self._annotation_index = None
+        self._admin_annot_image_listbox.delete(0, "end")
+        if not dataset_id:
+            self._admin_reset_annotation_state()
+            return
+        self._annotation_dataset_id = dataset_id
+        self._annotation_files_refresh_sequence += 1
+        refresh_seq = self._annotation_files_refresh_sequence
+
+        def _load():
+            return self.api.list_dataset_files(dataset_id, "images")
+
+        def _done(result, error):
+            if refresh_seq != self._annotation_files_refresh_sequence:
+                return
+            if not self.winfo_exists():
+                return
+            if self._admin_resolve_annotation_dataset_id() != dataset_id:
+                return
+            if error:
+                messagebox.showerror("Annotate", str(error))
+                self._admin_reset_annotation_state()
+                return
+            if not isinstance(result, list):
+                self._admin_reset_annotation_state()
+                return
+            self._annotation_files = result
+            self._admin_annot_image_listbox.delete(0, "end")
+            for item in result:
+                name = str(item.get("name") or "").strip()
+                if name:
+                    self._admin_annot_image_listbox.insert("end", name)
+            if not result:
+                self._admin_annot_image_var.set("-")
+                self._admin_annotation_canvas.clear()
+                self._admin_annotation_status_var.set("Dataset has no images to annotate.")
+                self._admin_update_annot_nav_state()
+                self._admin_annot_coverage_var.set("Coverage: -")
+                return
+            self._admin_update_annotation_coverage()
+
+        run_async(self, _load, callback=_done)
+
+    def _admin_reset_annotation_state(self) -> None:
+        self._annotation_index = None
+        self._annotation_files = []
+        try:
+            self._admin_annot_image_listbox.delete(0, "end")
+            self._admin_annot_image_var.set("-")
+            self._admin_annot_coverage_var.set("Coverage: -")
+            if hasattr(self, "_admin_annotation_canvas"):
+                self._admin_annotation_canvas.clear()
+                self._admin_annotation_status_var.set("Select a dataset to start annotating.")
+        except tk.TclError:
+            pass
+
+    def _on_admin_annot_image_list_selected(self, _event=None) -> None:
+        sel = self._admin_annot_image_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx == self._annotation_index:
+            return
+        self._admin_load_annotation_for_index(idx)
+
+    def _admin_annot_image_index(self, image_name: str | None = None) -> int | None:
+        name = str(image_name or self._admin_annot_image_var.get() or "").strip()
+        if not name or name == "-":
+            return None
+        for idx, item in enumerate(self._annotation_files):
+            if str(item.get("name") or "").strip() == name:
+                return idx
+        return None
+
+    def _admin_annot_widgets_alive(self) -> bool:
+        try:
+            return self._admin_annotation_canvas.winfo_exists()
+        except Exception:
+            return False
+
+    def _admin_fetch_annotation_asset(self, dataset_id: str, image_name: str, image_path: str) -> dict:
+        base_url = str(getattr(self.state, "base_url", None) or getattr(self.api, "base_url", "") or "").strip()
+        worker_api = ApiClient(base_url)
+        worker_api.set_token(getattr(self.state, "token", None))
+        frame = None
+        loaded_source = ""
+        try:
+            image_bytes = worker_api.download_dataset_image(dataset_id, image_name)
+        except Exception:
+            image_bytes = b""
+        if image_bytes:
+            raw = np.frombuffer(image_bytes, np.uint8)
+            if raw.size > 0:
+                frame = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    loaded_source = "backend"
+        if frame is None and image_path:
+            path = Path(image_path)
+            if path.exists():
+                try:
+                    raw_bytes = path.read_bytes()
+                except OSError:
+                    raw_bytes = b""
+                if raw_bytes:
+                    raw = np.frombuffer(raw_bytes, np.uint8)
+                    if raw.size > 0:
+                        frame = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            loaded_source = "local"
+        if frame is None:
+            raise ValueError(f"{image_name or 'image'} could not be loaded")
+        labels_payload: list[dict] = []
+        try:
+            payload = worker_api.get_annotation(dataset_id, image_name)
+        except Exception:
+            payload = {"labels": []}
+        labels = payload.get("labels") if isinstance(payload, dict) else []
+        if isinstance(labels, list):
+            labels_payload = [copy.deepcopy(item) for item in labels if isinstance(item, dict)]
+        return {
+            "dataset_id": dataset_id, "image_name": image_name,
+            "image_path": image_path, "frame": frame,
+            "labels": labels_payload, "loaded_source": loaded_source,
+        }
+
+    def _admin_apply_annotation_asset(self, asset: dict, *, base_status: str, source_label: str) -> None:
+        frame = asset.get("frame")
+        if frame is None:
+            return
+        image_name = str(asset.get("image_name") or "").strip()
+        labels_payload = asset.get("labels") if isinstance(asset.get("labels"), list) else []
+        self._admin_annotation_canvas.load_bgr(frame, image_name=image_name, redraw=False)
+        self._admin_annotation_canvas.set_image_name(image_name)
+        self._admin_annotation_canvas.set_class_name(self._annotation_class_name, redraw=False)
+        self._admin_annotation_canvas.set_labels(labels_payload, redraw=False)
+        self._admin_annotation_canvas.redraw()
+        self._admin_annot_image_var.set(image_name)
+        self._admin_annotation_status_var.set(f"{base_status} | loaded via {source_label}")
+        self._admin_update_annotation_coverage()
+        self._admin_update_annot_nav_state()
+        # Sync image listbox
+        if self._admin_annot_image_listbox.size() > 0:
+            self._admin_annot_image_listbox.selection_clear(0, "end")
+            self._admin_annot_image_listbox.selection_set(self._annotation_index)
+            self._admin_annot_image_listbox.see(self._annotation_index)
+
+    def _admin_load_annotation_for_index(self, index: int, *, save_current: bool = True) -> None:
+        if index < 0 or index >= len(self._annotation_files):
+            return
+        if save_current and self._annotation_index is not None and not self._admin_save_current_annotation(silent=True):
+            self._admin_annotation_status_var.set("Autosave failed. Stay on current image.")
+            return
+        item = self._annotation_files[index]
+        dataset_id = self._admin_resolve_annotation_dataset_id()
+        image_name = str(item.get("name") or "").strip()
+        image_path = str(item.get("path") or "").strip()
+        self._annotation_index = index
+        base_status = f"{index + 1} / {len(self._annotation_files)}"
+        cache_key = self._admin_annot_cache_key(dataset_id, image_name)
+        cached = self._admin_annot_cache_get(cache_key)
+        self._annotation_load_sequence += 1
+        load_seq = self._annotation_load_sequence
+        if cached is not None:
+            self._admin_apply_annotation_asset(cached, base_status=base_status, source_label="cache")
+            return
+        self._admin_annotation_canvas.clear()
+        self._admin_annotation_status_var.set(f"{base_status} | loading...")
+        if not dataset_id or not image_name:
+            self._admin_annotation_status_var.set(f"{image_name or 'image'} could not be loaded")
+            return
+
+        def _load():
+            return self._admin_fetch_annotation_asset(dataset_id, image_name, image_path)
+
+        def _done(result, error):
+            if load_seq != self._annotation_load_sequence:
+                return
+            if not self._admin_annot_widgets_alive():
+                return
+            if self._annotation_dataset_id != dataset_id:
+                return
+            if self._annotation_index != index:
+                return
+            if error:
+                self._admin_annotation_status_var.set(f"{image_name or 'image'} could not be loaded")
+                return
+            if not isinstance(result, dict):
+                self._admin_annotation_status_var.set(f"{image_name or 'image'} could not be loaded")
+                return
+            self._admin_annot_cache_store(cache_key, result)
+            source_label = str(result.get("loaded_source") or "").strip() or "loaded"
+            self._admin_apply_annotation_asset(result, base_status=base_status, source_label=source_label)
+
+        run_async(self, _load, callback=_done)
+
+    def _admin_update_annot_nav_state(self) -> None:
+        has_files = bool(self._annotation_files)
+        is_first = self._annotation_index == 0 if has_files else True
+        is_last = self._annotation_index == len(self._annotation_files) - 1 if has_files else True
+
+    def _on_admin_annot_labels_changed(self, _labels: list[dict]) -> None:
+        self._admin_save_current_annotation(silent=True)
+
+    def _admin_save_current_annotation(self, *, silent: bool = False) -> bool:
+        dataset_id = self._admin_resolve_annotation_dataset_id()
+        image_name = self._admin_annot_image_var.get().strip()
+        if not dataset_id or not image_name or image_name == "-":
+            return False
+        try:
+            payload = self._admin_annotation_canvas.get_labels()
+            self.api.save_annotation(dataset_id, image_name, payload)
+        except Exception as exc:
+            self._admin_annotation_status_var.set(f"Autosave failed: {image_name}")
+            if not silent:
+                messagebox.showerror("Annotate", str(exc))
+            return False
+        self._admin_annot_cache_update_labels(dataset_id, image_name, payload)
+        self._admin_annotation_status_var.set(f"Saved {image_name}")
+        # Update coverage
+        self._admin_update_annotation_coverage()
+        return True
+
+    def _admin_save_current_annotation_interactive(self) -> None:
+        dataset_id = self._admin_resolve_annotation_dataset_id()
+        image_name = self._admin_annot_image_var.get().strip()
+        if not dataset_id or not image_name or image_name == "-":
+            messagebox.showwarning("Annotate", "Select a dataset and image first.")
+            return
+        self._admin_save_current_annotation(silent=False)
+
+    def _admin_update_annotation_coverage(self) -> None:
+        total = len(self._annotation_files)
+        if total == 0:
+            self._admin_annot_coverage_var.set("Coverage: -")
+            return
+        server_annotated = 0
+        if self._annotation_dataset_id:
+            ds = next((item for item in self._datasets_cache if str(item.get("id") or "") == self._annotation_dataset_id), None)
+            if ds:
+                server_annotated = int(ds.get("annotated_image_count") or 0)
+        cached_annotated = 0
+        for item in self._annotation_files:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            cache_key = self._admin_annot_cache_key(self._annotation_dataset_id, name)
+            cached = self._admin_annot_cache_get(cache_key)
+            if cached is not None:
+                if cached.get("labels"):
+                    cached_annotated += 1
+        annotated = min(total, max(server_annotated, cached_annotated))
+        self._admin_annot_coverage_var.set(f"Coverage: {annotated}/{total} ({annotated*100//total if total else 0}%)")
+
+    def _sync_admin_annotation_dataset_combo(self) -> None:
+        values = list(self._dataset_id_to_display.values())
+        self._admin_annot_dataset_combo["values"] = values
+        if self._annotation_dataset_id:
+            display = self._dataset_id_to_display.get(self._annotation_dataset_id, "")
+            if display:
+                self._admin_annot_dataset_combo.set(display)
+
+
+    def admin_previous_annotation_image(self) -> None:
+        if self._annotation_index is None:
+            return
+        self._admin_load_annotation_for_index(max(0, self._annotation_index - 1))
+
+    def admin_next_annotation_image(self) -> None:
+        if self._annotation_index is None:
+            return
+        self._admin_load_annotation_for_index(min(len(self._annotation_files) - 1, self._annotation_index + 1))
+
+    def _admin_add_annotation_class(self) -> None:
+        class_name = str(self._admin_annot_new_class_var.get() or "").strip()
+        if not class_name:
+            return
+        if class_name not in self._annotation_manual_classes:
+            self._annotation_manual_classes.append(class_name)
+        all_classes = ["object"] + self._annotation_manual_classes
+        if class_name not in all_classes:
+            all_classes.append(class_name)
+        self._admin_annot_class_combo["values"] = all_classes
+        self._admin_annot_class_combo.set(class_name)
+        self._admin_annot_new_class_var.set("")
+        self._on_admin_annot_class_input()
+
+    def _admin_remove_annotation_class(self) -> None:
+        class_name = str(self._admin_annot_class_combo.get() or "").strip()
+        if not class_name or class_name == "object":
+            return
+        if class_name in self._annotation_manual_classes:
+            self._annotation_manual_classes.remove(class_name)
+        all_classes = ["object"] + self._annotation_manual_classes
+        self._admin_annot_class_combo["values"] = all_classes
+        self._admin_annot_class_combo.set("object")
+        self._on_admin_annot_class_input()
+
+    def _admin_sync_annotation_mode(self, *, redraw: bool = True) -> None:
+        if not hasattr(self, "_admin_annotation_canvas"):
+            return
+        self._admin_annotation_canvas.set_mode(self._admin_annot_shape.get(), redraw=redraw)
+
+    def _on_admin_annot_selection_changed(self, label: dict | None, index: int | None) -> None:
+        self._annotation_selected_label_index = index
+        if label:
+            class_name = str(label.get("class_name") or label.get("class") or "object").strip()
+            if class_name and class_name != self._admin_annot_class_var.get():
+                self._admin_annot_class_combo.set(class_name)
+                self._annotation_class_name = class_name
+
+    def _on_admin_annot_class_input(self, _event=None) -> None:
+        class_name = str(self._admin_annot_class_combo.get() or "").strip()
+        if class_name:
+            self._annotation_class_name = class_name
+            if hasattr(self, "_admin_annotation_canvas"):
+                self._admin_annotation_canvas.set_class_name(class_name)
+            if self._annotation_selected_label_index is not None:
+                if self._admin_annotation_canvas.set_selected_label_class_name(class_name):
+                    self._admin_save_current_annotation(silent=True)
+
+    def _admin_apply_class_to_selected_annotation(self) -> None:
+        class_name = str(self._admin_annot_class_combo.get() or "").strip()
+        if not class_name or self._annotation_selected_label_index is None:
+            return
+        if self._admin_annotation_canvas.set_selected_label_class_name(class_name):
+            self._admin_save_current_annotation(silent=True)
+
+    def _admin_delete_selected_annotation(self) -> None:
+        self._admin_annotation_canvas.delete_selected_label()
+
+    # Keyboard shortcuts
+    def _on_admin_annot_shortcut_save(self, _event=None) -> None:
+        self._admin_save_current_annotation_interactive()
+        return "break"
+
+    def _on_admin_annot_shortcut_prev(self, _event=None) -> None:
+        self.admin_previous_annotation_image()
+        return "break"
+
+    def _on_admin_annot_shortcut_next(self, _event=None) -> None:
+        self.admin_next_annotation_image()
+        return "break"
+
+    def _on_admin_annot_shortcut_bbox(self, _event=None) -> None:
+        self._admin_annot_shape.set("bbox")
+        self._admin_sync_annotation_mode()
+        return "break"
+
+    def _on_admin_annot_shortcut_polygon(self, _event=None) -> None:
+        self._admin_annot_shape.set("polygon")
+        self._admin_sync_annotation_mode()
+        return "break"
+
+    def _on_admin_annot_shortcut_delete(self, _event=None) -> None:
+        self._admin_delete_selected_annotation()
+        return "break"
+
+    # ==================================================================
+    # Augment Estimator
+    # ==================================================================
+
+    def _admin_update_augment_estimator(self) -> None:
+        display = self._admin_aug_dataset_var.get().strip()
+        ds_id = self._admin_train_display_to_id.get(display, display)
+        if not ds_id:
+            self._admin_aug_estimator_var.set("Select a dataset to see output estimate.")
+            return
+        ds = next((item for item in self._datasets_cache if str(item.get("id") or "") == ds_id), None)
+        if not ds:
+            self._admin_aug_estimator_var.set("Dataset info not loaded yet.")
+            return
+        source = int(ds.get("image_count") or 0)
+        transforms = [name for name, var in self._admin_aug_transform_vars.items() if var.get()]
+        multiplier = int(self._admin_aug_multiplier_var.get() or "2")
+        if source == 0:
+            self._admin_aug_estimator_var.set("Dataset has 0 images. Upload images first.")
+            return
+        if not transforms:
+            self._admin_aug_estimator_var.set("Select at least one transform.")
+            return
+        per_image = len(transforms) * multiplier
+        total_aug = source * per_image
+        grand = source + total_aug
+        t_names = ", ".join(transforms)
+        self._admin_aug_estimator_var.set(
+            f"Source: {source} imgs | Transforms: {t_names} ({len(transforms)}), "
+            f"multiplier={multiplier} | Per image: {per_image} aug | "
+            f"Total aug: {total_aug} | Grand total: {grand} imgs"
+        )
