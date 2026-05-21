@@ -4,7 +4,9 @@ import copy
 from collections import OrderedDict
 import base64
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import secrets
 from pathlib import Path
+import string
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -54,6 +56,20 @@ _TRAINING_HPARAM_DEFAULTS = {
     "workers": 0,
     "cache": False,
 }
+
+
+def _safe_text(value: object, fallback: str = "-") -> str:
+    text = str(value or "").strip()
+    return text or fallback
+
+
+def _format_status(value: object) -> str:
+    return "Active" if bool(value) else "Inactive"
+
+
+def _random_password(length: int = 24) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(max(16, int(length))))
 
 
 class EngineerScreen(ctk.CTkFrame):
@@ -116,17 +132,32 @@ class EngineerScreen(ctk.CTkFrame):
         self._training_auto_refresh_job: str | None = None
         self._augment_selected_transforms: list[str] = list(_AUGMENT_DEFAULT_TRANSFORMS)
         self._augment_capabilities: dict | None = None  # cached from /augment/capabilities
+        self._support_users_cache: list[dict] = []
+        self._support_results_cache: list[dict] = []
+        self.support_status_var = tk.StringVar(value="Ready.")
+
+        self.support_user_username_var = tk.StringVar()
+        self.support_user_password_var = tk.StringVar()
+        self.support_user_role_var = tk.StringVar(value="operator")
+        self.support_user_rfid_var = tk.StringVar()
+
+        self.support_line_var = tk.StringVar()
+        self.support_station_var = tk.StringVar()
+        self.support_decision_var = tk.StringVar()
+        self.support_push_status_var = tk.StringVar()
+        self.support_limit_var = tk.StringVar(value="100")
 
         notebook = ctk.CTkTabview(self, fg_color=APP_BG, corner_radius=0, command=self._on_notebook_tab_changed)
         notebook.pack(fill="both", expand=True, padx=8, pady=8)
 
-        tab_names = ["Data", "Training", "Models", "Calibration"]
+        tab_names = ["Data", "Training", "Models", "Calibration", "Support"]
         for tab_name in tab_names:
             notebook.add(tab_name)
 
         self.data_tab = self._make_scrollable_page(notebook.tab("Data"), "data")
         self.training_tab = self._make_scrollable_page(notebook.tab("Training"), "training")
         self.models_tab = self._make_scrollable_page(notebook.tab("Models"), "models")
+        self.support_tab = self._make_scrollable_page(notebook.tab("Support"), "support")
 
         original_tab = notebook.tab
 
@@ -155,6 +186,7 @@ class EngineerScreen(ctk.CTkFrame):
 
         self._build_data_tab()
         self._build_training_tab()
+        self._build_support_tab()
 
         self.bind("<Configure>", self._on_resize)
         self._schedule_responsive_layout()
@@ -290,6 +322,8 @@ class EngineerScreen(ctk.CTkFrame):
             self._layout_split_shell(self.models_container, self.models_left_panel, self.models_right_panel, compact=compact, left_weight=2, right_weight=3)
         if hasattr(self, "calibration_container"):
             self._layout_split_shell(self.calibration_container, self.calibration_left_panel, self.calibration_right_outer, compact=compact, left_weight=2, right_weight=2)
+        if hasattr(self, "support_container"):
+            self._layout_split_shell(self.support_container, self.support_users_panel, self.support_results_panel, compact=compact, left_weight=2, right_weight=3)
         self._layout_data_annotation(compact=compact)
 
     def _on_notebook_tab_changed(self, _event=None) -> None:
@@ -322,6 +356,9 @@ class EngineerScreen(ctk.CTkFrame):
                 self._ensure_calibration_tab_built()
             else:
                 self.refresh_profiles()
+        elif selected_tab_text == "Support":
+            self.refresh_support_users()
+            self.refresh_support_results()
         self._schedule_responsive_layout()
 
     def select_tab(self, tab_name: str) -> None:
@@ -1120,6 +1157,131 @@ class EngineerScreen(ctk.CTkFrame):
         self._calibration_tab_built = True
         self.refresh_profiles()
 
+    def _build_support_tab(self) -> None:
+        self.support_container = ctk.CTkFrame(self.support_tab, fg_color=APP_BG, corner_radius=14, border_width=1, border_color=BORDER)
+        self.support_container.pack(fill="both", expand=True, padx=6, pady=6)
+        self.support_container.columnconfigure(0, weight=2)
+        self.support_container.columnconfigure(1, weight=3)
+        self.support_container.rowconfigure(0, weight=1)
+
+        self.support_users_panel = ctk.CTkFrame(self.support_container, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
+        self.support_results_panel = ctk.CTkFrame(self.support_container, fg_color=APP_BG, corner_radius=12, border_width=1, border_color=BORDER)
+
+        ttk.Label(self.support_users_panel, text="User Support", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(
+            self.support_users_panel,
+            text="Kelola operator dan role dari sini. Password kosong akan digenerate otomatis.",
+            foreground="#475569",
+            wraplength=420,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 8))
+
+        self.support_users_list = tk.Listbox(self.support_users_panel, height=12, exportselection=False)
+        self.support_users_list.pack(fill="both", expand=True)
+        self.support_users_list.bind("<<ListboxSelect>>", lambda _event: self.on_support_user_selected())
+
+        self.support_user_summary = LabeledValuePanel(
+            self.support_users_panel,
+            "Selected User",
+            [
+                ("id", "ID"),
+                ("username", "Username"),
+                ("role", "Role"),
+                ("status", "Status"),
+                ("rfid", "RFID"),
+            ],
+            columns=2,
+        )
+        self.support_user_summary.pack(fill="x", pady=(8, 0))
+
+        user_form = ttk.LabelFrame(self.support_users_panel, text="Create / Manage User", padding=8)
+        user_form.pack(fill="x", pady=(10, 0))
+        user_form.columnconfigure(1, weight=1)
+        user_form.columnconfigure(3, weight=1)
+        self._grid_entry(user_form, 0, 0, "Username", self.support_user_username_var)
+        self._grid_entry(user_form, 0, 2, "Password", self.support_user_password_var)
+        ttk.Label(user_form, text="Role").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.support_user_role_selector = ttk.Combobox(user_form, textvariable=self.support_user_role_var, values=["operator", "admin"], state="readonly")
+        self.support_user_role_selector.grid(row=1, column=1, sticky="ew", pady=4)
+        self._grid_entry(user_form, 1, 2, "RFID UID", self.support_user_rfid_var)
+        ttk.Label(
+            user_form,
+            text="RFID bisa di-scan lalu di-bind ke user yang dipilih.",
+            foreground="#64748b",
+            wraplength=420,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        user_actions = ttk.Frame(user_form)
+        user_actions.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        ttk.Button(user_actions, text="Create User", command=self.create_support_user).pack(side="left")
+        ttk.Button(user_actions, text="Apply Role", command=self.change_selected_support_user_role).pack(side="left", padx=6)
+        ttk.Button(user_actions, text="Toggle Active", command=self.toggle_selected_support_user_active).pack(side="left", padx=6)
+        ttk.Button(user_actions, text="Revoke Sessions", command=self.revoke_selected_support_user_sessions).pack(side="left", padx=6)
+        ttk.Button(user_actions, text="Bind RFID", command=self.bind_selected_support_user_rfid).pack(side="left", padx=6)
+        ttk.Button(user_actions, text="Clear RFID", command=self.clear_selected_support_user_rfid).pack(side="left", padx=6)
+        ttk.Button(user_actions, text="Refresh", command=self.refresh_support_users).pack(side="right")
+
+        ttk.Label(self.support_results_panel, text="Inspection Support", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(
+            self.support_results_panel,
+            text="Inspect, correct, retry, atau delete inspection result tanpa membuka Admin.",
+            foreground="#475569",
+            wraplength=640,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 8))
+
+        filter_form = ttk.LabelFrame(self.support_results_panel, text="Filters", padding=8)
+        filter_form.pack(fill="x")
+        filter_form.columnconfigure(1, weight=1)
+        filter_form.columnconfigure(3, weight=1)
+        self._grid_entry(filter_form, 0, 0, "Line", self.support_line_var)
+        self._grid_entry(filter_form, 0, 2, "Station", self.support_station_var)
+        self._grid_entry(filter_form, 1, 0, "Decision", self.support_decision_var)
+        self._grid_entry(filter_form, 1, 2, "Push Status", self.support_push_status_var)
+        self._grid_entry(filter_form, 2, 0, "Limit", self.support_limit_var)
+
+        filter_actions = ttk.Frame(filter_form)
+        filter_actions.grid(row=2, column=2, columnspan=2, sticky="e", pady=(6, 0))
+        ttk.Button(filter_actions, text="Refresh", command=self.refresh_support_results).pack(side="left")
+        ttk.Button(filter_actions, text="Export CSV", command=self.export_support_inspections_csv).pack(side="left", padx=6)
+        ttk.Button(filter_actions, text="Retry Visible", command=self.retry_visible_support_pushes).pack(side="left")
+
+        self.support_results_list = tk.Listbox(self.support_results_panel, height=12, exportselection=False)
+        self.support_results_list.pack(fill="both", expand=False, pady=(10, 0))
+        self.support_results_list.bind("<<ListboxSelect>>", lambda _event: self.open_support_result())
+
+        support_result_actions = ttk.Frame(self.support_results_panel)
+        support_result_actions.pack(fill="x", pady=(8, 0))
+        ttk.Button(support_result_actions, text="Retry Selected", command=self.retry_selected_support_result).pack(side="left")
+        ttk.Button(support_result_actions, text="Apply Correction", command=self.apply_support_result_correction).pack(side="left", padx=6)
+        ttk.Button(support_result_actions, text="Delete Selected", command=self.delete_selected_support_result).pack(side="left", padx=6)
+
+        ttk.Label(self.support_results_panel, textvariable=self.support_status_var, foreground="#64748b").pack(anchor="w", fill="x", pady=(8, 0))
+
+        self.support_result_summary = LabeledValuePanel(
+            self.support_results_panel,
+            "Selected Inspection",
+            [
+                ("id", "ID"),
+                ("decision", "Decision"),
+                ("reject_reason", "Reject Reason"),
+                ("push_status", "Push Status"),
+                ("line_id", "Line"),
+                ("station_id", "Station"),
+            ],
+            columns=2,
+        )
+        self.support_result_summary.pack(fill="x", pady=(8, 0))
+
+        self.support_result_detail = JsonEditor(self.support_results_panel, "Selected Result Payload", {}, text_height=10)
+        self.support_result_detail.pack(fill="both", expand=True, pady=(8, 0))
+
+        self.support_result_patch = JsonEditor(self.support_results_panel, "Correction Patch", {}, text_height=8)
+        self.support_result_patch.pack(fill="both", expand=True, pady=(8, 0))
+
+        self._layout_split_shell(self.support_container, self.support_users_panel, self.support_results_panel, compact=False, left_weight=2, right_weight=3)
+
     def _ensure_models_tab_built(self) -> None:
         if not self._models_tab_built:
             self._build_models_tab()
@@ -1130,7 +1292,346 @@ class EngineerScreen(ctk.CTkFrame):
 
     def _grid_entry(self, master, row: int, column: int, label: str, widget) -> None:
         ttk.Label(master, text=label).grid(row=row, column=column, sticky="w", padx=(0, 8), pady=4)
+        if isinstance(widget, tk.Variable):
+            entry = ttk.Entry(master, textvariable=widget)
+            entry.grid(row=row, column=column + 1, sticky="ew", pady=4)
+            return
         widget.grid(row=row, column=column + 1, sticky="ew", pady=4)
+
+    def _set_status(self, message: str) -> None:
+        self.support_status_var.set(message)
+
+    def _confirm_action(self, title: str, message: str) -> bool:
+        return messagebox.askyesno(title, message)
+
+    def _selected_support_user_record(self) -> dict | None:
+        index = self._selected_listbox_index(self.support_users_list)
+        if index is None or index >= len(self._support_users_cache):
+            return None
+        return self._support_users_cache[index]
+
+    def _selected_support_result_record(self) -> dict | None:
+        index = self._selected_listbox_index(self.support_results_list)
+        if index is None or index >= len(self._support_results_cache):
+            return None
+        return self._support_results_cache[index]
+
+    def _support_result_filters(self) -> dict[str, object]:
+        params: dict[str, object] = {"limit": max(1, int(self.support_limit_var.get() or 100))}
+        if self.support_line_var.get().strip():
+            params["line_id"] = self.support_line_var.get().strip()
+        if self.support_station_var.get().strip():
+            params["station_id"] = self.support_station_var.get().strip()
+        if self.support_decision_var.get().strip():
+            params["decision_code"] = self.support_decision_var.get().strip().upper()
+        if self.support_push_status_var.get().strip():
+            params["push_status"] = self.support_push_status_var.get().strip().lower()
+        return params
+
+    def _support_user_label(self, item: dict) -> str:
+        rfid_status = "Bound" if item.get("rfid_bound") else "Unbound"
+        if item.get("rfid_uid_last4"):
+            rfid_status = f"*{_safe_text(item.get('rfid_uid_last4'))}"
+        return (
+            f"#{_safe_text(item.get('id'))} | {_safe_text(item.get('username'))} | {_safe_text(item.get('role'))} | "
+            f"{_format_status(item.get('is_active', True))} | {rfid_status}"
+        )
+
+    def _support_result_label(self, item: dict) -> str:
+        decision = str(item.get("decision") or item.get("decision_code") or "").strip().upper() or "-"
+        push_status = str(item.get("push_status") or "-").strip().lower() or "-"
+        return (
+            f"#{_safe_text(item.get('id'))} | {decision} | {push_status} | "
+            f"{_safe_text(item.get('part_name'))} | {_safe_text(item.get('line_id'))}/{_safe_text(item.get('station_id'))}"
+        )
+
+    def _support_result_patch_payload(self, item: dict) -> dict:
+        return {
+            "decision_code": str(item.get("decision_code") or item.get("decision") or "").strip(),
+            "reject_reason_code": str(item.get("reject_reason_code") or "").strip(),
+            "part_ready_match_ratio": item.get("part_ready_match_ratio"),
+            "sticker_confidence": item.get("sticker_confidence"),
+            "detected_class": item.get("detected_class"),
+            "expected_class": item.get("expected_class"),
+            "note": str(item.get("correction_note") or "").strip(),
+        }
+
+    def _render_support_users(self) -> None:
+        self.support_users_list.delete(0, "end")
+        if not self._support_users_cache:
+            self.support_users_list.insert("end", "No users found.")
+            self.support_user_summary.reset()
+            return
+        for item in self._support_users_cache:
+            self.support_users_list.insert("end", self._support_user_label(item))
+
+    def _render_support_results(self) -> None:
+        self.support_results_list.delete(0, "end")
+        if not self._support_results_cache:
+            self.support_results_list.insert("end", "No inspection results found.")
+            self.support_result_summary.reset()
+            self.support_result_detail.set_payload({})
+            self.support_result_patch.set_payload({})
+            return
+        for item in self._support_results_cache:
+            self.support_results_list.insert("end", self._support_result_label(item))
+
+    def refresh_support_users(self) -> None:
+        self._set_status("Loading support users...")
+
+        def _done(items, error):
+            if error:
+                self._set_status(f"Support user load error: {error}")
+                return
+            self._support_users_cache = list(items or [])
+            self._render_support_users()
+            self._set_status(f"Loaded {len(self._support_users_cache)} support users.")
+
+        run_async(self, self.api.list_users, callback=_done)
+
+    def refresh_support_results(self) -> None:
+        params = self._support_result_filters()
+        self._set_status("Loading inspection support...")
+
+        def _load():
+            return self.api.list_inspections(params)
+
+        def _done(result, error):
+            if error:
+                self._set_status(f"Inspection support load error: {error}")
+                return
+            self._support_results_cache = list(result or [])
+            self._render_support_results()
+            self._set_status(f"Loaded {len(self._support_results_cache)} inspection results.")
+
+        run_async(self, _load, callback=_done)
+
+    def on_support_user_selected(self) -> None:
+        item = self._selected_support_user_record()
+        if item is None:
+            return
+        self.support_user_username_var.set(str(item.get("username") or ""))
+        self.support_user_password_var.set("")
+        self.support_user_role_var.set(str(item.get("role") or "operator").strip().lower() or "operator")
+        self.support_user_rfid_var.set("")
+        self.support_user_summary.set_values(
+            {
+                "id": item.get("id"),
+                "username": item.get("username"),
+                "role": item.get("role"),
+                "status": _format_status(item.get("is_active", True)),
+                "rfid": item.get("rfid_uid_last4") or ("Bound" if item.get("rfid_bound") else "Unbound"),
+            }
+        )
+
+    def open_support_result(self) -> None:
+        item = self._selected_support_result_record()
+        if item is None:
+            return
+        decision = str(item.get("decision") or item.get("decision_code") or "").strip().upper() or "-"
+        reject_reason = item.get("reject_reason_code") or ("OK" if decision == "ACCEPT" else "-")
+        self.support_result_summary.set_values(
+            {
+                "id": item.get("id"),
+                "decision": decision,
+                "reject_reason": reject_reason,
+                "push_status": item.get("push_status"),
+                "line_id": item.get("line_id"),
+                "station_id": item.get("station_id"),
+            }
+        )
+        self.support_result_detail.set_payload(item)
+        self.support_result_patch.set_payload(self._support_result_patch_payload(item))
+
+    def create_support_user(self) -> None:
+        username = self.support_user_username_var.get().strip()
+        password = self.support_user_password_var.get().strip() or _random_password()
+        role = self.support_user_role_var.get().strip().lower() or "operator"
+        rfid_uid = self.support_user_rfid_var.get().strip()
+        if not username:
+            messagebox.showerror("Support", "Username is required.")
+            return
+        try:
+            created = self.api.create_user({"username": username, "password": password, "role": role})
+            user_id = int(created.get("id") or 0)
+            if user_id <= 0:
+                raise ValueError("User API did not return a valid id.")
+            if rfid_uid:
+                self.api.bind_user_rfid(user_id, rfid_uid)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Support", str(exc))
+            return
+        self.support_user_password_var.set("")
+        self.support_user_rfid_var.set("")
+        self.refresh_support_users()
+        self._set_status(f"Support user {username} created.")
+
+    def change_selected_support_user_role(self) -> None:
+        item = self._selected_support_user_record()
+        if item is None:
+            messagebox.showinfo("Support", "Select a user first.")
+            return
+        role = self.support_user_role_var.get().strip().lower()
+        if role not in {"admin", "operator"}:
+            messagebox.showerror("Support", "Role must be operator or admin.")
+            return
+        try:
+            self.api.change_user_role(int(item.get("id") or 0), role)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Support", str(exc))
+            return
+        self.refresh_support_users()
+        self._set_status(f"Role updated to {role}.")
+
+    def toggle_selected_support_user_active(self) -> None:
+        item = self._selected_support_user_record()
+        if item is None:
+            messagebox.showinfo("Support", "Select a user first.")
+            return
+        next_active = not bool(item.get("is_active", True))
+        try:
+            self.api.set_user_active(int(item.get("id") or 0), next_active)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Support", str(exc))
+            return
+        self.refresh_support_users()
+        self._set_status(f"User {'activated' if next_active else 'deactivated'}.")
+
+    def revoke_selected_support_user_sessions(self) -> None:
+        item = self._selected_support_user_record()
+        if item is None:
+            messagebox.showinfo("Support", "Select a user first.")
+            return
+        try:
+            self.api.revoke_user_sessions(int(item.get("id") or 0))
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Support", str(exc))
+            return
+        self._set_status(f"Sessions revoked for {item.get('username')}.")
+
+    def bind_selected_support_user_rfid(self) -> None:
+        item = self._selected_support_user_record()
+        rfid_uid = self.support_user_rfid_var.get().strip()
+        if item is None:
+            messagebox.showinfo("Support", "Select a user first.")
+            return
+        if not rfid_uid:
+            messagebox.showerror("Support", "RFID UID is required.")
+            return
+        try:
+            self.api.bind_user_rfid(int(item.get("id") or 0), rfid_uid)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Support", str(exc))
+            return
+        self.support_user_rfid_var.set("")
+        self.refresh_support_users()
+        self._set_status(f"RFID bound to {item.get('username')}.")
+
+    def clear_selected_support_user_rfid(self) -> None:
+        item = self._selected_support_user_record()
+        if item is None:
+            messagebox.showinfo("Support", "Select a user first.")
+            return
+        try:
+            self.api.clear_user_rfid(int(item.get("id") or 0))
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Support", str(exc))
+            return
+        self.refresh_support_users()
+        self._set_status(f"RFID cleared for {item.get('username')}.")
+
+    def retry_selected_support_result(self) -> None:
+        item = self._selected_support_result_record()
+        if item is None:
+            messagebox.showinfo("Support", "Select an inspection result first.")
+            return
+        try:
+            self.api.retry_inspection_push(int(item.get("id") or 0))
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Support", str(exc))
+            return
+        self.refresh_support_results()
+        self._set_status(f"Retry triggered for result #{item.get('id')}.")
+
+    def retry_visible_support_pushes(self) -> None:
+        retry_ids = [
+            int(item.get("id") or 0)
+            for item in self._support_results_cache
+            if str(item.get("push_status") or "").lower() in {"failed", "pending"} and int(item.get("id") or 0) > 0
+        ]
+        if not retry_ids:
+            messagebox.showinfo("Support", "No failed or pending pushes are visible.")
+            return
+        try:
+            self.api.retry_failed_inspection_pushes(result_ids=retry_ids, limit=len(retry_ids))
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Support", str(exc))
+            return
+        self.refresh_support_results()
+        self._set_status(f"Retry attempted for {len(retry_ids)} visible push issues.")
+
+    def apply_support_result_correction(self) -> None:
+        item = self._selected_support_result_record()
+        if item is None:
+            messagebox.showinfo("Support", "Select an inspection result first.")
+            return
+        try:
+            raw_patch = self.support_result_patch.get_payload()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Support", f"Invalid correction patch: {exc}")
+            return
+        if not isinstance(raw_patch, dict) or not raw_patch:
+            messagebox.showerror("Support", "Correction patch must be a JSON object.")
+            return
+        patch: dict[str, object] = {}
+        for key in ("decision_code", "reject_reason_code", "part_ready_match_ratio", "sticker_confidence", "detected_class", "expected_class"):
+            if key in raw_patch:
+                patch[key] = raw_patch.get(key)
+        if "note" in raw_patch:
+            patch["note"] = raw_patch.get("note")
+        if not patch:
+            messagebox.showerror("Support", "No supported correction fields were provided.")
+            return
+        try:
+            self.api.update_inspection(int(item.get("id") or 0), patch)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Support", str(exc))
+            return
+        self.refresh_support_results()
+        self._set_status(f"Correction applied to result #{item.get('id')}.")
+
+    def delete_selected_support_result(self) -> None:
+        item = self._selected_support_result_record()
+        if item is None:
+            messagebox.showinfo("Support", "Select an inspection result first.")
+            return
+        if not self._confirm_action("Delete Inspection", f"Delete inspection result #{item.get('id')}?"):
+            return
+        try:
+            self.api.delete_inspection(int(item.get("id") or 0))
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Support", str(exc))
+            return
+        self.refresh_support_results()
+        self._set_status(f"Inspection result #{item.get('id')} deleted.")
+
+    def export_support_inspections_csv(self) -> None:
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+            initialfile="inspections.csv",
+            title="Export Inspection Results",
+        )
+        if not path:
+            return
+        try:
+            csv_text = self.api.export_inspections_csv(self._support_result_filters())
+            with open(path, "w", encoding="utf-8", newline="") as file_handle:
+                file_handle.write(csv_text)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Export CSV", str(exc))
+            return
+        self._set_status(f"CSV export saved to {path}.")
 
     def _selected_listbox_index(self, listbox: tk.Listbox) -> int | None:
         try:

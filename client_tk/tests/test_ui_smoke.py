@@ -200,6 +200,18 @@ class _StubApi:
     def bind_user_rfid(self, user_id: int, rfid_uid: str):
         return {"id": user_id, "rfid_bound": True, "rfid_uid_last4": rfid_uid[-4:]}
 
+    def set_user_active(self, user_id: int, is_active: bool):
+        return {"id": user_id, "is_active": is_active}
+
+    def revoke_user_sessions(self, user_id: int):
+        return {"user_id": user_id, "revoked": 1}
+
+    def clear_user_rfid(self, user_id: int):
+        return {"user": {"id": user_id, "rfid_bound": False}, "sessions_revoked": 1}
+
+    def change_user_role(self, user_id: int, role: str):
+        return {"id": user_id, "role": role}
+
     def list_inspections(self, params=None):
         return []
 
@@ -443,6 +455,7 @@ class UiSmokeTest(unittest.TestCase):
         screen.update_idletasks()
         self.assertTrue(screen.winfo_exists())
         self.assertEqual(screen._notebook.tabs(), ["Presets", "Operators", "Monitor"])
+        self.assertNotIn("Raw JSON", screen._notebook.tabs())
         self.assertFalse(hasattr(screen, "template_form"))
         self.assertFalse(hasattr(screen, "workstation_tools_screen"))
         screen.destroy()
@@ -472,6 +485,7 @@ class UiSmokeTest(unittest.TestCase):
             self.assertEqual(screen.preset_name_var.get(), "QC Line A")
             self.assertEqual(screen.preset_line_var.get(), "LINE-A")
             self.assertEqual(screen.preset_station_var.get(), "ST-01")
+            self.assertEqual(screen.preset_conf_threshold_var.get(), "0.25")
             screen.destroy()
 
     def test_template_form_model_path_dropdown_autofills_meta_path(self) -> None:
@@ -552,6 +566,7 @@ class UiSmokeTest(unittest.TestCase):
             screen.preset_line_var.set("LINE-A")
             screen.preset_station_var.set("ST-01")
             screen.preset_model_path_var.set("data/models/sticker.pt")
+            screen.preset_conf_threshold_var.set("0.42")
             screen.preset_expected_code_var.set("K0W-HB0")
 
             screen.save_and_deploy_preset()
@@ -559,6 +574,7 @@ class UiSmokeTest(unittest.TestCase):
             self.assertTrue(created_payloads)
             self.assertTrue(deployed_payloads)
             self.assertEqual(created_payloads[-1]["vision"]["runtime"], "ultralytics")
+            self.assertEqual(created_payloads[-1]["vision"]["conf_threshold"], 0.42)
             self.assertEqual(created_payloads[-1]["sticker"]["ocr_expected_text"], "K0W-HB0")
             self.assertEqual(deployed_payloads[-1]["template_id"], 99)
             self.assertEqual(deployed_payloads[-1]["template_version_id"], 100)
@@ -624,6 +640,162 @@ class UiSmokeTest(unittest.TestCase):
             screen.retry_visible_failed_pushes()
 
             self.assertEqual(retry_calls, [[33]])
+            screen.destroy()
+
+    def test_engineer_support_tab_loads_user_and_inspection_tools(self) -> None:
+        users = [
+            {"id": 5, "username": "operator-a", "role": "operator", "is_active": True, "rfid_bound": True, "rfid_uid_last4": "1234"},
+        ]
+        inspections = [
+            {
+                "id": 77,
+                "inspected_at": "2026-04-10T10:00:00+00:00",
+                "decision": "REJECT",
+                "decision_code": "REJECT",
+                "part_name": "Part-X",
+                "line_id": "LINE-A",
+                "station_id": "ST-01",
+                "push_status": "failed",
+                "reject_reason_code": "OFFSET",
+                "part_ready_match_ratio": 0.42,
+                "sticker_confidence": 0.73,
+                "detected_class": "BAD",
+                "expected_class": "GOOD",
+            }
+        ]
+        created_payloads: list[dict] = []
+        bind_calls: list[tuple[int, str]] = []
+        role_calls: list[tuple[int, str]] = []
+        active_calls: list[tuple[int, bool]] = []
+        revoke_calls: list[int] = []
+        clear_calls: list[int] = []
+        update_calls: list[tuple[int, dict]] = []
+        retry_calls: list[int] = []
+        retry_failed_calls: list[list[int]] = []
+        delete_calls: list[int] = []
+
+        def create_user(payload: dict):
+            created_payloads.append(dict(payload))
+            return {"id": 88, **payload}
+
+        def bind_user_rfid(user_id: int, rfid_uid: str):
+            bind_calls.append((user_id, rfid_uid))
+            return {"id": user_id, "rfid_bound": True}
+
+        def change_user_role(user_id: int, role: str):
+            role_calls.append((user_id, role))
+            return {"id": user_id, "role": role}
+
+        def set_user_active(user_id: int, is_active: bool):
+            active_calls.append((user_id, is_active))
+            return {"id": user_id, "is_active": is_active}
+
+        def revoke_user_sessions(user_id: int):
+            revoke_calls.append(user_id)
+            return {"user_id": user_id, "revoked": 1}
+
+        def clear_user_rfid(user_id: int):
+            clear_calls.append(user_id)
+            return {"user": {"id": user_id, "rfid_bound": False}, "sessions_revoked": 1}
+
+        def update_inspection(result_id: int, payload: dict):
+            update_calls.append((result_id, dict(payload)))
+            return {"id": result_id, **payload}
+
+        def retry_inspection_push(result_id: int):
+            retry_calls.append(result_id)
+            return {"ok": True, "result": {"id": result_id, "push_status": "sent"}}
+
+        def retry_failed_inspection_pushes(result_ids=None, limit: int = 100):
+            retry_failed_calls.append(list(result_ids or []))
+            return {"attempted": len(result_ids or []), "succeeded": len(result_ids or []), "failed": 0, "items": []}
+
+        def delete_inspection(result_id: int):
+            delete_calls.append(result_id)
+            return {"deleted": True, "id": result_id}
+
+        with mock.patch.object(self.api, "list_users", return_value=users), mock.patch.object(
+            self.api,
+            "list_inspections",
+            return_value=inspections,
+        ), mock.patch.object(self.api, "create_user", side_effect=create_user), mock.patch.object(
+            self.api,
+            "bind_user_rfid",
+            side_effect=bind_user_rfid,
+        ), mock.patch.object(self.api, "change_user_role", side_effect=change_user_role), mock.patch.object(
+            self.api,
+            "set_user_active",
+            side_effect=set_user_active,
+        ), mock.patch.object(self.api, "revoke_user_sessions", side_effect=revoke_user_sessions), mock.patch.object(
+            self.api,
+            "clear_user_rfid",
+            side_effect=clear_user_rfid,
+        ), mock.patch.object(self.api, "update_inspection", side_effect=update_inspection), mock.patch.object(
+            self.api,
+            "retry_inspection_push",
+            side_effect=retry_inspection_push,
+        ), mock.patch.object(self.api, "retry_failed_inspection_pushes", side_effect=retry_failed_inspection_pushes), mock.patch.object(
+            self.api,
+            "delete_inspection",
+            side_effect=delete_inspection,
+        ), mock.patch("client_tk.app.screens.engineer.view.messagebox.askyesno", return_value=True):
+            screen = EngineerScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            self.assertEqual(screen._notebook.tabs(), ["Data", "Training", "Models", "Calibration", "Support"])
+            screen.select_tab("Support")
+            screen.update_idletasks()
+
+            self.assertTrue(screen.support_users_list.size() >= 1)
+            self.assertTrue(screen.support_results_list.size() >= 1)
+
+            screen.refresh_support_users = lambda: None
+            screen.refresh_support_results = lambda: None
+
+            screen.support_users_list.selection_set(0)
+            screen.on_support_user_selected()
+            screen.support_user_role_var.set("admin")
+            screen.change_selected_support_user_role()
+            screen.toggle_selected_support_user_active()
+            screen.revoke_selected_support_user_sessions()
+            screen.support_user_rfid_var.set("RFID-1234")
+            screen.bind_selected_support_user_rfid()
+            screen.clear_selected_support_user_rfid()
+
+            screen.support_user_username_var.set("operator-b")
+            screen.support_user_password_var.set("")
+            screen.support_user_role_var.set("operator")
+            screen.support_user_rfid_var.set("RFID-5678")
+            screen.create_support_user()
+
+            screen.support_results_list.selection_set(0)
+            screen.open_support_result()
+            screen.support_result_patch.set_payload(
+                {
+                    "decision_code": "ACCEPT",
+                    "reject_reason_code": "",
+                    "part_ready_match_ratio": 0.88,
+                    "sticker_confidence": 0.91,
+                    "detected_class": "GOOD",
+                    "expected_class": "GOOD",
+                    "note": "Corrected in support",
+                }
+            )
+            screen.apply_support_result_correction()
+            screen.retry_selected_support_result()
+            screen.retry_visible_support_pushes()
+            screen.delete_selected_support_result()
+
+            self.assertEqual(role_calls, [(5, "admin")])
+            self.assertEqual(active_calls, [(5, False)])
+            self.assertEqual(revoke_calls, [5])
+            self.assertEqual(clear_calls, [5])
+            self.assertEqual(created_payloads[-1]["role"], "operator")
+            self.assertTrue(created_payloads[-1]["password"])
+            self.assertEqual(bind_calls[-1], (88, "RFID-5678"))
+            self.assertEqual(update_calls[-1][0], 77)
+            self.assertEqual(retry_calls, [77])
+            self.assertEqual(retry_failed_calls[-1], [77])
+            self.assertEqual(delete_calls, [77])
             screen.destroy()
 
     def test_engineer_screen_initializes(self) -> None:

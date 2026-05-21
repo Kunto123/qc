@@ -116,6 +116,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_model_choice_var = tk.StringVar()
         self.preset_model_path_var = tk.StringVar()
         self.preset_model_meta_path_var = tk.StringVar()
+        self.preset_conf_threshold_var = tk.StringVar(value="0.25")
         self.preset_expected_code_var = tk.StringVar()
         self.part_ready_roi_x_var = tk.StringVar(value="0.2")
         self.part_ready_roi_y_var = tk.StringVar(value="0.2")
@@ -286,12 +287,13 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_model_selector = ttk.Combobox(wizard, textvariable=self.preset_model_choice_var, state="readonly")
         self.preset_model_selector.grid(row=5, column=1, columnspan=3, sticky="ew", padx=(0, 12), pady=5)
         self.preset_model_selector.bind("<<ComboboxSelected>>", self._on_preset_model_selected)
-        self._entry(wizard, 6, 0, "Sticker Code", self.preset_expected_code_var, columnspan=3)
+        self._entry(wizard, 6, 0, "Confidence Threshold", self.preset_conf_threshold_var, columnspan=3)
+        self._entry(wizard, 7, 0, "Sticker Code", self.preset_expected_code_var, columnspan=3)
 
-        ctk.CTkLabel(wizard, text="Part Ready ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=7, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
-        self._roi_entries(wizard, 8, self.part_ready_roi_x_var, self.part_ready_roi_y_var, self.part_ready_roi_w_var, self.part_ready_roi_h_var)
-        ctk.CTkLabel(wizard, text="Sticker ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=9, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
-        self._roi_entries(wizard, 10, self.sticker_roi_x_var, self.sticker_roi_y_var, self.sticker_roi_w_var, self.sticker_roi_h_var)
+        ctk.CTkLabel(wizard, text="Part Ready ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=8, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
+        self._roi_entries(wizard, 9, self.part_ready_roi_x_var, self.part_ready_roi_y_var, self.part_ready_roi_w_var, self.part_ready_roi_h_var)
+        ctk.CTkLabel(wizard, text="Sticker ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=10, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
+        self._roi_entries(wizard, 11, self.sticker_roi_x_var, self.sticker_roi_y_var, self.sticker_roi_w_var, self.sticker_roi_h_var)
 
         ctk.CTkButton(
             wizard,
@@ -302,7 +304,7 @@ class AdminScreen(ctk.CTkFrame):
             text_color=TEXT_ON_ACCENT,
             height=34,
             corner_radius=6,
-        ).grid(row=11, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 10))
+        ).grid(row=12, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 10))
 
     def _build_operators_tab(self) -> None:
         self.operators_tab.columnconfigure(0, weight=3)
@@ -369,14 +371,15 @@ class AdminScreen(ctk.CTkFrame):
 
         self.monitor_cards_frame = ttk.Frame(self.monitor_tab, padding=(8, 0, 8, 6))
         self.monitor_cards_frame.grid(row=1, column=0, sticky="ew")
-        for index in range(5):
+        for index in range(6):
             self.monitor_cards_frame.columnconfigure(index, weight=1)
         self.monitor_cards = {
             "total": CompactStatCard(self.monitor_cards_frame, "Total", background="#0f172a", foreground="#f8fafc"),
             "accept": CompactStatCard(self.monitor_cards_frame, "Accept", background="#166534", foreground="#f0fdf4"),
             "reject": CompactStatCard(self.monitor_cards_frame, "Reject", background="#991b1b", foreground="#fef2f2"),
             "reject_rate": CompactStatCard(self.monitor_cards_frame, "Reject Rate", background="#7c2d12", foreground="#fff7ed"),
-            "push": CompactStatCard(self.monitor_cards_frame, "Push Issues", background="#334155", foreground="#f8fafc"),
+            "pending": CompactStatCard(self.monitor_cards_frame, "Push Pending", background="#a16207", foreground="#fffbeb"),
+            "failed": CompactStatCard(self.monitor_cards_frame, "Push Failed", background="#334155", foreground="#f8fafc"),
         }
         self._layout_monitor_cards(compact=False)
 
@@ -626,12 +629,14 @@ class AdminScreen(ctk.CTkFrame):
         accept = int(summary.get("accept") or summary.get("accept_count") or summary.get("total_accept") or sum(1 for item in self._results_cache if str(item.get("decision") or "").upper() == "ACCEPT"))
         reject = int(summary.get("reject") or summary.get("reject_count") or summary.get("total_reject") or sum(1 for item in self._results_cache if str(item.get("decision") or "").upper() == "REJECT"))
         reject_rate = (reject / total * 100.0) if total else 0.0
-        push_issues = sum(1 for item in self._results_cache if str(item.get("push_status") or "").lower() in {"failed", "pending"})
+        pending_pushes = sum(1 for item in self._results_cache if str(item.get("push_status") or "").lower() == "pending")
+        failed_pushes = sum(1 for item in self._results_cache if str(item.get("push_status") or "").lower() == "failed")
         self.monitor_cards["total"].set_value(total)
         self.monitor_cards["accept"].set_value(accept)
         self.monitor_cards["reject"].set_value(reject)
         self.monitor_cards["reject_rate"].set_value(f"{reject_rate:.1f}%")
-        self.monitor_cards["push"].set_value(push_issues, "failed/pending")
+        self.monitor_cards["pending"].set_value(pending_pushes, "queued")
+        self.monitor_cards["failed"].set_value(failed_pushes, "retry needed")
         self.admin_cards["accept"].set_value(accept)
         self.admin_cards["reject"].set_value(reject)
 
@@ -645,6 +650,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_description_var.set("")
         self.preset_line_var.set("")
         self.preset_station_var.set("")
+        self.preset_conf_threshold_var.set("0.25")
         self.preset_expected_code_var.set("")
         self.part_ready_roi_x_var.set("0.2")
         self.part_ready_roi_y_var.set("0.2")
@@ -711,6 +717,7 @@ class AdminScreen(ctk.CTkFrame):
         model_path = str(vision.get("model_path") or "")
         self.preset_model_path_var.set(model_path)
         self.preset_model_meta_path_var.set(str(vision.get("model_meta_path") or ""))
+        self.preset_conf_threshold_var.set(str(vision.get("conf_threshold", 0.25)))
         self._select_model_label_for_path(model_path)
 
     def _on_preset_model_selected(self, _event=None) -> None:
@@ -801,7 +808,7 @@ class AdminScreen(ctk.CTkFrame):
                 "model_path": model_path,
                 "model_meta_path": self.preset_model_meta_path_var.get().strip() or None,
                 "runtime": "ultralytics",
-                "conf_threshold": 0.25,
+                "conf_threshold": _float_or_default(self.preset_conf_threshold_var.get(), 0.25),
                 "stream_fps": 10.0,
                 "inference_fps": 4.0,
                 "imgsz": 640,
@@ -1053,10 +1060,10 @@ class AdminScreen(ctk.CTkFrame):
             return
         for widget in slaves:
             widget.grid_forget()
-        columns = 2 if compact else 5
+        columns = 2 if compact else 6
         for column in range(columns):
             self.monitor_cards_frame.columnconfigure(column, weight=1)
-        for index, key in enumerate(("total", "accept", "reject", "reject_rate", "push")):
+        for index, key in enumerate(("total", "accept", "reject", "reject_rate", "pending", "failed")):
             self.monitor_cards[key].grid(row=index // columns, column=index % columns, sticky="ew", padx=4, pady=4)
 
     def _clear_tree(self, tree: ttk.Treeview) -> None:
