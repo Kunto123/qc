@@ -168,14 +168,43 @@ class _StubApi:
     def list_deployments(self):
         return []
 
+    def create_template(self, payload: dict):
+        result = dict(payload)
+        result["id"] = int(result.get("id") or 11)
+        result["version_id"] = 12
+        result["version_number"] = 1
+        return result
+
+    def update_template(self, template_id: int, payload: dict):
+        result = dict(payload)
+        result["id"] = template_id
+        result["version_id"] = 22
+        result["version_number"] = int(result.get("version_number") or 1) + 1
+        return result
+
+    def deploy_template(self, payload: dict):
+        return {"id": 31, "is_active": True, "template_name": "QC Line A", **payload}
+
     def update_deployment(self, deployment_id: int, payload: dict):
         return {"id": deployment_id, **payload}
+
+    def deactivate_deployment(self, deployment_id: int):
+        return {"id": deployment_id, "is_active": False}
 
     def list_users(self):
         return []
 
+    def create_user(self, payload: dict):
+        return {"id": 41, "is_active": True, "rfid_bound": False, **payload}
+
+    def bind_user_rfid(self, user_id: int, rfid_uid: str):
+        return {"id": user_id, "rfid_bound": True, "rfid_uid_last4": rfid_uid[-4:]}
+
     def list_inspections(self, params=None):
         return []
+
+    def export_inspections_csv(self, params=None):
+        return "id,decision\n1,ACCEPT\n"
     
     def get_inspection(self, result_id: int):
         return {"id": result_id, "decision": "ACCEPT", "retry_count": 0, "push_status": "sent"}
@@ -305,22 +334,6 @@ class UiSmokeTest(unittest.TestCase):
             if screen.annotation_canvas._source_frame is not None and screen.annotation_canvas._photo is not None:
                 return
 
-    def _wait_for_admin_template_load(self, screen, template_id: int, *, attempts: int = 20) -> None:
-        for _ in range(attempts):
-            screen.update_idletasks()
-            screen.update()
-            if getattr(screen, "current_template_id", None) != template_id:
-                continue
-            if screen.template_form.name_var.get().strip() != "QC Line A":
-                continue
-            try:
-                raw_payload = screen.template_raw_editor.get_payload()
-            except Exception:  # noqa: BLE001
-                continue
-            if int(raw_payload.get("id") or 0) == template_id:
-                return
-        self.fail("Timed out waiting for admin template detail to load")
-
     def tearDown(self) -> None:
         for patcher in getattr(self, "_async_patchers", []):
             patcher.stop()
@@ -429,29 +442,37 @@ class UiSmokeTest(unittest.TestCase):
         screen = AdminScreen(self.root, self.api, self.state)
         screen.update_idletasks()
         self.assertTrue(screen.winfo_exists())
-        self.assertIsNotNone(screen.template_form)
+        self.assertEqual(screen._notebook.tabs(), ["Presets", "Operators", "Monitor"])
+        self.assertFalse(hasattr(screen, "template_form"))
+        self.assertFalse(hasattr(screen, "workstation_tools_screen"))
         screen.destroy()
 
-    def test_admin_template_selection_auto_loads_detail(self) -> None:
-        screen = AdminScreen(self.root, self.api, self.state)
-        screen.update_idletasks()
-        for _ in range(10):
+    def test_admin_preset_selection_loads_wizard(self) -> None:
+        deployments = [
+            {
+                "id": 7,
+                "template_id": 1,
+                "template_name": "QC Line A",
+                "template_version_id": 2,
+                "line_id": "LINE-A",
+                "station_id": "ST-01",
+                "is_active": True,
+            }
+        ]
+        with mock.patch.object(self.api, "list_deployments", return_value=deployments):
+            screen = AdminScreen(self.root, self.api, self.state)
             screen.update_idletasks()
-            screen.update()
-            if screen.template_table.get_children():
-                break
+            preset_iid = screen.preset_table.get_children()[0]
+            screen.preset_table.selection_set(preset_iid)
+            screen.preset_table.focus(preset_iid)
+            screen.preset_table.event_generate("<<TreeviewSelect>>")
 
-        template_iid = screen.template_table.get_children()[0]
-        screen.template_table.selection_set(template_iid)
-        screen.template_table.focus(template_iid)
-        screen.template_table.event_generate("<<TreeviewSelect>>")
-
-        self._wait_for_admin_template_load(screen, int(template_iid))
-
-        self.assertEqual(screen.current_template_id, int(template_iid))
-        self.assertEqual(screen.template_form.name_var.get(), "QC Line A")
-        self.assertEqual(screen.template_raw_editor.get_payload()["name"], "QC Line A")
-        screen.destroy()
+            self.assertEqual(screen.current_template_id, 1)
+            self.assertEqual(screen.current_template_version_id, 2)
+            self.assertEqual(screen.preset_name_var.get(), "QC Line A")
+            self.assertEqual(screen.preset_line_var.get(), "LINE-A")
+            self.assertEqual(screen.preset_station_var.get(), "ST-01")
+            screen.destroy()
 
     def test_template_form_model_path_dropdown_autofills_meta_path(self) -> None:
         form = TemplateEditorForm(self.root)
@@ -490,16 +511,12 @@ class UiSmokeTest(unittest.TestCase):
         ):
             screen._apply_responsive_layout()
         self.assertTrue(screen._layout_compact)
-        self.assertEqual(int(screen.templates_left.grid_info()["row"]), 0)
-        self.assertEqual(int(screen.templates_right.grid_info()["row"]), 1)
-        self.assertEqual(int(screen.deployments_left.grid_info()["row"]), 0)
-        self.assertEqual(int(screen.deployments_right.grid_info()["row"]), 1)
-        self.assertEqual(int(screen.users_left.grid_info()["row"]), 0)
-        self.assertEqual(int(screen.users_right.grid_info()["row"]), 1)
-        self.assertEqual(int(screen.results_left.grid_info()["row"]), 0)
-        self.assertEqual(int(screen.results_right.grid_info()["row"]), 1)
-        self.assertEqual(int(screen.admin_cards["templates"].grid_info()["row"]), 0)
-        self.assertEqual(int(screen.admin_cards["users"].grid_info()["row"]), 1)
+        self.assertEqual(int(screen.presets_left.grid_info()["row"]), 0)
+        self.assertEqual(int(screen.presets_right.grid_info()["row"]), 1)
+        self.assertEqual(int(screen.operators_left.grid_info()["row"]), 0)
+        self.assertEqual(int(screen.operators_right.grid_info()["row"]), 1)
+        self.assertEqual(int(screen.admin_cards["presets"].grid_info()["row"]), 0)
+        self.assertEqual(int(screen.admin_cards["accept"].grid_info()["row"]), 1)
         screen.destroy()
 
     def test_admin_overview_cards_hide_on_short_height(self) -> None:
@@ -510,136 +527,103 @@ class UiSmokeTest(unittest.TestCase):
         self.assertFalse(screen._overview_cards_visible)
         screen.destroy()
 
-    def test_admin_update_selected_deployment_uses_form_payload(self) -> None:
-        deployments = [
-            {
-                "id": 7,
-                "template_id": 1,
-                "template_name": "QC Line A",
-                "template_version_id": 1,
-                "line_id": "LINE-OLD",
-                "station_id": "ST-OLD",
-                "is_active": True,
-            }
-        ]
-        calls: list[tuple[int, dict]] = []
+    def test_admin_save_and_deploy_preset_without_manual_version_id(self) -> None:
+        created_payloads: list[dict] = []
+        deployed_payloads: list[dict] = []
 
-        def update_deployment(deployment_id: int, payload: dict):
-            calls.append((deployment_id, dict(payload)))
-            return {"id": deployment_id, **payload}
+        def create_template(payload: dict):
+            created_payloads.append(dict(payload))
+            result = dict(payload)
+            result["id"] = 99
+            result["version_id"] = 100
+            return result
 
-        with mock.patch.object(self.api, "list_deployments", return_value=deployments), mock.patch.object(
+        def deploy_template(payload: dict):
+            deployed_payloads.append(dict(payload))
+            return {"id": 101, "is_active": True, **payload}
+
+        with mock.patch.object(self.api, "create_template", side_effect=create_template), mock.patch.object(
             self.api,
-            "update_deployment",
-            side_effect=update_deployment,
+            "deploy_template",
+            side_effect=deploy_template,
         ), mock.patch("client_tk.app.screens.admin.view.messagebox.showinfo", return_value=None):
             screen = AdminScreen(self.root, self.api, self.state)
-            screen.update_idletasks()
-            self.assertTrue(screen.deployment_table.get_children())
+            screen.preset_name_var.set("Preset A")
+            screen.preset_line_var.set("LINE-A")
+            screen.preset_station_var.set("ST-01")
+            screen.preset_model_path_var.set("data/models/sticker.pt")
+            screen.preset_expected_code_var.set("K0W-HB0")
 
-            deployment_iid = screen.deployment_table.get_children()[0]
-            screen.deployment_table.selection_set(deployment_iid)
-            screen.deployment_table.focus(deployment_iid)
-            screen.deployment_table.event_generate("<<TreeviewSelect>>")
-            screen.update_idletasks()
+            screen.save_and_deploy_preset()
 
-            screen.dep_line.delete(0, "end")
-            screen.dep_line.insert(0, "LINE-NEW")
-            screen.dep_station.delete(0, "end")
-            screen.dep_station.insert(0, "ST-NEW")
-            screen.dep_version_id.delete(0, "end")
-            screen.dep_version_id.insert(0, "2")
-
-            screen.update_selected_deployment()
-
-            self.assertTrue(calls)
-            deployment_id, payload = calls[-1]
-            self.assertEqual(deployment_id, 7)
-            self.assertEqual(payload["line_id"], "LINE-NEW")
-            self.assertEqual(payload["station_id"], "ST-NEW")
-            self.assertEqual(payload["template_version_id"], 2)
-            self.assertIn("Deployment #7 diupdate", screen.status_var.get())
-
+            self.assertTrue(created_payloads)
+            self.assertTrue(deployed_payloads)
+            self.assertEqual(created_payloads[-1]["vision"]["runtime"], "ultralytics")
+            self.assertEqual(created_payloads[-1]["sticker"]["ocr_expected_text"], "K0W-HB0")
+            self.assertEqual(deployed_payloads[-1]["template_id"], 99)
+            self.assertEqual(deployed_payloads[-1]["template_version_id"], 100)
+            self.assertEqual(deployed_payloads[-1]["line_id"], "LINE-A")
             screen.destroy()
 
-    def test_admin_apply_result_correction_calls_update_inspection(self) -> None:
-        results = [
-            {
-                "id": 21,
-                "inspected_at": "2026-04-10T10:00:00+00:00",
-                "decision": "REJECT",
-                "part_name": "Part-A",
-                "line_id": "LINE-A",
-                "station_id": "ST-01",
-                "push_status": "sent",
-                "retry_count": 0,
-                "reject_reason_code": "OFFSET",
-            }
-        ]
-        calls: list[tuple[int, dict]] = []
+    def test_admin_quick_add_operator_creates_user_and_binds_rfid(self) -> None:
+        created_payloads: list[dict] = []
+        bound_calls: list[tuple[int, str]] = []
 
-        def update_inspection(result_id: int, payload: dict):
-            calls.append((result_id, dict(payload)))
-            return {"id": result_id, **payload}
+        def create_user(payload: dict):
+            created_payloads.append(dict(payload))
+            return {"id": 77, **payload}
 
-        with mock.patch.object(self.api, "list_inspections", return_value=results), mock.patch.object(
+        def bind_user_rfid(user_id: int, rfid_uid: str):
+            bound_calls.append((user_id, rfid_uid))
+            return {"id": user_id, "rfid_bound": True}
+
+        with mock.patch.object(self.api, "create_user", side_effect=create_user), mock.patch.object(
             self.api,
-            "update_inspection",
-            side_effect=update_inspection,
-        ), mock.patch("client_tk.app.screens.admin.view.messagebox.askyesno", return_value=True):
+            "bind_user_rfid",
+            side_effect=bind_user_rfid,
+        ):
             screen = AdminScreen(self.root, self.api, self.state)
-            screen.update_idletasks()
-            result_iid = screen.results_table.get_children()[0]
-            screen.results_table.selection_set(result_iid)
-            screen.results_table.focus(result_iid)
+            screen.operator_username_var.set("operator-a")
+            screen.operator_rfid_var.set("RFID-1234")
 
-            screen.result_correction_decision.set("ACCEPT")
-            screen.result_correction_reason.delete(0, "end")
-            screen.result_correction_reason.insert(0, "MANUAL")
-            screen.apply_result_correction()
+            screen.create_operator_from_rfid()
 
-            self.assertTrue(calls)
-            result_id, payload = calls[-1]
-            self.assertEqual(result_id, 21)
-            self.assertEqual(payload["decision"], "ACCEPT")
-            self.assertEqual(payload["decision_code"], "ACCEPT")
-            self.assertIsNone(payload["reject_reason_code"])
+            self.assertEqual(created_payloads[-1]["username"], "operator-a")
+            self.assertEqual(created_payloads[-1]["role"], "operator")
+            self.assertTrue(created_payloads[-1]["password"])
+            self.assertEqual(bound_calls, [(77, "RFID-1234")])
             screen.destroy()
 
-    def test_admin_delete_selected_result_calls_delete_inspection(self) -> None:
+    def test_admin_monitor_retries_visible_failed_pushes(self) -> None:
         results = [
             {
                 "id": 33,
                 "inspected_at": "2026-04-10T10:00:00+00:00",
-                "decision": "ACCEPT",
+                "decision": "REJECT",
                 "part_name": "Part-B",
                 "line_id": "LINE-B",
                 "station_id": "ST-02",
-                "push_status": "sent",
+                "push_status": "failed",
                 "retry_count": 0,
-                "reject_reason_code": None,
+                "reject_reason_code": "OFFSET",
             }
         ]
-        deleted_ids: list[int] = []
+        retry_calls: list[list[int]] = []
 
-        def delete_inspection(result_id: int):
-            deleted_ids.append(result_id)
-            return {"deleted": True, "id": result_id}
+        def retry_failed_inspection_pushes(result_ids=None, limit: int = 100):
+            retry_calls.append(list(result_ids or []))
+            return {"attempted": len(result_ids or []), "succeeded": len(result_ids or []), "failed": 0}
 
         with mock.patch.object(self.api, "list_inspections", return_value=results), mock.patch.object(
             self.api,
-            "delete_inspection",
-            side_effect=delete_inspection,
-        ), mock.patch("client_tk.app.screens.admin.view.messagebox.askyesno", return_value=True):
+            "retry_failed_inspection_pushes",
+            side_effect=retry_failed_inspection_pushes,
+        ):
             screen = AdminScreen(self.root, self.api, self.state)
             screen.update_idletasks()
-            result_iid = screen.results_table.get_children()[0]
-            screen.results_table.selection_set(result_iid)
-            screen.results_table.focus(result_iid)
+            screen.retry_visible_failed_pushes()
 
-            screen.delete_selected_result()
-
-            self.assertEqual(deleted_ids, [33])
+            self.assertEqual(retry_calls, [[33]])
             screen.destroy()
 
     def test_engineer_screen_initializes(self) -> None:
