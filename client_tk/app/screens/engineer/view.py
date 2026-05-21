@@ -332,10 +332,13 @@ class EngineerScreen(ctk.CTkFrame):
         selected_tab_text = self._notebook.tab(self._notebook.select(), "text")
         self._selected_tab_name = selected_tab_text
         if selected_tab_text == "Training":
+            self._sync_training_dataset_selector()
             current_dataset_id = self._current_dataset_id()
-            if current_dataset_id and not self.train_dataset.get().strip():
-                self.train_dataset.delete(0, "end")
-                self.train_dataset.insert(0, current_dataset_id)
+            if current_dataset_id:
+                display = self._train_dataset_id_to_display.get(current_dataset_id, "")
+                if display:
+                    self.train_dataset.set(display)
+                    self._on_training_dataset_selected()
             if not self._base_model_cache or not self.train_base_model["values"]:
                 self.refresh_base_models()
             if self._augment_capabilities is None:
@@ -730,21 +733,52 @@ class EngineerScreen(ctk.CTkFrame):
             foreground="#475569",
             wraplength=540,
             justify="left",
-        ).pack(anchor="w", pady=(2, 8))
+        ).pack(anchor="w", pady=(2, 4))
+
+        # Training flow step indicator
+        flow_frame = ttk.Frame(self.train_panel)
+        flow_frame.pack(fill="x", pady=(0, 8))
+        self._flow_step_vars: list[tk.StringVar] = []
+        step_labels = [
+            ("1. Dataset", "Pilih dataset yang sudah siap"),
+            ("2. Version", "Pilih dataset version (opsional)"),
+            ("3. Model", "Pilih base model YOLO"),
+            ("4. Params", "Set hyperparameters"),
+            ("5. Start", "Mulai training"),
+        ]
+        for col_idx, (step_title, step_desc) in enumerate(step_labels):
+            flow_frame.columnconfigure(col_idx, weight=1)
+            step_frame = ttk.LabelFrame(flow_frame, text=step_title, padding=4)
+            step_frame.grid(row=0, column=col_idx, sticky="nsew", padx=(0, 4 if col_idx < len(step_labels) - 1 else 0))
+            var = tk.StringVar(value="○")
+            self._flow_step_vars.append(var)
+            ttk.Label(step_frame, textvariable=var, font=("Segoe UI", 14)).pack()
+            ttk.Label(step_frame, text=step_desc, foreground="#64748b", wraplength=120, justify="center", font=("Segoe UI", 8)).pack()
 
         top = ttk.Frame(self.train_panel)
         top.pack(fill="x")
         top.columnconfigure(1, weight=1)
         top.columnconfigure(3, weight=1)
         top.columnconfigure(5, weight=1)
-        self.train_dataset = ttk.Entry(top)
+        self.train_dataset = ttk.Combobox(top, state="readonly")
         self.train_base_model = ttk.Combobox(top, state="readonly")
         self.train_device = ttk.Combobox(top, values=["auto", "gpu", "cpu"], state="readonly")
         self.train_device.set("auto")
-        self._grid_entry(top, 0, 0, "Dataset ID", self.train_dataset)
+        self._grid_entry(top, 0, 0, "Dataset", self.train_dataset)
         self._grid_entry(top, 0, 2, "Base Model", self.train_base_model)
         ttk.Label(top, text="Device").grid(row=0, column=4, sticky="w", padx=(0, 8), pady=4)
         self.train_device.grid(row=0, column=5, sticky="ew", pady=4)
+        self.train_dataset.bind("<<ComboboxSelected>>", self._on_training_dataset_selected)
+
+        # Dataset readiness indicator
+        self._train_dataset_status_var = tk.StringVar(value="Pilih dataset untuk melihat status.")
+        ttk.Label(
+            self.train_panel,
+            textvariable=self._train_dataset_status_var,
+            foreground="#475569",
+            wraplength=540,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 0))
         self.train_base_model_info = tk.StringVar(value="Pilih base model dari katalog YOLOv5 / YOLOv11.")
         ttk.Label(self.train_panel, textvariable=self.train_base_model_info, foreground="#475569", wraplength=540, justify="left").pack(anchor="w", pady=(4, 0))
         self.train_base_model.bind("<<ComboboxSelected>>", lambda _event: self._refresh_base_model_info())
@@ -1936,6 +1970,7 @@ class EngineerScreen(ctk.CTkFrame):
     def _apply_datasets(self, items: list[dict], *, previous_selected_id: str | None) -> None:
         self._dataset_cache = items
         self._sync_annotation_dataset_selector(preferred_dataset_id=previous_selected_id)
+        self._sync_training_dataset_selector()
         self.dataset_list.delete(0, "end")
         for item in items:
             summary = f"{item.get('image_count', 0)} imgs / {item.get('annotated_image_count', 0)} ann / {item.get('augmented_count', 0)} aug"
@@ -2864,6 +2899,7 @@ class EngineerScreen(ctk.CTkFrame):
                 break
         self._update_dataset_version_summary(version)
         self._sync_annotation_class_name()
+        self._update_flow_steps()
         if self.annotation_canvas._source_frame is None:
             self._reload_active_annotation_image()
         else:
@@ -3004,6 +3040,7 @@ class EngineerScreen(ctk.CTkFrame):
             if not isinstance(result, list):
                 return
             self._apply_training_jobs(result)
+            self._update_flow_steps()
 
         run_async(self, _load, callback=_done)
 
@@ -3374,9 +3411,25 @@ class EngineerScreen(ctk.CTkFrame):
         if spec is None:
             messagebox.showwarning("Training", "Pilih base model dulu.")
             return
-        dataset_id = self.train_dataset.get().strip()
+        display = self.train_dataset.get().strip()
+        dataset_id = self._train_dataset_display_to_id.get(display, display)
         if not dataset_id:
-            messagebox.showwarning("Training", "Dataset ID wajib diisi.")
+            messagebox.showwarning("Training", "Pilih dataset dulu.")
+            return
+        # Validate dataset readiness
+        ds = next((item for item in self._dataset_cache if str(item.get("id") or "") == dataset_id), None)
+        if ds is None:
+            messagebox.showwarning("Training", "Dataset tidak ditemukan. Refresh dulu.")
+            return
+        images = int(ds.get("image_count") or 0)
+        ann = int(ds.get("annotated_image_count") or 0)
+        if images == 0 or ann == 0:
+            messagebox.showwarning(
+                "Training",
+                f"Dataset belum siap untuk training. "
+                f"Images: {images}, Annotations: {ann}. "
+                f"Lengkapi upload + anotasi di tab Data terlebih dahulu."
+            )
             return
         try:
             hparams_payload = self._build_training_hparam_payload()
@@ -3404,6 +3457,7 @@ class EngineerScreen(ctk.CTkFrame):
             return
         if isinstance(created, dict):
             self._active_training_job_id = str(created.get("id") or "").strip() or self._active_training_job_id
+        self._update_flow_steps()
         self.refresh_training_jobs()
 
     def cancel_training_job(self):
@@ -3508,6 +3562,81 @@ class EngineerScreen(ctk.CTkFrame):
         normalized = selected.lower().strip()
         return next((item for item in self._base_model_cache if str(item.get("id") or "").lower() == normalized), None)
 
+    def _sync_training_dataset_selector(self) -> None:
+        """Sync training tab dataset combobox with current dataset cache."""
+        display_to_id: dict[str, str] = {}
+        id_to_display: dict[str, str] = {}
+        values: list[str] = []
+        for item in self._dataset_cache:
+            ds_id = str(item.get("id") or "").strip()
+            name = str(item.get("name") or "").strip()
+            images = int(item.get("image_count") or 0)
+            ann = int(item.get("annotated_image_count") or 0)
+            aug = int(item.get("augmented_count") or 0)
+            display = f"{name} | {ds_id} | {images}img {ann}ann {aug}aug"
+            values.append(display)
+            display_to_id[display] = ds_id
+            id_to_display[ds_id] = display
+        self._train_dataset_display_to_id = display_to_id
+        self._train_dataset_id_to_display = id_to_display
+        self.train_dataset["values"] = values
+
+    def _on_training_dataset_selected(self, _event=None) -> None:
+        """Update dataset readiness status when a dataset is selected in training tab."""
+        display = self.train_dataset.get().strip()
+        ds_id = self._train_dataset_display_to_id.get(display, display)
+        if not ds_id or not self._dataset_cache:
+            self._train_dataset_status_var.set("Pilih dataset untuk melihat status.")
+            return
+        ds = next((item for item in self._dataset_cache if str(item.get("id") or "") == ds_id), None)
+        if ds is None:
+            self._train_dataset_status_var.set("Dataset tidak ditemukan.")
+            return
+        images = int(ds.get("image_count") or 0)
+        ann = int(ds.get("annotated_image_count") or 0)
+        aug = int(ds.get("augmented_count") or 0)
+        versions = int(ds.get("version_count") or 0)
+        missing: list[str] = []
+        if images == 0:
+            missing.append("belum ada gambar")
+        if ann == 0:
+            missing.append("belum ada anotasi")
+        if missing:
+            self._train_dataset_status_var.set(
+                f"READINESS: TIDAK SIAP — {', '.join(missing)}. "
+                f"Lengkapi di tab Data terlebih dahulu."
+            )
+            return
+        coverage = ds.get("annotation_coverage", 0)
+        status_parts = [f"SIAP — {images} gambar, {ann} anotasi"]
+        if isinstance(coverage, (int, float)) and coverage > 0:
+            status_parts.append(f"coverage {coverage:.0%}")
+        if aug > 0:
+            status_parts.append(f"{aug} augmented")
+        if versions > 0:
+            status_parts.append(f"{versions} version(s)")
+        self._train_dataset_status_var.set("READINESS: " + " | ".join(status_parts))
+        self._update_flow_steps()
+
+    def _update_flow_steps(self) -> None:
+        """Update the training flow step indicator based on current form state."""
+        if not hasattr(self, "_flow_step_vars") or len(self._flow_step_vars) < 5:
+            return
+        # Step 1: Dataset selected
+        ds = self.train_dataset.get().strip()
+        self._flow_step_vars[0].set("✓" if ds else "○")
+        # Step 2: Version selected (optional, mark as done if selected)
+        ver = self.train_dataset_version.get().strip()
+        self._flow_step_vars[1].set("✓" if ver else "○")
+        # Step 3: Base model selected
+        bm = self.train_base_model.get().strip()
+        self._flow_step_vars[2].set("✓" if bm else "○")
+        # Step 4: Params always editable, mark as done if epochs is set
+        ep = self.train_epochs.get().strip()
+        self._flow_step_vars[3].set("✓" if ep else "○")
+        # Step 5: Start - mark when training job exists
+        self._flow_step_vars[4].set("✓" if self._active_training_job_id else "○")
+
     def _selected_dataset_version_spec(self) -> dict | None:
         selected = self.train_dataset_version.get().strip()
         if not selected:
@@ -3529,10 +3658,12 @@ class EngineerScreen(ctk.CTkFrame):
         spec = self._selected_base_model_spec()
         if spec is None:
             self.train_base_model_info.set("Pilih base model dari katalog YOLOv5 / YOLOv11.")
+            self._update_flow_steps()
             return
         self.train_base_model_info.set(
             f"{spec.get('display_name')} | {spec.get('family_label')} {spec.get('variant_label')} | runtime {spec.get('runtime')} | weights {spec.get('weights_name')}"
         )
+        self._update_flow_steps()
 
     def refresh_base_models(self) -> None:
         self._base_models_refresh_sequence += 1

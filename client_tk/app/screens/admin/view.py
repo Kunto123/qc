@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import base64
+from collections import Counter, OrderedDict
 import datetime
 import secrets
 import string
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from pathlib import Path
 
 import customtkinter as ctk
+import cv2
+import numpy as np
 
+from backend.app.services.calibration import CalibrationService, MIN_CALIBRATION_PROFILE_PIXELS
+from backend.app.core.model_catalog import list_base_models as catalog_list_base_models
+from client_tk.app.api_client import ApiClient
 from client_tk.app.components.async_bridge import run_async
+from client_tk.app.components.annotation_canvas import AnnotationCanvas
+from client_tk.app.components.roi_picker_canvas import RoiPickerCanvas
 from client_tk.app.components.scrollable_frame import AutoHideScrollbar, ScrollableFrame
-from client_tk.app.components.template_forms import LabeledValuePanel
+from client_tk.app.components.template_forms import JsonEditor, LabeledValuePanel
 from client_tk.app.theme import (
     ACCENT,
     ACCENT_HOVER,
@@ -25,6 +35,7 @@ from client_tk.app.theme import (
     TEXT_PRIMARY,
     TEXT_SECONDARY,
 )
+from shared.contracts.augment import TRANSFORM_CATALOG as _TRANSFORM_CATALOG
 
 
 RESPONSIVE_BREAKPOINT = 1180
@@ -122,6 +133,29 @@ class AdminScreen(ctk.CTkFrame):
         self._augment_jobs_cache: list[dict] = []
         self._users_cache: list[dict] = []
         self._results_cache: list[dict] = []
+
+        # Data tab state
+        self._dataset_display_to_id: dict[str, str] = {}
+        self._dataset_id_to_display: dict[str, str] = {}
+        self._dataset_version_cache: list[dict] = []
+        self._dataset_version_lookup: dict[str, dict] = {}
+        self._annotation_files: list[dict] = []
+        self._annotation_index: int | None = None
+        self._annotation_dataset_id: str | None = None
+        self._train_dataset_display_to_id: dict[str, str] = {}
+        self._train_dataset_id_to_display: dict[str, str] = {}
+
+        # Training tab state
+        self._training_jobs_all: list[dict] = []
+        self._training_status_filter = None
+        self._active_training_job_id: str | None = None
+        self._augment_selected_transforms: list[str] = ["brightness", "blur"]
+        self._augment_capabilities: dict | None = None
+        self._flow_step_vars: list[tk.StringVar] = []
+
+        # Calibration tab state
+        self._calibration_profiles_cache: list[dict] = []
+        self._calibration_selected_profile_id: str | None = None
 
         self.current_template_id: int | None = None
         self.current_template_version_id: int | None = None
@@ -223,13 +257,13 @@ class AdminScreen(ctk.CTkFrame):
     def _build_tabs(self) -> None:
         notebook = ctk.CTkTabview(self, fg_color=APP_BG, corner_radius=0)
         notebook.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
-        for tab_name in ("Templates", "Models & Training", "Operators", "Monitor"):
+        for tab_name in ("Templates", "Data", "Training", "Models", "Calibration", "Operators", "Monitor"):
             notebook.add(tab_name)
 
         original_tab = notebook.tab
 
         def _tabs() -> list[str]:
-            return ["Templates", "Models & Training", "Operators", "Monitor"]
+            return ["Templates", "Data", "Training", "Models", "Calibration", "Operators", "Monitor"]
 
         def _select(tab_id: str | None = None):
             if tab_id is None:
@@ -248,12 +282,18 @@ class AdminScreen(ctk.CTkFrame):
 
         self._notebook = notebook
         self.presets_tab = notebook.tab("Templates")
-        self.models_training_tab = notebook.tab("Models & Training")
+        self.data_tab = notebook.tab("Data")
+        self.training_tab = notebook.tab("Training")
+        self.models_tab = notebook.tab("Models")
+        self.calibration_tab = notebook.tab("Calibration")
         self.operators_tab = notebook.tab("Operators")
         self.monitor_tab = notebook.tab("Monitor")
 
         self._build_presets_tab()
-        self._build_models_training_tab()
+        self._build_data_tab()
+        self._build_training_tab()
+        self._build_models_tab()
+        self._build_calibration_tab()
         self._build_operators_tab()
         self._build_monitor_tab()
 
@@ -353,97 +393,7 @@ class AdminScreen(ctk.CTkFrame):
             corner_radius=6,
         ).grid(row=16, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 10))
 
-    def _build_models_training_tab(self) -> None:
-        self.models_training_tab.columnconfigure(0, weight=2)
-        self.models_training_tab.columnconfigure(1, weight=2)
-        self.models_training_tab.rowconfigure(0, weight=1)
-
-        left = ttk.Frame(self.models_training_tab, padding=8)
-        right = ttk.Frame(self.models_training_tab, padding=8)
-        left.grid(row=0, column=0, sticky="nsew")
-        right.grid(row=0, column=1, sticky="nsew")
-        left.rowconfigure(0, weight=1)
-        left.rowconfigure(1, weight=1)
-        left.columnconfigure(0, weight=1)
-        right.rowconfigure(1, weight=1)
-        right.columnconfigure(0, weight=1)
-
-        models_panel = ctk.CTkFrame(left, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        models_panel.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
-        models_panel.columnconfigure(0, weight=1)
-        models_panel.rowconfigure(2, weight=1)
-        ctk.CTkLabel(models_panel, text="Models", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
-        ctk.CTkLabel(models_panel, text="Registered detection models available for templates.", text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
-        self.models_table = self._build_table(
-            models_panel,
-            [
-                ("id", "ID", 60, "center"),
-                ("name", "Name", 190, "w"),
-                ("runtime", "Runtime", 100, "center"),
-                ("path", "Path", 260, "w"),
-            ],
-            row=2,
-            height=8,
-        )
-        self._build_action_row(
-            models_panel,
-            [
-                ("Refresh", self.refresh_models_training, "neutral", "left"),
-                ("Import Archive", self.import_model_archive, "neutral", "right"),
-                ("Use Selected In Template", self.use_selected_model_in_template, "primary", "right"),
-            ],
-        ).grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 10))
-
-        datasets_panel = ctk.CTkFrame(left, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        datasets_panel.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
-        datasets_panel.columnconfigure(0, weight=1)
-        datasets_panel.rowconfigure(2, weight=1)
-        ctk.CTkLabel(datasets_panel, text="Datasets", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
-        ctk.CTkLabel(datasets_panel, text="Training source datasets.", text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
-        self.datasets_table = self._build_table(
-            datasets_panel,
-            [
-                ("id", "ID", 160, "w"),
-                ("name", "Name", 210, "w"),
-                ("status", "Status", 100, "center"),
-            ],
-            row=2,
-            height=8,
-        )
-        self.datasets_table.bind("<<TreeviewSelect>>", self._on_dataset_selected)
-
-        form = ctk.CTkFrame(right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        form.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        form.columnconfigure(1, weight=1)
-        ctk.CTkLabel(form, text="Start Training", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 0))
-        ctk.CTkLabel(form, text="Pick a dataset and base model, then queue one training job.", text_color=TEXT_SECONDARY, wraplength=480, justify="left").grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 10))
-        self._entry(form, 2, 0, "Dataset ID", self.training_dataset_var, columns=2)
-        ttk.Label(form, text="Base Model").grid(row=3, column=0, sticky="w", padx=(12, 8), pady=5)
-        self.training_base_model_selector = ttk.Combobox(form, textvariable=self.training_base_model_var, state="readonly")
-        self.training_base_model_selector.grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=5)
-        self._entry(form, 4, 0, "Device", self.training_device_var, columns=2)
-        self._entry(form, 5, 0, "Epochs", self.training_epochs_var, columns=2)
-        ctk.CTkButton(form, text="Start Training", command=self.start_simple_training, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT, height=32, corner_radius=6).grid(row=6, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 6))
-        ctk.CTkButton(form, text="Create Basic Augment Job", command=self.create_basic_augment_job, fg_color=PANEL_ALT_BG, hover_color=BORDER, text_color=TEXT_PRIMARY, height=30, corner_radius=6).grid(row=7, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 10))
-
-        jobs_panel = ctk.CTkFrame(right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        jobs_panel.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
-        jobs_panel.columnconfigure(0, weight=1)
-        jobs_panel.rowconfigure(2, weight=1)
-        ctk.CTkLabel(jobs_panel, text="Training Jobs", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
-        ctk.CTkLabel(jobs_panel, text="Recent queue and result status.", text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
-        self.training_jobs_table = self._build_table(
-            jobs_panel,
-            [
-                ("id", "ID", 110, "w"),
-                ("dataset", "Dataset", 130, "w"),
-                ("status", "Status", 100, "center"),
-                ("progress", "Progress", 90, "center"),
-                ("model", "Base Model", 150, "w"),
-            ],
-            row=2,
-            height=12,
-        )
+    # NOTE: _build_models_training_tab removed - functionality moved to separate Data/Training/Models/Calibration tabs
 
     def _build_operators_tab(self) -> None:
         self.operators_tab.columnconfigure(0, weight=3)
@@ -596,6 +546,10 @@ class AdminScreen(ctk.CTkFrame):
         self.refresh_models_training()
         self.refresh_operators()
         self.refresh_monitor()
+        self._admin_refresh_datasets()
+        self._admin_refresh_training_jobs()
+        self._admin_refresh_models()
+        self._admin_refresh_calibration()
 
     def refresh_presets(self) -> None:
         self._set_status("Loading presets...")
@@ -1487,3 +1441,779 @@ class AdminScreen(ctk.CTkFrame):
                 self.overview_cards_frame.grid_remove()
         except tk.TclError:
             return
+
+    # ==================================================================
+    # Data Tab - Dataset management, upload, versioning
+    # ==================================================================
+    def _build_data_tab(self) -> None:
+        self.data_tab.columnconfigure(0, weight=1)
+        self.data_tab.rowconfigure(0, weight=1)
+
+        shell = ttk.Frame(self.data_tab)
+        shell.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        shell.columnconfigure(0, weight=3)
+        shell.columnconfigure(1, weight=2)
+        shell.rowconfigure(0, weight=1)
+
+        left_panel = ttk.LabelFrame(shell, text="Datasets", padding=8)
+        left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        left_panel.columnconfigure(0, weight=1)
+
+        self._admin_dataset_list = tk.Listbox(left_panel, height=12)
+        self._admin_dataset_list.grid(row=0, column=0, sticky="nsew")
+        self._admin_dataset_list.bind("<<ListboxSelect>>", self._on_admin_dataset_selected)
+
+        ds_form = ttk.Frame(left_panel)
+        ds_form.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self._admin_ds_name_var = tk.StringVar()
+        self._admin_ds_desc_var = tk.StringVar()
+        ttk.Label(ds_form, text="Name").grid(row=0, column=0, sticky="w")
+        ttk.Entry(ds_form, textvariable=self._admin_ds_name_var).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        ttk.Label(ds_form, text="Desc").grid(row=1, column=0, sticky="w")
+        ttk.Entry(ds_form, textvariable=self._admin_ds_desc_var).grid(row=1, column=1, sticky="ew", padx=(4, 0))
+        ds_form.columnconfigure(1, weight=1)
+
+        ds_btn = ttk.Frame(left_panel)
+        ds_btn.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        ttk.Button(ds_btn, text="Create", command=self._admin_create_dataset).pack(side="left")
+        ttk.Button(ds_btn, text="Delete", command=self._admin_delete_dataset).pack(side="left", padx=4)
+        ttk.Button(ds_btn, text="Refresh", command=self._admin_refresh_datasets).pack(side="left")
+
+        upload_frame = ttk.LabelFrame(left_panel, text="Upload Images", padding=6)
+        upload_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        self._admin_upload_path_var = tk.StringVar(value="No files selected")
+        ttk.Button(upload_frame, text="Choose Files", command=self._admin_choose_upload_files).pack(anchor="w")
+        ttk.Label(upload_frame, textvariable=self._admin_upload_path_var, wraplength=300).pack(anchor="w", pady=(2, 0))
+        ttk.Button(upload_frame, text="Upload", command=self._admin_upload_files).pack(anchor="w", pady=(4, 0))
+        self._admin_upload_paths: list[str] = []
+
+        right_panel = ttk.LabelFrame(shell, text="Dataset Versions", padding=8)
+        right_panel.grid(row=0, column=1, sticky="nsew")
+        right_panel.columnconfigure(0, weight=1)
+
+        self._admin_version_list = tk.Listbox(right_panel, height=8)
+        self._admin_version_list.grid(row=0, column=0, sticky="nsew")
+
+        ver_form = ttk.Frame(right_panel)
+        ver_form.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self._admin_ver_name_var = tk.StringVar(value="Snapshot v1")
+        self._admin_ver_desc_var = tk.StringVar(value="YOLO export snapshot")
+        self._admin_ver_status_var = tk.StringVar(value="ready")
+        self._admin_ver_train_var = tk.StringVar(value="0.7")
+        self._admin_ver_valid_var = tk.StringVar(value="0.2")
+        self._admin_ver_test_var = tk.StringVar(value="0.1")
+        ttk.Label(ver_form, text="Name").grid(row=0, column=0, sticky="w")
+        ttk.Entry(ver_form, textvariable=self._admin_ver_name_var).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        ttk.Label(ver_form, text="Desc").grid(row=1, column=0, sticky="w")
+        ttk.Entry(ver_form, textvariable=self._admin_ver_desc_var).grid(row=1, column=1, sticky="ew", padx=(4, 0))
+        ttk.Label(ver_form, text="Status").grid(row=2, column=0, sticky="w")
+        ttk.Combobox(ver_form, textvariable=self._admin_ver_status_var, values=["draft", "ready", "archived"], state="readonly").grid(row=2, column=1, sticky="ew", padx=(4, 0))
+        ttk.Label(ver_form, text="Train/Valid/Test").grid(row=3, column=0, sticky="w")
+        ratios = ttk.Frame(ver_form)
+        ratios.grid(row=3, column=1, sticky="ew", padx=(4, 0))
+        ttk.Entry(ratios, textvariable=self._admin_ver_train_var, width=5).pack(side="left")
+        ttk.Entry(ratios, textvariable=self._admin_ver_valid_var, width=5).pack(side="left", padx=2)
+        ttk.Entry(ratios, textvariable=self._admin_ver_test_var, width=5).pack(side="left")
+        ver_form.columnconfigure(1, weight=1)
+
+        ver_btn = ttk.Frame(right_panel)
+        ver_btn.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        ttk.Button(ver_btn, text="Create Version", command=self._admin_create_version).pack(side="left")
+        ttk.Button(ver_btn, text="Export", command=self._admin_rebuild_export).pack(side="left", padx=4)
+        ttk.Button(ver_btn, text="Refresh", command=self._admin_refresh_versions).pack(side="left")
+
+    def _admin_refresh_datasets(self) -> None:
+        def _load():
+            return self.api.list_datasets()
+        def _done(result, error):
+            if error:
+                messagebox.showerror("Dataset", str(error))
+                return
+            if not isinstance(result, list):
+                return
+            self._datasets_cache = result
+            self._admin_dataset_list.delete(0, "end")
+            self._dataset_display_to_id = {}
+            self._dataset_id_to_display = {}
+            for item in result:
+                ds_id = str(item.get("id") or "")
+                name = str(item.get("name") or "")
+                images = int(item.get("image_count") or 0)
+                ann = int(item.get("annotated_image_count") or 0)
+                display = f"{name} | {ds_id} | {images}img {ann}ann"
+                self._admin_dataset_list.insert("end", display)
+                self._dataset_display_to_id[display] = ds_id
+                self._dataset_id_to_display[ds_id] = display
+            self._sync_admin_training_datasets()
+        run_async(self, _load, callback=_done)
+
+    def _on_admin_dataset_selected(self, _event=None) -> None:
+        self._admin_refresh_versions()
+
+    def _admin_create_dataset(self) -> None:
+        name = self._admin_ds_name_var.get().strip()
+        if not name:
+            messagebox.showwarning("Dataset", "Name is required.")
+            return
+        desc = self._admin_ds_desc_var.get().strip()
+        try:
+            self.api.create_dataset(name, desc)
+        except Exception as exc:
+            messagebox.showerror("Dataset", str(exc))
+            return
+        self._admin_ds_name_var.set("")
+        self._admin_ds_desc_var.set("")
+        self._admin_refresh_datasets()
+
+    def _admin_delete_dataset(self) -> None:
+        sel = self._admin_dataset_list.curselection()
+        if not sel:
+            messagebox.showwarning("Dataset", "Select a dataset first.")
+            return
+        display = self._admin_dataset_list.get(sel[0])
+        ds_id = self._dataset_display_to_id.get(display, "")
+        if not ds_id:
+            return
+        if not messagebox.askyesno("Dataset", f"Delete dataset {ds_id}?"):
+            return
+        try:
+            self.api.delete_dataset(ds_id)
+        except Exception as exc:
+            messagebox.showerror("Dataset", str(exc))
+            return
+        self._admin_refresh_datasets()
+
+    def _admin_choose_upload_files(self) -> None:
+        paths = filedialog.askopenfilenames(filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")])
+        if paths:
+            self._admin_upload_paths = list(paths)
+            self._admin_upload_path_var.set(f"{len(paths)} file(s) selected")
+
+    def _admin_upload_files(self) -> None:
+        if not self._admin_upload_paths:
+            messagebox.showwarning("Upload", "Choose files first.")
+            return
+        sel = self._admin_dataset_list.curselection()
+        if not sel:
+            messagebox.showwarning("Upload", "Select a dataset first.")
+            return
+        display = self._admin_dataset_list.get(sel[0])
+        ds_id = self._dataset_display_to_id.get(display, "")
+        if not ds_id:
+            return
+        try:
+            for path in self._admin_upload_paths:
+                content = Path(path).read_bytes()
+                self.api.upload_dataset_file(ds_id, "images", Path(path).name, content)
+        except Exception as exc:
+            messagebox.showerror("Upload", str(exc))
+            return
+        self._admin_upload_paths = []
+        self._admin_upload_path_var.set("No files selected")
+        self._admin_refresh_datasets()
+
+    def _admin_refresh_versions(self) -> None:
+        sel = self._admin_dataset_list.curselection()
+        if not sel:
+            return
+        display = self._admin_dataset_list.get(sel[0])
+        ds_id = self._dataset_display_to_id.get(display, "")
+        if not ds_id:
+            return
+        def _load():
+            return self.api.list_dataset_versions(ds_id)
+        def _done(result, error):
+            if error or not isinstance(result, list):
+                return
+            self._dataset_version_cache = result
+            self._admin_version_list.delete(0, "end")
+            self._dataset_version_lookup = {}
+            for item in result:
+                ver_id = str(item.get("id") or "")
+                name = str(item.get("name") or "")
+                status = str(item.get("status") or "")
+                display_v = f"{name} | {ver_id} | {status}"
+                self._admin_version_list.insert("end", display_v)
+                self._dataset_version_lookup[display_v] = item
+        run_async(self, _load, callback=_done)
+
+    def _admin_create_version(self) -> None:
+        sel = self._admin_dataset_list.curselection()
+        if not sel:
+            messagebox.showwarning("Version", "Select a dataset first.")
+            return
+        display = self._admin_dataset_list.get(sel[0])
+        ds_id = self._dataset_display_to_id.get(display, "")
+        if not ds_id:
+            return
+        try:
+            train_f = float(self._admin_ver_train_var.get())
+            valid_f = float(self._admin_ver_valid_var.get())
+            test_f = float(self._admin_ver_test_var.get())
+        except ValueError:
+            messagebox.showwarning("Version", "Train/Valid/Test must be numbers.")
+            return
+        payload = {
+            "name": self._admin_ver_name_var.get().strip() or "Snapshot v1",
+            "description": self._admin_ver_desc_var.get().strip(),
+            "status": self._admin_ver_status_var.get().strip(),
+            "split_ratios": {"train": train_f, "valid": valid_f, "test": test_f},
+        }
+        try:
+            self.api.create_dataset_version(ds_id, payload)
+        except Exception as exc:
+            messagebox.showerror("Version", str(exc))
+            return
+        self._admin_refresh_versions()
+
+    def _admin_rebuild_export(self) -> None:
+        sel = self._admin_version_list.curselection()
+        if not sel:
+            messagebox.showwarning("Export", "Select a version first.")
+            return
+        display = self._admin_version_list.get(sel[0])
+        ver = self._dataset_version_lookup.get(display)
+        if not ver:
+            return
+        ds_id = str(ver.get("dataset_id") or "")
+        ver_id = str(ver.get("id") or "")
+        if not ds_id or not ver_id:
+            return
+        try:
+            self.api.export_dataset_version(ds_id, ver_id)
+            messagebox.showinfo("Export", "Export started.")
+        except Exception as exc:
+            messagebox.showerror("Export", str(exc))
+
+    # ==================================================================
+    # Training Tab - Augment + Training jobs
+    # ==================================================================
+    def _build_training_tab(self) -> None:
+        self.training_tab.columnconfigure(0, weight=1)
+        self.training_tab.rowconfigure(0, weight=1)
+
+        shell = ttk.Frame(self.training_tab)
+        shell.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        shell.columnconfigure(0, weight=1)
+        shell.rowconfigure(0, weight=1)
+
+        top = ttk.Frame(shell)
+        top.grid(row=0, column=0, sticky="nsew")
+        top.columnconfigure(0, weight=1)
+        top.columnconfigure(1, weight=2)
+
+        aug_panel = ttk.LabelFrame(top, text="Augmentation", padding=8)
+        aug_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+
+        aug_form = ttk.Frame(aug_panel)
+        aug_form.pack(fill="x")
+        self._admin_aug_dataset_var = tk.StringVar()
+        self._admin_aug_multiplier_var = tk.StringVar(value="2")
+        ttk.Label(aug_form, text="Dataset ID").grid(row=0, column=0, sticky="w")
+        self._admin_aug_dataset_combo = ttk.Combobox(aug_form, textvariable=self._admin_aug_dataset_var, state="readonly")
+        self._admin_aug_dataset_combo.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        ttk.Label(aug_form, text="Multiplier").grid(row=1, column=0, sticky="w")
+        ttk.Combobox(aug_form, textvariable=self._admin_aug_multiplier_var, values=[str(i) for i in range(1, 11)], state="readonly", width=6).grid(row=1, column=1, sticky="w", padx=(4, 0))
+        aug_form.columnconfigure(1, weight=1)
+
+        ttk.Label(aug_panel, text="Transforms:").pack(anchor="w", pady=(6, 2))
+        self._admin_aug_transform_vars: dict[str, tk.BooleanVar] = {}
+        photo_frame = ttk.LabelFrame(aug_panel, text="Photometric", padding=4)
+        photo_frame.pack(fill="x", pady=(0, 4))
+        geo_frame = ttk.LabelFrame(aug_panel, text="Geometric", padding=4)
+        geo_frame.pack(fill="x")
+        for t_name, t_info in _TRANSFORM_CATALOG.items():
+            parent = photo_frame if t_info.category == "photometric" else geo_frame
+            var = tk.BooleanVar(value=t_name in ("brightness", "blur"))
+            self._admin_aug_transform_vars[t_name] = var
+            ttk.Checkbutton(parent, text=t_name, variable=var).pack(anchor="w")
+
+        aug_btn = ttk.Frame(aug_panel)
+        aug_btn.pack(fill="x", pady=(6, 0))
+        ttk.Button(aug_btn, text="Create Job", command=self._admin_create_augment_job).pack(side="left")
+        ttk.Button(aug_btn, text="Refresh", command=self._admin_refresh_augment_jobs).pack(side="left", padx=4)
+
+        self._admin_augment_jobs_list = tk.Listbox(aug_panel, height=8)
+        self._admin_augment_jobs_list.pack(fill="both", expand=True, pady=(6, 0))
+
+        train_panel = ttk.LabelFrame(top, text="Training", padding=8)
+        train_panel.grid(row=0, column=1, sticky="nsew")
+
+        flow_frame = ttk.Frame(train_panel)
+        flow_frame.pack(fill="x", pady=(0, 6))
+        self._flow_step_vars = []
+        for col_idx, (title, desc) in enumerate([("1.Dataset", "Select"), ("2.Version", "Optional"), ("3.Model", "YOLO"), ("4.Params", "HParams"), ("5.Start", "Go")]):
+            flow_frame.columnconfigure(col_idx, weight=1)
+            sf = ttk.LabelFrame(flow_frame, text=title, padding=2)
+            sf.grid(row=0, column=col_idx, sticky="nsew", padx=(0, 2))
+            var = tk.StringVar(value="\u25cb")
+            self._flow_step_vars.append(var)
+            ttk.Label(sf, textvariable=var, font=("Segoe UI", 12)).pack()
+            ttk.Label(sf, text=desc, font=("Segoe UI", 7), foreground="#64748b").pack()
+
+        form = ttk.Frame(train_panel)
+        form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
+        self._admin_train_dataset_var = tk.StringVar()
+        self._admin_train_base_model_var = tk.StringVar()
+        self._admin_train_device_var = tk.StringVar(value="auto")
+        self._admin_train_epochs_var = tk.StringVar(value="1")
+        self._admin_train_imgsz_var = tk.StringVar(value="320")
+        self._admin_train_batch_var = tk.StringVar(value="4")
+        self._admin_train_patience_var = tk.StringVar(value="5")
+        self._admin_train_workers_var = tk.StringVar(value="0")
+        self._admin_train_cache_var = tk.BooleanVar(value=False)
+
+        ttk.Label(form, text="Dataset").grid(row=0, column=0, sticky="w")
+        self._admin_train_dataset_combo = ttk.Combobox(form, textvariable=self._admin_train_dataset_var, state="readonly")
+        self._admin_train_dataset_combo.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self._admin_train_dataset_combo.bind("<<ComboboxSelected>>", self._on_admin_train_dataset_selected)
+
+        ttk.Label(form, text="Base Model").grid(row=1, column=0, sticky="w")
+        self._admin_train_base_model_combo = ttk.Combobox(form, textvariable=self._admin_train_base_model_var, state="readonly")
+        self._admin_train_base_model_combo.grid(row=1, column=1, sticky="ew", padx=(4, 0))
+
+        ttk.Label(form, text="Device").grid(row=2, column=0, sticky="w")
+        ttk.Combobox(form, textvariable=self._admin_train_device_var, values=["auto", "gpu", "cpu"], state="readonly").grid(row=2, column=1, sticky="ew", padx=(4, 0))
+
+        self._admin_train_readiness_var = tk.StringVar(value="Select dataset to check readiness.")
+        ttk.Label(train_panel, textvariable=self._admin_train_readiness_var, foreground="#475569", wraplength=400, justify="left").pack(anchor="w", pady=(2, 0))
+
+        hp_frame = ttk.LabelFrame(train_panel, text="Hyperparameters", padding=6)
+        hp_frame.pack(fill="x", pady=(6, 0))
+        hp_frame.columnconfigure(1, weight=1)
+        hp_frame.columnconfigure(3, weight=1)
+        for row_idx, (label, var) in enumerate([("Epochs", self._admin_train_epochs_var), ("Img Size", self._admin_train_imgsz_var), ("Batch", self._admin_train_batch_var), ("Patience", self._admin_train_patience_var), ("Workers", self._admin_train_workers_var)]):
+            col = (row_idx % 2) * 2
+            ttk.Label(hp_frame, text=label).grid(row=row_idx // 2, column=col, sticky="w")
+            ttk.Spinbox(hp_frame, textvariable=var, width=8).grid(row=row_idx // 2, column=col + 1, sticky="w", padx=(4, 8))
+        ttk.Checkbutton(hp_frame, text="Cache", variable=self._admin_train_cache_var).grid(row=3, column=0, columnspan=2, sticky="w")
+
+        btn_bar = ttk.Frame(train_panel)
+        btn_bar.pack(fill="x", pady=(6, 0))
+        ttk.Button(btn_bar, text="Start Training", command=self._admin_create_training_job).pack(side="left")
+        ttk.Button(btn_bar, text="Cancel", command=self._admin_cancel_training_job).pack(side="left", padx=4)
+        ttk.Button(btn_bar, text="Delete", command=self._admin_delete_training_job).pack(side="left", padx=4)
+        ttk.Button(btn_bar, text="Refresh", command=self._admin_refresh_training_jobs).pack(side="left")
+
+        bottom = ttk.LabelFrame(shell, text="Training Jobs", padding=6)
+        bottom.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        bottom.columnconfigure(0, weight=1)
+        bottom.rowconfigure(0, weight=1)
+
+        self._admin_training_jobs_list = tk.Listbox(bottom, height=10)
+        self._admin_training_jobs_list.grid(row=0, column=0, sticky="nsew")
+        self._admin_training_jobs_list.bind("<<ListboxSelect>>", self._on_admin_training_job_selected)
+
+        detail = ttk.Frame(bottom)
+        detail.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self._admin_train_status_var = tk.StringVar(value="-")
+        self._admin_train_progress_var = tk.StringVar(value="-")
+        self._admin_train_message_var = tk.StringVar(value="-")
+        ttk.Label(detail, text="Status:").grid(row=0, column=0, sticky="w")
+        ttk.Label(detail, textvariable=self._admin_train_status_var).grid(row=0, column=1, sticky="w", padx=(4, 0))
+        ttk.Label(detail, text="Progress:").grid(row=0, column=2, sticky="w", padx=(12, 0))
+        ttk.Label(detail, textvariable=self._admin_train_progress_var).grid(row=0, column=3, sticky="w", padx=(4, 0))
+        ttk.Label(detail, text="Message:").grid(row=1, column=0, sticky="w")
+        ttk.Label(detail, textvariable=self._admin_train_message_var, wraplength=500, foreground="#475569").grid(row=1, column=1, columnspan=3, sticky="w", padx=(4, 0))
+
+        self._admin_train_progress_bar = ttk.Progressbar(bottom, orient="horizontal", mode="determinate", maximum=100)
+        self._admin_train_progress_bar.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+
+    def _sync_admin_training_datasets(self) -> None:
+        values = []
+        display_to_id = {}
+        id_to_display = {}
+        for item in self._datasets_cache:
+            ds_id = str(item.get("id") or "")
+            name = str(item.get("name") or "")
+            images = int(item.get("image_count") or 0)
+            ann = int(item.get("annotated_image_count") or 0)
+            display = f"{name} | {ds_id} | {images}img {ann}ann"
+            values.append(display)
+            display_to_id[display] = ds_id
+            id_to_display[ds_id] = display
+        self._admin_train_display_to_id = display_to_id
+        self._admin_train_id_to_display = id_to_display
+        self._admin_train_dataset_combo["values"] = values
+        self._admin_aug_dataset_combo["values"] = values
+
+    def _on_admin_train_dataset_selected(self, _event=None) -> None:
+        display = self._admin_train_dataset_var.get().strip()
+        ds_id = self._admin_train_display_to_id.get(display, display)
+        if not ds_id:
+            return
+        ds = next((item for item in self._datasets_cache if str(item.get("id") or "") == ds_id), None)
+        if not ds:
+            self._admin_train_readiness_var.set("Dataset not found.")
+            return
+        images = int(ds.get("image_count") or 0)
+        ann = int(ds.get("annotated_image_count") or 0)
+        if images == 0 or ann == 0:
+            self._admin_train_readiness_var.set(f"NOT READY - {images} images, {ann} annotations. Complete upload + annotation in Data tab first.")
+        else:
+            coverage = ds.get("annotation_coverage", 0)
+            self._admin_train_readiness_var.set(f"READY - {images} images, {ann} annotations, coverage {coverage:.0%}")
+        self._admin_update_flow_steps()
+
+    def _admin_update_flow_steps(self) -> None:
+        if not self._flow_step_vars:
+            return
+        ds = self._admin_train_dataset_var.get().strip()
+        self._flow_step_vars[0].set("\u2713" if ds else "\u25cb")
+        bm = self._admin_train_base_model_var.get().strip()
+        self._flow_step_vars[2].set("\u2713" if bm else "\u25cb")
+        ep = self._admin_train_epochs_var.get().strip()
+        self._flow_step_vars[3].set("\u2713" if ep else "\u25cb")
+        self._flow_step_vars[4].set("\u2713" if self._active_training_job_id else "\u25cb")
+
+    def _admin_create_augment_job(self) -> None:
+        display = self._admin_aug_dataset_var.get().strip()
+        ds_id = self._admin_train_display_to_id.get(display, display)
+        if not ds_id:
+            messagebox.showwarning("Augment", "Select dataset first.")
+            return
+        transforms = [name for name, var in self._admin_aug_transform_vars.items() if var.get()]
+        if not transforms:
+            messagebox.showwarning("Augment", "Select at least one transform.")
+            return
+        multiplier = int(self._admin_aug_multiplier_var.get() or "2")
+        try:
+            self.api.create_augment_job(ds_id, transforms, multiplier)
+        except Exception as exc:
+            messagebox.showerror("Augment", str(exc))
+            return
+        self._admin_refresh_augment_jobs()
+
+    def _admin_refresh_augment_jobs(self) -> None:
+        def _load():
+            return self.api.list_augment_jobs()
+        def _done(result, error):
+            if error or not isinstance(result, list):
+                return
+            self._augment_jobs_cache = result
+            self._admin_augment_jobs_list.delete(0, "end")
+            for item in result:
+                self._admin_augment_jobs_list.insert("end", f"{item.get('id')} | {item.get('status')} | {item.get('transforms')}")
+        run_async(self, _load, callback=_done)
+
+    def _admin_create_training_job(self) -> None:
+        display = self._admin_train_dataset_var.get().strip()
+        ds_id = self._admin_train_display_to_id.get(display, display)
+        if not ds_id:
+            messagebox.showwarning("Training", "Select dataset first.")
+            return
+        ds = next((item for item in self._datasets_cache if str(item.get("id") or "") == ds_id), None)
+        if ds:
+            images = int(ds.get("image_count") or 0)
+            ann = int(ds.get("annotated_image_count") or 0)
+            if images == 0 or ann == 0:
+                messagebox.showwarning("Training", f"Dataset not ready. Images: {images}, Annotations: {ann}")
+                return
+        bm = self._admin_train_base_model_var.get().strip()
+        if not bm:
+            messagebox.showwarning("Training", "Select base model first.")
+            return
+        try:
+            epochs = int(self._admin_train_epochs_var.get())
+            imgsz = int(self._admin_train_imgsz_var.get())
+            batch = int(self._admin_train_batch_var.get())
+            patience = int(self._admin_train_patience_var.get())
+            workers = int(self._admin_train_workers_var.get())
+        except ValueError:
+            messagebox.showwarning("Training", "Hyperparameters must be integers.")
+            return
+        payload = {
+            "dataset_id": ds_id,
+            "base_model": bm,
+            "device_mode": self._admin_train_device_var.get().strip() or "auto",
+            "epochs": epochs, "imgsz": imgsz, "batch": batch,
+            "patience": patience, "workers": workers,
+            "cache": self._admin_train_cache_var.get(),
+        }
+        try:
+            created = self.api.create_training_job(payload)
+        except Exception as exc:
+            messagebox.showerror("Training", str(exc))
+            return
+        if isinstance(created, dict):
+            self._active_training_job_id = str(created.get("id") or "").strip()
+        self._admin_update_flow_steps()
+        self._admin_refresh_training_jobs()
+
+    def _admin_cancel_training_job(self) -> None:
+        sel = self._admin_training_jobs_list.curselection()
+        if not sel:
+            return
+        job_id = self._admin_training_jobs_list.get(sel[0]).split(" | ")[0]
+        try:
+            self.api.cancel_training_job(job_id)
+        except Exception as exc:
+            messagebox.showerror("Training", str(exc))
+        self._admin_refresh_training_jobs()
+
+    def _admin_delete_training_job(self) -> None:
+        sel = self._admin_training_jobs_list.curselection()
+        if not sel:
+            return
+        job_id = self._admin_training_jobs_list.get(sel[0]).split(" | ")[0]
+        if not messagebox.askyesno("Training", f"Delete training job {job_id}?"):
+            return
+        try:
+            self.api.delete_training_job(job_id)
+        except Exception as exc:
+            messagebox.showerror("Training", str(exc))
+        self._admin_refresh_training_jobs()
+
+    def _admin_refresh_training_jobs(self) -> None:
+        def _load():
+            return self.api.list_training_jobs()
+        def _done(result, error):
+            if error or not isinstance(result, list):
+                return
+            self._training_jobs_all = result
+            self._admin_training_jobs_list.delete(0, "end")
+            for item in result:
+                status = str(item.get("status") or "")
+                progress = str(item.get("progress_percent") or 0)
+                self._admin_training_jobs_list.insert("end", f"{item.get('id')} | {status} | {progress}%")
+            self._admin_update_flow_steps()
+        run_async(self, _load, callback=_done)
+
+    def _on_admin_training_job_selected(self, _event=None) -> None:
+        sel = self._admin_training_jobs_list.curselection()
+        if not sel:
+            return
+        job_id = self._admin_training_jobs_list.get(sel[0]).split(" | ")[0]
+        job = next((j for j in self._training_jobs_all if str(j.get("id") or "") == job_id), None)
+        if not job:
+            return
+        self._admin_train_status_var.set(str(job.get("status") or "-"))
+        self._admin_train_progress_var.set(f"{job.get('progress_percent', 0)}%")
+        self._admin_train_message_var.set(str(job.get("progress_message") or "-"))
+        self._admin_train_progress_bar["value"] = int(job.get("progress_percent") or 0)
+
+    # ==================================================================
+    # Models Tab - Model registry + export/import
+    # ==================================================================
+    def _build_models_tab(self) -> None:
+        self.models_tab.columnconfigure(0, weight=1)
+        self.models_tab.rowconfigure(0, weight=1)
+
+        shell = ttk.Frame(self.models_tab)
+        shell.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        shell.columnconfigure(0, weight=2)
+        shell.columnconfigure(1, weight=3)
+        shell.rowconfigure(0, weight=1)
+
+        left = ttk.LabelFrame(shell, text="Model Registry", padding=8)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(0, weight=1)
+
+        self._admin_model_list = tk.Listbox(left, height=16)
+        self._admin_model_list.grid(row=0, column=0, sticky="nsew")
+        self._admin_model_list.bind("<<ListboxSelect>>", self._on_admin_model_selected)
+
+        btn_bar = ttk.Frame(left)
+        btn_bar.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        ttk.Button(btn_bar, text="Refresh", command=self._admin_refresh_models).pack(side="left")
+        ttk.Button(btn_bar, text="Export", command=self._admin_export_model).pack(side="left", padx=4)
+        ttk.Button(btn_bar, text="Delete", command=self._admin_delete_model).pack(side="left")
+
+        right = ttk.LabelFrame(shell, text="Import / Detail", padding=8)
+        right.grid(row=0, column=1, sticky="nsew")
+
+        import_frame = ttk.LabelFrame(right, text="Import Model", padding=6)
+        import_frame.pack(fill="x")
+        self._admin_import_path_var = tk.StringVar(value="No file selected")
+        ttk.Button(import_frame, text="Choose .pt File", command=self._admin_choose_import_file).pack(anchor="w")
+        ttk.Label(import_frame, textvariable=self._admin_import_path_var, wraplength=300).pack(anchor="w", pady=(2, 0))
+        ttk.Button(import_frame, text="Import", command=self._admin_import_model).pack(anchor="w", pady=(4, 0))
+        self._admin_import_path: str = ""
+
+        self._admin_model_detail_var = tk.StringVar(value="Select a model to view details.")
+        ttk.Label(right, textvariable=self._admin_model_detail_var, foreground="#475569", wraplength=400, justify="left").pack(anchor="w", pady=(10, 0))
+
+    def _admin_refresh_models(self) -> None:
+        def _load():
+            return self.api.list_models()
+        def _done(result, error):
+            if error or not isinstance(result, list):
+                return
+            self._models_cache = result
+            self._admin_model_list.delete(0, "end")
+            self._model_lookup = {}
+            for item in result:
+                name = str(item.get("name") or "")
+                path = str(item.get("path") or "")
+                status = str(item.get("status") or "")
+                display = f"{name} | {status} | {path}"
+                self._admin_model_list.insert("end", display)
+                self._model_lookup[display] = item
+        run_async(self, _load, callback=_done)
+
+    def _on_admin_model_selected(self, _event=None) -> None:
+        sel = self._admin_model_list.curselection()
+        if not sel:
+            return
+        display = self._admin_model_list.get(sel[0])
+        model = self._model_lookup.get(display, {})
+        if model:
+            detail = f"Name: {model.get('name')}\nPath: {model.get('path')}\nStatus: {model.get('status')}\nCreated: {model.get('created_at')}"
+            self._admin_model_detail_var.set(detail)
+
+    def _admin_choose_import_file(self) -> None:
+        path = filedialog.askopenfilename(filetypes=[("PyTorch Model", "*.pt")])
+        if path:
+            self._admin_import_path = path
+            self._admin_import_path_var.set(Path(path).name)
+
+    def _admin_import_model(self) -> None:
+        if not self._admin_import_path:
+            messagebox.showwarning("Import", "Choose a .pt file first.")
+            return
+        try:
+            self.api.import_model_archive(self._admin_import_path)
+        except Exception as exc:
+            messagebox.showerror("Import", str(exc))
+            return
+        self._admin_import_path = ""
+        self._admin_import_path_var.set("No file selected")
+        self._admin_refresh_models()
+
+    def _admin_export_model(self) -> None:
+        sel = self._admin_model_list.curselection()
+        if not sel:
+            messagebox.showwarning("Export", "Select a model first.")
+            return
+        display = self._admin_model_list.get(sel[0])
+        model = self._model_lookup.get(display, {})
+        model_id = model.get("id")
+        if not model_id:
+            return
+        try:
+            self.api.export_model_archive(int(model_id))
+            messagebox.showinfo("Export", "Export started.")
+        except Exception as exc:
+            messagebox.showerror("Export", str(exc))
+
+    def _admin_delete_model(self) -> None:
+        sel = self._admin_model_list.curselection()
+        if not sel:
+            messagebox.showwarning("Delete", "Select a model first.")
+            return
+        display = self._admin_model_list.get(sel[0])
+        model = self._model_lookup.get(display, {})
+        model_id = model.get("id")
+        if not model_id:
+            return
+        if not messagebox.askyesno("Delete", f"Delete model {model.get('name')}?"):
+            return
+        try:
+            self.api.delete_model(int(model_id))
+        except Exception as exc:
+            messagebox.showerror("Delete", str(exc))
+        self._admin_refresh_models()
+
+    # ==================================================================
+    # Calibration Tab - Color calibration profiles
+    # ==================================================================
+    def _build_calibration_tab(self) -> None:
+        self.calibration_tab.columnconfigure(0, weight=1)
+        self.calibration_tab.rowconfigure(0, weight=1)
+
+        shell = ttk.Frame(self.calibration_tab)
+        shell.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        shell.columnconfigure(0, weight=1)
+        shell.rowconfigure(0, weight=1)
+
+        left = ttk.LabelFrame(shell, text="Calibration Profiles", padding=8)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(0, weight=1)
+
+        self._admin_cal_list = tk.Listbox(left, height=12)
+        self._admin_cal_list.grid(row=0, column=0, sticky="nsew")
+
+        btn_bar = ttk.Frame(left)
+        btn_bar.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        ttk.Button(btn_bar, text="Refresh", command=self._admin_refresh_calibration).pack(side="left")
+        ttk.Button(btn_bar, text="Delete", command=self._admin_delete_calibration).pack(side="left", padx=4)
+
+        right = ttk.LabelFrame(shell, text="Create Profile", padding=8)
+        right.grid(row=0, column=1, sticky="nsew")
+
+        form = ttk.Frame(right)
+        form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
+        self._admin_cal_name_var = tk.StringVar()
+        self._admin_cal_desc_var = tk.StringVar()
+        ttk.Label(form, text="Name").grid(row=0, column=0, sticky="w")
+        ttk.Entry(form, textvariable=self._admin_cal_name_var).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        ttk.Label(form, text="Description").grid(row=1, column=0, sticky="w")
+        ttk.Entry(form, textvariable=self._admin_cal_desc_var).grid(row=1, column=1, sticky="ew", padx=(4, 0))
+
+        ttk.Label(right, text="Upload a calibration image:", foreground="#475569").pack(anchor="w", pady=(10, 2))
+        self._admin_cal_image_var = tk.StringVar(value="No image selected")
+        ttk.Button(right, text="Choose Image", command=self._admin_choose_cal_image).pack(anchor="w")
+        ttk.Label(right, textvariable=self._admin_cal_image_var, wraplength=300).pack(anchor="w", pady=(2, 0))
+        self._admin_cal_image_path: str = ""
+
+        ttk.Button(right, text="Create Profile", command=self._admin_create_calibration).pack(anchor="w", pady=(10, 0))
+
+    def _admin_refresh_calibration(self) -> None:
+        def _load():
+            return self.api.list_calibration_profiles()
+        def _done(result, error):
+            if error or not isinstance(result, list):
+                return
+            self._calibration_profiles_cache = result
+            self._admin_cal_list.delete(0, "end")
+            for item in result:
+                self._admin_cal_list.insert("end", f"{item.get('name')} | {item.get('id')}")
+        run_async(self, _load, callback=_done)
+
+    def _admin_choose_cal_image(self) -> None:
+        path = filedialog.askopenfilename(filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp")])
+        if path:
+            self._admin_cal_image_path = path
+            self._admin_cal_image_var.set(Path(path).name)
+
+    def _admin_create_calibration(self) -> None:
+        name = self._admin_cal_name_var.get().strip()
+        if not name:
+            messagebox.showwarning("Calibration", "Name is required.")
+            return
+        if not self._admin_cal_image_path:
+            messagebox.showwarning("Calibration", "Choose a calibration image first.")
+            return
+        try:
+            content = Path(self._admin_cal_image_path).read_bytes()
+            b64 = base64.b64encode(content).decode("ascii")
+            self.api.create_calibration_profile(name, self._admin_cal_desc_var.get().strip(), b64, Path(self._admin_cal_image_path).name)
+        except Exception as exc:
+            messagebox.showerror("Calibration", str(exc))
+            return
+        self._admin_cal_name_var.set("")
+        self._admin_cal_desc_var.set("")
+        self._admin_cal_image_path = ""
+        self._admin_cal_image_var.set("No image selected")
+        self._admin_refresh_calibration()
+
+    def _admin_delete_calibration(self) -> None:
+        sel = self._admin_cal_list.curselection()
+        if not sel:
+            messagebox.showwarning("Calibration", "Select a profile first.")
+            return
+        item_str = self._admin_cal_list.get(sel[0])
+        cal_id = item_str.split(" | ")[-1] if " | " in item_str else ""
+        if not cal_id:
+            return
+        if not messagebox.askyesno("Calibration", f"Delete profile {cal_id}?"):
+            return
+        try:
+            self.api.delete_calibration_profile(cal_id)
+        except Exception as exc:
+            messagebox.showerror("Calibration", str(exc))
+        self._admin_refresh_calibration()
