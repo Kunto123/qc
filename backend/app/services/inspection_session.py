@@ -17,9 +17,11 @@ from backend.app.models.session_state import SessionState
 from backend.app.repositories.inspection_results_repository import InspectionResultsRepository
 from backend.app.repositories.profiles_repository import ProfilesRepository
 from backend.app.repositories.reject_log_repository import RejectLogRepository
-from backend.app.services.calibration import CalibrationService
+from backend.app.services.operator_state_machine import OperatorInspectionStateMachine
+from backend.app.services.part_ready_detector import evaluate_color_profile_match, evaluate_hsv_black_ratio
 from backend.app.services.sticker_inference import StickerInferenceService
 from backend.app.services.template_runtime import TemplateRuntimeService
+from backend.app.services.text_tilt import estimate_white_text_tilt
 from shared.contracts.enums import DecisionCode, InspectionEventState, RejectReasonCode, SessionStatus
 from shared.contracts.templates import RoiGeometry
 
@@ -90,7 +92,9 @@ def _round_bbox(position: dict[str, Any] | None) -> dict[str, float] | None:
     }
 
 
-def _estimate_tilt_from_roi(roi_frame, expected_tilt_degrees: float) -> dict[str, Any]:
+def _estimate_tilt_from_roi(roi_frame, expected_tilt_degrees: float, config: Any | None = None) -> dict[str, Any]:
+    if config is not None:
+        return estimate_white_text_tilt(roi_frame, expected_tilt_degrees, config)
     if roi_frame is None or getattr(roi_frame, "size", 0) == 0:
         return {
             "status": "unavailable",
@@ -187,6 +191,7 @@ class InspectionSessionService:
         )
         self._plc_worker = plc_worker
         self._reject_log_repo = reject_log_repo
+        self._operator_state_machine = OperatorInspectionStateMachine()
 
     def start_session(
         self,
@@ -392,6 +397,43 @@ class InspectionSessionService:
         else:
             effective_part_ready = part_ready
 
+        operator_state_decision = self._operator_state_machine.update(
+            state,
+            part_ready=bool(_raw_part_ready),
+            present=bool(presence.get("present", False)),
+            settled=bool(part_ready_settled),
+        )
+        if operator_state_decision.use_cached_result and state.inspection_result_cache:
+            cached_payload = dict(state.inspection_result_cache)
+            cached_timings = dict(cached_payload.get("timings") or {})
+            cached_timings.update(
+                {
+                    **timings,
+                    "inference_ms": 0.0,
+                    "inference_skipped": True,
+                    "operator_state": operator_state_decision.state.value,
+                    "total_ms": _elapsed_ms(total_started),
+                }
+            )
+            cached_payload.update(
+                {
+                    "session": self._session_payload(state),
+                    "presence": presence,
+                    "part_ready": part_ready,
+                    "event_state": InspectionEventState.COOLDOWN.value,
+                    "operator_state": operator_state_decision.state.value,
+                    "count_committed": False,
+                    "count_source": None,
+                    "counters": self._counter_payload(state),
+                    "last_committed_result": state.last_committed_result,
+                    "recent_events": list(state.recent_events),
+                    "timings": cached_timings,
+                }
+            )
+            state.latest_result = cached_payload
+            return cached_payload
+
+        _effective_pr_ready = bool(operator_state_decision.run_inspection)
         detections: list[dict[str, Any]] = []
         inference_ms = 0.0
         if _effective_pr_ready:
@@ -552,6 +594,7 @@ class InspectionSessionService:
             "part_ready": part_ready,
             "validation": validation,
             "event_state": event_state,
+            "operator_state": state.operator_state,
             "event_id": event_id,
             "count_committed": count_committed,
             "count_source": "session" if count_committed else None,
@@ -566,6 +609,10 @@ class InspectionSessionService:
             "part_ready_preview_image_b64": part_ready_preview_image_b64,
             "sticker_preview_image_b64": sticker_preview_image_b64,
         }
+        if count_committed:
+            payload["operator_state"] = "RESULT"
+            self._operator_state_machine.mark_result(state, payload)
+            payload["operator_state"] = state.operator_state
         state.latest_result = payload
         return payload
 
@@ -599,6 +646,7 @@ class InspectionSessionService:
             "line_id": state.line_id,
             "station_id": state.station_id,
             "status": state.status.value,
+            "operator_state": state.operator_state,
             "template_name": state.template.name,
             "part_ready_roi": part_ready_roi,
             "sticker_roi": sticker_roi,
@@ -723,6 +771,29 @@ class InspectionSessionService:
                 "color_profile_id": None,
             }
         if not config.color_profile_id:
+            if str(getattr(config, "method", "") or "").strip().lower() == "hsv_black_ratio":
+                evaluation = evaluate_hsv_black_ratio(frame, config)
+                raw_ratio = float(evaluation["match_ratio"])
+                _PART_READY_WINDOW = 5
+                history = state.part_ready_ratio_history
+                history.append(raw_ratio)
+                if len(history) > _PART_READY_WINDOW:
+                    del history[0]
+                smoothed_ratio = round(sum(history) / len(history), 6)
+                resolved_min = float(evaluation["min_match_ratio"])
+                ready = smoothed_ratio >= resolved_min
+                evaluation.update(
+                    {
+                        "part_ready": ready,
+                        "part_ready_confidence": smoothed_ratio,
+                        "decision": DecisionCode.ACCEPT.value if ready else DecisionCode.REJECT.value,
+                        "reject_reason_code": None if ready else RejectReasonCode.PART_NOT_READY.value,
+                        "status": "ready" if ready else "not_ready",
+                        "match_ratio": smoothed_ratio,
+                        "raw_match_ratio": raw_ratio,
+                    }
+                )
+                return evaluation
             return {
                 "enabled": False,
                 "part_ready": True,
@@ -747,13 +818,7 @@ class InspectionSessionService:
                 "mean_distance": None,
                 "color_profile_id": config.color_profile_id,
             }
-        evaluation = CalibrationService.evaluate_color_match(
-            frame,
-            record["profile"],
-            colorspace=config.colorspace,
-            distance_threshold=config.distance_threshold,
-            min_match_ratio=config.min_match_ratio,
-        )
+        evaluation = evaluate_color_profile_match(frame, config=config, profile=record["profile"])
         raw_ratio = float(evaluation["match_ratio"])
 
         # Rolling mean over last 5 frames to absorb transient occlusion / auto-exposure flicker.
@@ -767,7 +832,7 @@ class InspectionSessionService:
         resolved_min = float(evaluation["min_match_ratio"])
         ready = smoothed_ratio >= resolved_min
         return {
-            "enabled": True,
+            **evaluation,
             "part_ready": ready,
             "part_ready_confidence": smoothed_ratio,
             "decision": DecisionCode.ACCEPT.value if ready else DecisionCode.REJECT.value,
@@ -775,11 +840,7 @@ class InspectionSessionService:
             "status": "ready" if ready else "not_ready",
             "match_ratio": smoothed_ratio,
             "raw_match_ratio": raw_ratio,
-            "mean_distance": evaluation["mean_distance"],
-            "distance_threshold": evaluation["distance_threshold"],
             "min_match_ratio": resolved_min,
-            "color_profile_id": config.color_profile_id,
-            "colorspace": evaluation["colorspace"],
         }
 
     def _normalize_label(self, value: Any) -> str:
@@ -1084,7 +1145,7 @@ class InspectionSessionService:
         max_tilt_degrees = getattr(sticker, "max_tilt_degrees", None)
         max_tilt_degrees_value = None if max_tilt_degrees is None else float(max_tilt_degrees)
         tilt_gate_enabled = bool(getattr(sticker, "tilt_gate_enabled", False))
-        tilt_info = _estimate_tilt_from_roi(roi_frame, expected_tilt_degrees)
+        tilt_info = _estimate_tilt_from_roi(roi_frame, expected_tilt_degrees, sticker)
         ocr_mode = self._resolve_ocr_mode(state)
         thresholds = {
             "min_roi_confidence": float(sticker.min_roi_confidence or 0.0),

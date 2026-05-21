@@ -106,12 +106,8 @@ class OperatorScreen(ctk.CTkFrame):
         self.action_bar = ctk.CTkFrame(self.top_bar, fg_color=APP_BG, corner_radius=0)
         self.action_bar.grid(row=0, column=0, sticky="ew")
         self.action_buttons = [
-            ctk.CTkButton(self.action_bar, text="\u2699 Settings", command=self._open_settings, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
-            ctk.CTkButton(self.action_bar, text="Load Deployment", command=self._load_deployment, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
-            ctk.CTkButton(self.action_bar, text="Start Camera", command=self._start_camera, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
-            ctk.CTkButton(self.action_bar, text="Stop Camera", command=self._stop_camera, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
-            ctk.CTkButton(self.action_bar, text="Start Session", command=self._start_session, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
-            ctk.CTkButton(self.action_bar, text="Stop Session", command=self._stop_session, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
+            ctk.CTkButton(self.action_bar, text="Start", command=self._start_production, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
+            ctk.CTkButton(self.action_bar, text="Stop", command=self._stop_production, fg_color="#7f1d1d", hover_color="#991b1b", text_color="#fef2f2"),
         ]
 
         self.template_box = ctk.CTkFrame(self.top_bar, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
@@ -1218,6 +1214,21 @@ class OperatorScreen(ctk.CTkFrame):
         self.info_var.set("Camera stopped.")
         self.display_source.set("Right View: Live Camera + Sticker ROI")
         self._update_status_badges()
+
+    def _start_production(self) -> None:
+        if not self.template_version_value.get().strip():
+            self._auto_start_first_template()
+        if self.capture.get_latest_frame() is None and not self._start_camera():
+            return
+        if self.state.active_session:
+            self.info_var.set("Production inspection is already running.")
+            return
+        self._start_session()
+
+    def _stop_production(self) -> None:
+        if self.state.active_session:
+            self._stop_session()
+        self._stop_camera()
 
     def _start_session(self) -> None:
         if self.capture.get_latest_frame() is None:

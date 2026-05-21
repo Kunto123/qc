@@ -25,7 +25,7 @@ class TokenStoreTest(unittest.TestCase):
     def test_revoke_user_clears_only_target_user_sessions(self) -> None:
         store = TokenStore(ttl_seconds=120)
         target_user = UserInfo(id=7, username="target", role=UserRole.OPERATOR)
-        other_user = UserInfo(id=8, username="other", role=UserRole.ENGINEER)
+        other_user = UserInfo(id=8, username="other", role=UserRole.ADMIN)
 
         target_session_1 = store.issue(target_user)
         target_session_2 = store.issue(target_user)

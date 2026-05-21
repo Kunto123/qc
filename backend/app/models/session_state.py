@@ -46,3 +46,7 @@ class SessionState:
     # PLC constant-output mode: True once enqueue_part_ready() has been called for
     # the current ready-run, preventing duplicate triggers.  Reset when part leaves.
     plc_part_ready_triggered: bool = False
+    operator_state: str = "IDLE"
+    inspection_has_run_for_current_part: bool = False
+    inspection_result_cache: dict[str, Any] | None = None
+    part_removed_seen_at: datetime | None = None

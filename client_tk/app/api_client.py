@@ -167,6 +167,9 @@ class ApiClient:
     def get_template_version(self, version_id: int) -> dict:
         return self._get(f"/templates/versions/{version_id}")
 
+    def get_runtime_template(self, version_id: int) -> dict:
+        return self._get(f"/templates/versions/{version_id}/runtime-template")
+
     def create_template(self, payload: dict) -> dict:
         return self._post("/templates", payload)
 

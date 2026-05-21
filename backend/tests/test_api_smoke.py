@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import atexit
 import base64
@@ -79,7 +79,6 @@ class ApiSmokeTest(unittest.TestCase):
         cls.client = cls.app.test_client()
         cls.admin_token = cls._login("admin", "admin123")
         cls.operator_token = cls._login("operator", "operator123")
-        cls.engineer_token = cls._login("engineer", "engineer123")
 
     @classmethod
     def _login(cls, username: str, password: str) -> str:
@@ -135,7 +134,7 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertIn("minimum", error)
 
     def test_00b_seeded_model_registry_contains_default_model(self) -> None:
-        response = self.client.get("/models", headers=_headers(self.engineer_token))
+        response = self.client.get("/models", headers=_headers(self.admin_token))
         self.assertEqual(response.status_code, 200, response.get_json())
         models = response.get_json()
         self.assertTrue(models)
@@ -143,7 +142,7 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(models[0]["runtime"], "ultralytics")
 
     def test_00b2_base_model_catalog_contains_yolo_variants(self) -> None:
-        response = self.client.get("/train/base-models", headers=_headers(self.engineer_token))
+        response = self.client.get("/train/base-models", headers=_headers(self.admin_token))
         self.assertEqual(response.status_code, 200, response.get_json())
         catalog = response.get_json()
         self.assertTrue(any(item["id"] == "yolov5s" for item in catalog))
@@ -181,14 +180,14 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertTrue(users)
         self.assertTrue(all("password_hash" not in item for item in users))
 
-    def test_00e2_legacy_engineer_login_is_mapped_to_supported_role(self) -> None:
-        login_response = self.client.post(
-            "/auth/login",
-            json={"username": "engineer", "password": "engineer123"},
-        )
-        self.assertEqual(login_response.status_code, 200, login_response.get_json())
-        user = login_response.get_json().get("user") or {}
-        self.assertEqual(user.get("role"), "admin")
+    def test_00e2_seeded_users_are_admin_and_operator_only(self) -> None:
+        users_response = self.client.get("/auth/users", headers=_headers(self.admin_token))
+        self.assertEqual(users_response.status_code, 200, users_response.get_json())
+        roles = {str(item.get("role") or "") for item in users_response.get_json()}
+        self.assertLessEqual(roles, {"admin", "operator"})
+        usernames = {str(item.get("username") or "") for item in users_response.get_json()}
+        self.assertIn("admin", usernames)
+        self.assertIn("operator", usernames)
 
     def test_00e3_admin_cannot_create_engineer_role(self) -> None:
         response = self.client.post(
@@ -363,7 +362,7 @@ class ApiSmokeTest(unittest.TestCase):
         # A fresh login so we have a guaranteed event in the log
         fresh_login = self.client.post(
             "/auth/login",
-            json={"username": "engineer", "password": "engineer123", "client_name": "audit-smoke"},
+            json={"username": "admin", "password": "admin123", "client_name": "audit-smoke"},
         )
         self.assertEqual(fresh_login.status_code, 200)
 
@@ -592,7 +591,7 @@ class ApiSmokeTest(unittest.TestCase):
         )
         self.assertEqual(frame_response.status_code, 200, frame_response.get_json())
         frame_payload = frame_response.get_json()
-        # Stream mode skips overlay — client renders locally from bbox data.
+        # Stream mode skips overlay â€” client renders locally from bbox data.
         self.assertFalse(frame_payload.get("overlay_image_b64"))
         self.assertIsNone(frame_payload.get("preview_image_b64"))
         # Detection and validation data must still be present.
@@ -612,7 +611,7 @@ class ApiSmokeTest(unittest.TestCase):
                 "colorspace": "LAB",
                 "roi": {"x": 0.09, "y": 0.12, "w": 0.19, "h": 0.22},
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(calibration_response.status_code, 200, calibration_response.get_json())
         profile_record = self.client.post(
@@ -621,7 +620,7 @@ class ApiSmokeTest(unittest.TestCase):
                 "name": "sample-white-square",
                 "profile": calibration_response.get_json(),
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(profile_record.status_code, 201, profile_record.get_json())
         profile_id = profile_record.get_json()["id"]
@@ -655,7 +654,7 @@ class ApiSmokeTest(unittest.TestCase):
                 "persistence": {"write_to_db": True},
                 "metadata": {"scenario": "two-roi-gate"},
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(template_response.status_code, 201, template_response.get_json())
         created_template = template_response.get_json()
@@ -847,7 +846,7 @@ class ApiSmokeTest(unittest.TestCase):
                 "persistence": {"write_to_db": True},
                 "metadata": {"scenario": "roi-class-validator"},
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(template_response.status_code, 201, template_response.get_json())
         version_id = int(template_response.get_json()["version_id"])
@@ -965,7 +964,7 @@ class ApiSmokeTest(unittest.TestCase):
         dataset_response = self.client.post(
             "/datasets",
             json={"name": dataset_name, "description": "smoke"},
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
         dataset = dataset_response.get_json()
@@ -977,7 +976,7 @@ class ApiSmokeTest(unittest.TestCase):
                 "target": "images",
                 "content_b64": _sample_image_b64(),
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(upload_response.status_code, 201, upload_response.get_json())
 
@@ -991,7 +990,7 @@ class ApiSmokeTest(unittest.TestCase):
                 ]
             ),
             content_type="multipart/form-data",
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(batch_upload_response.status_code, 201, batch_upload_response.get_json())
         batch_upload_payload = batch_upload_response.get_json()
@@ -1005,7 +1004,7 @@ class ApiSmokeTest(unittest.TestCase):
                 "target": "not-a-target",
                 "content_b64": _sample_image_b64(),
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(invalid_target_response.status_code, 400, invalid_target_response.get_json())
 
@@ -1020,7 +1019,7 @@ class ApiSmokeTest(unittest.TestCase):
                     }
                 ]
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(annotation_response.status_code, 200, annotation_response.get_json())
         annotation_payload = annotation_response.get_json()
@@ -1029,13 +1028,13 @@ class ApiSmokeTest(unittest.TestCase):
 
         image_browser_response = self.client.get(
             f"/datasets/{dataset['id']}/files?target=images",
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(image_browser_response.status_code, 200, image_browser_response.get_json())
         image_browser_items = image_browser_response.get_json()
         self.assertTrue(any(item.get("annotation_exists") for item in image_browser_items if item["name"] == "sample.jpg"))
 
-        dataset_list_response = self.client.get("/datasets", headers=_headers(self.engineer_token))
+        dataset_list_response = self.client.get("/datasets", headers=_headers(self.admin_token))
         self.assertEqual(dataset_list_response.status_code, 200, dataset_list_response.get_json())
         dataset_list = dataset_list_response.get_json()
         refreshed_dataset = next(item for item in dataset_list if item["id"] == dataset["id"])
@@ -1049,7 +1048,7 @@ class ApiSmokeTest(unittest.TestCase):
                 "description": "versioned export",
                 "split_ratios": {"train": 0.6, "valid": 0.2, "test": 0.2},
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(version_response.status_code, 201, version_response.get_json())
         version_payload = version_response.get_json()
@@ -1059,7 +1058,7 @@ class ApiSmokeTest(unittest.TestCase):
 
         version_list_response = self.client.get(
             f"/datasets/{dataset['id']}/versions",
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(version_list_response.status_code, 200, version_list_response.get_json())
         version_list = version_list_response.get_json()
@@ -1068,14 +1067,14 @@ class ApiSmokeTest(unittest.TestCase):
 
         version_detail_response = self.client.get(
             f"/datasets/{dataset['id']}/versions/{version_payload['id']}",
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(version_detail_response.status_code, 200, version_detail_response.get_json())
         self.assertEqual(version_detail_response.get_json()["id"], version_payload["id"])
 
         version_export_response = self.client.post(
             f"/datasets/{dataset['id']}/versions/{version_payload['id']}/export",
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(version_export_response.status_code, 200, version_export_response.get_json())
         self.assertEqual(version_export_response.get_json()["id"], version_payload["id"])
@@ -1083,14 +1082,14 @@ class ApiSmokeTest(unittest.TestCase):
         augment_response = self.client.post(
             "/augment/jobs",
             json={"dataset_id": dataset["id"]},
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(augment_response.status_code, 201, augment_response.get_json())
 
         train_response = self.client.post(
             "/train/jobs",
             json={"dataset_id": dataset["id"], "dataset_version_id": version_payload["id"], "base_model": "yolov5s"},
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(train_response.status_code, 201, train_response.get_json())
         train_payload = train_response.get_json()
@@ -1107,7 +1106,7 @@ class ApiSmokeTest(unittest.TestCase):
         deadline = time.time() + 10.0
         completed_job = None
         while time.time() < deadline:
-            jobs_response = self.client.get("/train/jobs", headers=_headers(self.engineer_token))
+            jobs_response = self.client.get("/train/jobs", headers=_headers(self.admin_token))
             self.assertEqual(jobs_response.status_code, 200, jobs_response.get_json())
             jobs = jobs_response.get_json()
             completed_job = next((item for item in jobs if item.get("id") == train_payload["id"]), None)
@@ -1121,7 +1120,7 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(int(completed_job.get("progress_percent") or 0), 100)
         self.assertEqual(str(completed_job.get("progress_stage") or "").lower(), "completed")
 
-        models_response = self.client.get("/models", headers=_headers(self.engineer_token))
+        models_response = self.client.get("/models", headers=_headers(self.admin_token))
         self.assertEqual(models_response.status_code, 200, models_response.get_json())
         models = models_response.get_json()
         self.assertTrue(any(item.get("provenance", {}).get("training_job_id") == train_payload["id"] for item in models))
@@ -1129,14 +1128,14 @@ class ApiSmokeTest(unittest.TestCase):
         model_response = self.client.post(
             "/models",
             json={"name": "smoke-model", "path": "models/smoke.pt", "source": "manual"},
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(model_response.status_code, 201, model_response.get_json())
 
         calibration_response = self.client.post(
             "/calibration/color-profile",
             json={"image_b64": _sample_image_b64(), "colorspace": "LAB"},
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(calibration_response.status_code, 200, calibration_response.get_json())
         profile_payload = calibration_response.get_json()
@@ -1147,7 +1146,7 @@ class ApiSmokeTest(unittest.TestCase):
         dataset_response = self.client.post(
             "/datasets",
             json={"name": dataset_name, "description": "delete smoke"},
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
         dataset = dataset_response.get_json()
@@ -1160,24 +1159,24 @@ class ApiSmokeTest(unittest.TestCase):
                 "target": "images",
                 "content_b64": _sample_image_b64(),
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(upload_response.status_code, 201, upload_response.get_json())
 
         download_response = self.client.get(
             f"/datasets/{dataset['id']}/files/images/delete-me.jpg",
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(download_response.status_code, 200, download_response.get_json())
         self.assertGreater(len(download_response.data), 0)
         download_response.close()
 
-        delete_response = self.client.delete(f"/datasets/{dataset['id']}", headers=_headers(self.engineer_token))
+        delete_response = self.client.delete(f"/datasets/{dataset['id']}", headers=_headers(self.admin_token))
         self.assertEqual(delete_response.status_code, 200, delete_response.get_json())
         self.assertTrue(delete_response.get_json()["deleted"])
         self.assertFalse(dataset_dir.exists())
 
-        dataset_list_response = self.client.get("/datasets", headers=_headers(self.engineer_token))
+        dataset_list_response = self.client.get("/datasets", headers=_headers(self.admin_token))
         self.assertEqual(dataset_list_response.status_code, 200, dataset_list_response.get_json())
         dataset_list = dataset_list_response.get_json()
         self.assertFalse(any(item["id"] == dataset["id"] for item in dataset_list))
@@ -1186,7 +1185,7 @@ class ApiSmokeTest(unittest.TestCase):
         dataset_response = self.client.post(
             "/datasets",
             json={"name": f"train-broken-export-{uuid4().hex[:8]}", "description": "training export validation"},
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
         dataset = dataset_response.get_json()
@@ -1198,20 +1197,20 @@ class ApiSmokeTest(unittest.TestCase):
                 "target": "images",
                 "content_b64": _sample_image_b64(),
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(upload_response.status_code, 201, upload_response.get_json())
 
         self.client.post(
             f"/datasets/{dataset['id']}/annotations/image-1.jpg",
             json={"labels": [{"type": "bbox", "class": "sample", "bbox": {"x": 0.25, "y": 0.25, "w": 0.2, "h": 0.2}}]},
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
 
         version_response = self.client.post(
             f"/datasets/{dataset['id']}/versions",
             json={"name": "Broken Export", "description": "for fail-fast test"},
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(version_response.status_code, 201, version_response.get_json())
         version_payload = version_response.get_json()
@@ -1227,7 +1226,7 @@ class ApiSmokeTest(unittest.TestCase):
                 "dataset_version_id": version_payload["id"],
                 "base_model": "yolov5s",
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(train_response.status_code, 400, train_response.get_json())
         self.assertIn("not ready", str((train_response.get_json() or {}).get("error") or "").lower())
@@ -1236,7 +1235,7 @@ class ApiSmokeTest(unittest.TestCase):
         dataset_response = self.client.post(
             "/datasets",
             json={"name": f"train-invalid-hparams-{uuid4().hex[:8]}", "description": "training hyperparams validation"},
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
         dataset = dataset_response.get_json()
@@ -1248,7 +1247,7 @@ class ApiSmokeTest(unittest.TestCase):
                 "base_model": "yolov5s",
                 "epochs": 0,
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(train_response.status_code, 400, train_response.get_json())
         self.assertIn("epochs", str((train_response.get_json() or {}).get("error") or "").lower())
@@ -1257,7 +1256,7 @@ class ApiSmokeTest(unittest.TestCase):
         dataset_response = self.client.post(
             "/datasets",
             json={"name": f"train-cancelled-{uuid4().hex[:8]}", "description": "training cancellation guard"},
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
         dataset = dataset_response.get_json()
@@ -1268,7 +1267,7 @@ class ApiSmokeTest(unittest.TestCase):
                 "dataset_id": dataset["id"],
                 "base_model": "yolov5s",
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(train_response.status_code, 201, train_response.get_json())
         train_payload = train_response.get_json()
@@ -1278,7 +1277,7 @@ class ApiSmokeTest(unittest.TestCase):
         while time.time() < deadline:
             status_response = self.client.get(
                 f"/train/jobs/{train_payload['id']}",
-                headers=_headers(self.engineer_token),
+                headers=_headers(self.admin_token),
             )
             self.assertEqual(status_response.status_code, 200, status_response.get_json())
             job_payload = status_response.get_json()
@@ -1289,7 +1288,7 @@ class ApiSmokeTest(unittest.TestCase):
             if status in {"queued", "running"}:
                 cancel_response = self.client.post(
                     f"/train/jobs/{train_payload['id']}/cancel",
-                    headers=_headers(self.engineer_token),
+                    headers=_headers(self.admin_token),
                 )
                 self.assertIn(cancel_response.status_code, {200, 400}, cancel_response.get_json())
             else:
@@ -1302,7 +1301,7 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertIsNone(cancelled_job.get("registered_model_id"))
         self.assertIsNone(cancelled_job.get("trained_model_path"))
 
-        models_response = self.client.get("/models", headers=_headers(self.engineer_token))
+        models_response = self.client.get("/models", headers=_headers(self.admin_token))
         self.assertEqual(models_response.status_code, 200, models_response.get_json())
         models = models_response.get_json()
         self.assertFalse(any(item.get("provenance", {}).get("training_job_id") == train_payload["id"] for item in models))
@@ -1503,7 +1502,7 @@ class ApiSmokeTest(unittest.TestCase):
         dataset_response = self.client.post(
             "/datasets",
             json={"name": dataset_name, "description": "phase8 metadata"},
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
         dataset = dataset_response.get_json()
@@ -1522,7 +1521,7 @@ class ApiSmokeTest(unittest.TestCase):
                 "architecture_family": "yolov5",
                 "architecture_variant": "mu",
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(model_response.status_code, 201, model_response.get_json())
         model_payload = model_response.get_json()
@@ -1530,7 +1529,7 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(model_payload["class_names"], ["K0W-HB0", "K1Z-FA0"])
         self.assertEqual(model_payload["architecture_variant"], "mu")
 
-        list_models_response = self.client.get("/models", headers=_headers(self.engineer_token))
+        list_models_response = self.client.get("/models", headers=_headers(self.admin_token))
         self.assertEqual(list_models_response.status_code, 200, list_models_response.get_json())
         list_models = list_models_response.get_json()
         created_model = next(item for item in list_models if item["name"] == model_name)
@@ -1543,29 +1542,29 @@ class ApiSmokeTest(unittest.TestCase):
                 "colorspace": "LAB",
                 "roi": {"x": 0.09, "y": 0.12, "w": 0.19, "h": 0.22},
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(compute_response.status_code, 200, compute_response.get_json())
         save_profile_response = self.client.post(
             "/calibration/profiles",
             json={"name": "phase8-profile", "profile": compute_response.get_json()},
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(save_profile_response.status_code, 201, save_profile_response.get_json())
         profile_id = save_profile_response.get_json()["id"]
 
-        list_profiles_response = self.client.get("/calibration/profiles", headers=_headers(self.engineer_token))
+        list_profiles_response = self.client.get("/calibration/profiles", headers=_headers(self.admin_token))
         self.assertEqual(list_profiles_response.status_code, 200, list_profiles_response.get_json())
         profiles = list_profiles_response.get_json()
         self.assertTrue(any(int(item["id"]) == int(profile_id) for item in profiles))
 
         delete_profile_response = self.client.delete(
             f"/calibration/profiles/{profile_id}",
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(delete_profile_response.status_code, 200, delete_profile_response.get_json())
 
-        profiles_after_response = self.client.get("/calibration/profiles", headers=_headers(self.engineer_token))
+        profiles_after_response = self.client.get("/calibration/profiles", headers=_headers(self.admin_token))
         self.assertEqual(profiles_after_response.status_code, 200, profiles_after_response.get_json())
         profiles_after = profiles_after_response.get_json()
         self.assertFalse(any(int(item["id"]) == int(profile_id) for item in profiles_after))
@@ -1612,7 +1611,7 @@ class ApiSmokeTest(unittest.TestCase):
         dataset_response = self.client.post(
             "/datasets",
             json={"name": dataset_name, "description": "phase8 train metadata"},
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(dataset_response.status_code, 201, dataset_response.get_json())
         dataset = dataset_response.get_json()
@@ -1632,7 +1631,7 @@ class ApiSmokeTest(unittest.TestCase):
                 "classes": ["K0W-HB0", "K1Z-FA0"],
                 "note": "phase8 regression",
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(training_response.status_code, 201, training_response.get_json())
         training_payload = training_response.get_json()
@@ -2309,7 +2308,7 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(inactive_update_response.status_code, 409, inactive_update_response.get_json())
 
     # ------------------------------------------------------------------
-    # Phase 12 — Augment integration eligibility (API-level validation)
+    # Phase 12 â€” Augment integration eligibility (API-level validation)
     # ------------------------------------------------------------------
 
     def _upload_blank_image(self, ds_id: str, filename: str = "img.jpg") -> None:
@@ -2420,7 +2419,7 @@ class ApiSmokeTest(unittest.TestCase):
         )
         self.assertEqual(version_resp.status_code, 400, version_resp.get_json())
         error_msg = version_resp.get_json().get("error", "").lower()
-        # Queued job → "not completed" error fires first
+        # Queued job â†’ "not completed" error fires first
         self.assertTrue(
             "not completed" in error_msg or "dataset" in error_msg,
             f"Unexpected error: {error_msg}",
@@ -2460,7 +2459,7 @@ class ApiSmokeTest(unittest.TestCase):
                 "persistence": {"write_to_db": False},
                 "metadata": {"scenario": "settle-regression"},
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         assert response.status_code == 201, response.get_json()
         return response.get_json()
@@ -2563,7 +2562,7 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(session_resp.status_code, 201, session_resp.get_json())
         sid = session_resp.get_json()["session_id"]
 
-        # Frame 1: blank → presence absent → settle timer NOT started
+        # Frame 1: blank â†’ presence absent â†’ settle timer NOT started
         blank_resp = self.client.post(
             f"/inspection/sessions/{sid}/frame",
             json={"image_b64": _blank_image_b64()},
@@ -2572,7 +2571,7 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(blank_resp.status_code, 200)
         self.assertFalse(blank_resp.get_json()["part_ready"]["part_ready_settled"])
 
-        # Frame 2: sample image → settle timer starts (t≈0)
+        # Frame 2: sample image â†’ settle timer starts (tâ‰ˆ0)
         first_ready = self.client.post(
             f"/inspection/sessions/{sid}/frame",
             json={"image_b64": _sample_image_b64()},
@@ -2581,7 +2580,7 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(first_ready.status_code, 200)
         first_pr = first_ready.get_json()["part_ready"]
         self.assertTrue(first_pr["part_ready"])
-        # settle_ms=80 — might or might not be settled depending on timing,
+        # settle_ms=80 â€” might or might not be settled depending on timing,
         # so we only check that the settle metadata fields are present.
         self.assertIn("part_ready_settled", first_pr)
         self.assertIn("part_ready_settle_remaining_ms", first_pr)
@@ -2589,7 +2588,7 @@ class ApiSmokeTest(unittest.TestCase):
         # Wait for settle period to expire
         time.sleep(0.12)
 
-        # Frame 3: sample image → settle timer expired → inference must run
+        # Frame 3: sample image â†’ settle timer expired â†’ inference must run
         settled_resp = self.client.post(
             f"/inspection/sessions/{sid}/frame",
             json={"image_b64": _sample_image_b64()},
@@ -2639,7 +2638,7 @@ class ApiSmokeTest(unittest.TestCase):
         # After blank, settle should not be True
         self.assertFalse(r2.get_json()["part_ready"]["part_ready_settled"])
 
-        # Next ready frame after blank → settle starts fresh (still not settled)
+        # Next ready frame after blank â†’ settle starts fresh (still not settled)
         r3 = self.client.post(
             f"/inspection/sessions/{sid}/frame",
             json={"image_b64": _sample_image_b64()},
@@ -2682,7 +2681,7 @@ class ApiSmokeTest(unittest.TestCase):
 
     def test_13f_settle_metadata_present_in_response(self) -> None:
         """settle metadata keys must always appear in part_ready regardless of state."""
-        # Use default template (settle_ms=0 → settled immediately) to verify keys
+        # Use default template (settle_ms=0 â†’ settled immediately) to verify keys
         session_resp = self.client.post(
             "/inspection/sessions/start",
             json={
@@ -2707,7 +2706,7 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertIn("part_ready_settled", pr)
         self.assertIn("part_ready_settle_ms", pr)
         self.assertIn("part_ready_settle_remaining_ms", pr)
-        # Default template has settle_ms=0 → always settled
+        # Default template has settle_ms=0 â†’ always settled
         self.assertTrue(pr["part_ready_settled"])
         self.assertEqual(pr["part_ready_settle_ms"], 0)
         self.assertEqual(pr["part_ready_settle_remaining_ms"], 0)
@@ -2737,13 +2736,13 @@ class ApiSmokeTest(unittest.TestCase):
                     "enabled": True,
                     "validator_mode": "ml_detection",
                     "min_roi_confidence": 0.0,
-                    "commit_stable_frames": 100,  # large value — must be ignored by runtime
-                    "part_ready_settle_ms": 0,    # immediate commit — sole runtime knob
+                    "commit_stable_frames": 100,  # large value â€” must be ignored by runtime
+                    "part_ready_settle_ms": 0,    # immediate commit â€” sole runtime knob
                 },
                 "persistence": {"write_to_db": False},
                 "metadata": {"scenario": "csf-regression"},
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         assert response.status_code == 201, response.get_json()
         template = response.get_json()
@@ -2768,7 +2767,7 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(frame_resp.status_code, 200, frame_resp.get_json())
         payload = frame_resp.get_json()
 
-        # settle_ms=0 → commit on first frame regardless of commit_stable_frames=100
+        # settle_ms=0 â†’ commit on first frame regardless of commit_stable_frames=100
         self.assertTrue(payload["count_committed"],
                         "commit_stable_frames=100 must not block commit when settle_ms=0")
         self.assertEqual(payload["counters"]["session_total"], 1)
@@ -2777,10 +2776,10 @@ class ApiSmokeTest(unittest.TestCase):
         """part_ready_settle_ms must gate the commit window after settle completes.
 
         With settle_ms=80 ms:
-        - Frame during settle → inference skipped, no commit.
-        - First frame after settle → inference runs, event starts, no commit yet
+        - Frame during settle â†’ inference skipped, no commit.
+        - First frame after settle â†’ inference runs, event starts, no commit yet
           (the event has just started so <80 ms have elapsed).
-        - Frame after another 100 ms → event has been stable ≥80 ms → commit.
+        - Frame after another 100 ms â†’ event has been stable â‰¥80 ms â†’ commit.
         """
         template = self._create_settle_template(settle_ms=80)
 
@@ -2798,14 +2797,14 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(session_resp.status_code, 201, session_resp.get_json())
         sid = session_resp.get_json()["session_id"]
 
-        # Frame 1: blank → no presence, settle not started
+        # Frame 1: blank â†’ no presence, settle not started
         self.client.post(
             f"/inspection/sessions/{sid}/frame",
             json={"image_b64": _blank_image_b64()},
             headers=_headers(self.operator_token),
         )
 
-        # Frame 2: sample → settle starts (t≈0)
+        # Frame 2: sample â†’ settle starts (tâ‰ˆ0)
         self.client.post(
             f"/inspection/sessions/{sid}/frame",
             json={"image_b64": _sample_image_b64()},
@@ -2815,7 +2814,7 @@ class ApiSmokeTest(unittest.TestCase):
         # Wait for settle to expire
         time.sleep(0.12)
 
-        # Frame 3: first post-settle result → event starts now; commit not yet (0 ms elapsed)
+        # Frame 3: first post-settle result â†’ event starts now; commit not yet (0 ms elapsed)
         r3 = self.client.post(
             f"/inspection/sessions/{sid}/frame",
             json={"image_b64": _sample_image_b64()},
@@ -2830,7 +2829,7 @@ class ApiSmokeTest(unittest.TestCase):
         # Wait past the commit window
         time.sleep(0.1)
 
-        # Frame 4: event stable for ≥80 ms → commit
+        # Frame 4: event stable for â‰¥80 ms â†’ commit
         r4 = self.client.post(
             f"/inspection/sessions/{sid}/frame",
             json={"image_b64": _sample_image_b64()},
@@ -2839,7 +2838,7 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(r4.status_code, 200, r4.get_json())
         r4_payload = r4.get_json()
         self.assertTrue(r4_payload["count_committed"],
-                        "Must commit after event has been stable for ≥settle_ms ms")
+                        "Must commit after event has been stable for â‰¥settle_ms ms")
         self.assertGreaterEqual(r4_payload["counters"]["session_total"], 1)
 
     # ------------------------------------------------------------------
@@ -2977,7 +2976,7 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(after.get("provenance"), original.get("provenance"))
 
     # ------------------------------------------------------------------
-    # Test group 15 — PLC worker integration
+    # Test group 15 â€” PLC worker integration
     # ------------------------------------------------------------------
 
     def test_15a_plc_status_disabled_by_default(self) -> None:
@@ -3014,7 +3013,7 @@ class ApiSmokeTest(unittest.TestCase):
         """A committed inspection must enqueue exactly one PLC command.
 
         Uses a dry-run PlcWorker injected directly into inspection_session_service.
-        Sends two frames after commit — the queue must not grow beyond 1 because
+        Sends two frames after commit â€” the queue must not grow beyond 1 because
         InspectionSessionService gates count_committed on current_event_committed.
         """
         import queue as _queue_mod
@@ -3060,7 +3059,7 @@ class ApiSmokeTest(unittest.TestCase):
                     "persistence": {"write_to_db": False},
                     "metadata": {},
                 },
-                headers=_headers(self.engineer_token),
+                headers=_headers(self.admin_token),
             )
             self.assertEqual(tpl_resp.status_code, 201, tpl_resp.get_json())
             version_id = tpl_resp.get_json()["version_id"]
@@ -3073,7 +3072,7 @@ class ApiSmokeTest(unittest.TestCase):
             self.assertEqual(sess_resp.status_code, 201)
             sid = sess_resp.get_json()["session_id"]
 
-            # Frame 1 — should commit (settle_ms=0)
+            # Frame 1 â€” should commit (settle_ms=0)
             f1 = self.client.post(
                 f"/inspection/sessions/{sid}/frame",
                 json={"image_b64": _sample_image_b64()},
@@ -3082,7 +3081,7 @@ class ApiSmokeTest(unittest.TestCase):
             self.assertEqual(f1.status_code, 200)
             self.assertTrue(f1.get_json()["count_committed"], "frame 1 must commit")
 
-            # Frame 2 — must NOT commit again (event already committed)
+            # Frame 2 â€” must NOT commit again (event already committed)
             f2 = self.client.post(
                 f"/inspection/sessions/{sid}/frame",
                 json={"image_b64": _sample_image_b64()},
@@ -3095,7 +3094,7 @@ class ApiSmokeTest(unittest.TestCase):
             import time
             time.sleep(0.15)
 
-            # Exactly one hold + one release (hold_ms=0 → immediate release)
+            # Exactly one hold + one release (hold_ms=0 â†’ immediate release)
             hold_cmds = [c for c in captured if c["cmd"] == "hold"]
             self.assertEqual(len(hold_cmds), 1, f"expected 1 clamp_hold, got {len(hold_cmds)}: {captured}")
         finally:
@@ -3142,7 +3141,7 @@ class ApiSmokeTest(unittest.TestCase):
                 "persistence": {"write_to_db": True},
                 "metadata": {"scenario": "reject-log-smoke"},
             },
-            headers=_headers(self.engineer_token),
+            headers=_headers(self.admin_token),
         )
         self.assertEqual(create_response.status_code, 201, create_response.get_json())
         template = create_response.get_json()
@@ -3211,4 +3210,5 @@ class ApiSmokeTest(unittest.TestCase):
         reject_logs = reject_log_response.get_json()
         self.assertTrue(any(item.get("session_id") == session_id for item in reject_logs))
         self.assertTrue(any(item.get("reject_reason_code") for item in reject_logs))
+
 

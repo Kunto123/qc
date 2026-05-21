@@ -150,6 +150,9 @@ class _StubApi:
             "lifecycle_status": target_lifecycle,
         }
 
+    def get_runtime_template(self, version_id: int):
+        return {"schema_version": 1, "template_id": f"template-v{version_id}", "name": "QC Line A"}
+
     def list_dataset_versions(self, dataset_id: str):
         return []
 
@@ -373,7 +376,7 @@ class UiSmokeTest(unittest.TestCase):
             screen._apply_responsive_layout()
         self.assertTrue(screen._is_compact_layout)
         self.assertEqual(int(screen.action_buttons[0].grid_info()["row"]), 0)
-        self.assertEqual(int(screen.action_buttons[3].grid_info()["row"]), 1)
+        self.assertEqual(int(screen.action_buttons[1].grid_info()["row"]), 0)
         self.assertEqual(int(screen.template_box.grid_info()["row"]), 1)
         screen.destroy()
 
@@ -454,8 +457,9 @@ class UiSmokeTest(unittest.TestCase):
         screen = AdminScreen(self.root, self.api, self.state)
         screen.update_idletasks()
         self.assertTrue(screen.winfo_exists())
-        self.assertEqual(screen._notebook.tabs(), ["Presets", "Operators", "Monitor"])
+        self.assertEqual(screen._notebook.tabs(), ["Templates", "Models & Training", "Operators", "Monitor"])
         self.assertNotIn("Raw JSON", screen._notebook.tabs())
+        self.assertNotIn("Engineer", screen._notebook.tabs())
         self.assertFalse(hasattr(screen, "template_form"))
         self.assertFalse(hasattr(screen, "workstation_tools_screen"))
         screen.destroy()

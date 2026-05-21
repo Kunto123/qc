@@ -39,19 +39,6 @@ def _seed_users() -> list[dict[str, Any]]:
             "rfid_uid_last4": None,
             "rfid_bound_at": None,
         },
-        {
-            "id": 3,
-            "username": "engineer",
-            "password_hash": hash_password("engineer123"),
-            "role": UserRole.ADMIN.value,
-            "is_active": True,
-            "created_at": now,
-            "updated_at": now,
-            "last_login_at": None,
-            "rfid_uid_hash": None,
-            "rfid_uid_last4": None,
-            "rfid_bound_at": None,
-        },
     ]
 
 
@@ -205,7 +192,7 @@ class PostgresUsersRepository(PostgresRepositoryBase):
                     (
                         UserRole.ADMIN.value,
                         now,
-                        UserRole.ENGINEER.value,
+                        "engineer",
                     ),
                 )
                 updated = int(cursor.rowcount or 0)

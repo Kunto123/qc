@@ -4,6 +4,7 @@ from flask import Blueprint, g, jsonify, request
 
 from backend.app.core.container import templates_repo
 from backend.app.core.http import require_auth, require_roles
+from backend.app.services.template_config_manager import TemplateConfigManager
 from shared.contracts.enums import UserRole
 
 
@@ -32,6 +33,15 @@ def get_template_version(version_id: int):
     if detail is None:
         return jsonify({"error": "Template version not found"}), 404
     return jsonify(detail)
+
+
+@template_blueprint.get("/versions/<int:version_id>/runtime-template")
+@require_auth
+def get_runtime_template(version_id: int):
+    template = templates_repo.get_by_version_id(version_id)
+    if template is None:
+        return jsonify({"error": "Template version not found"}), 404
+    return jsonify(TemplateConfigManager.to_runtime_template(template))
 
 
 @template_blueprint.post("")

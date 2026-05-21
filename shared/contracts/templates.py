@@ -48,10 +48,15 @@ class VisionConfig:
 @dataclass(slots=True)
 class PartReadyConfig:
     enabled: bool = True
+    method: str = "color_profile_match"
     color_profile_id: int | None = None
     colorspace: str = "LAB"
     distance_threshold: float | None = None
     min_match_ratio: float | None = None
+    hsv_lower: list[int] = field(default_factory=lambda: [0, 0, 0])
+    hsv_upper: list[int] = field(default_factory=lambda: [180, 255, 80])
+    stable_ms: int = 500
+    release_ms: int = 300
 
 
 @dataclass(slots=True)
@@ -95,6 +100,9 @@ class StickerRule:
     # 0     = bypass debounce for this template regardless of env.
     # > 0   = explicit ms value; overrides env default.
     part_ready_settle_ms: int | None = None
+    white_hsv_lower: list[int] = field(default_factory=lambda: [0, 0, 160])
+    white_hsv_upper: list[int] = field(default_factory=lambda: [180, 70, 255])
+    min_text_contour_area_ratio: float = 0.002
 
 
 @dataclass(slots=True)

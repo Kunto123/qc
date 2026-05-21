@@ -13,8 +13,6 @@ def _seed_users() -> list[dict[str, Any]]:
     users = [
         (1, "admin", "admin123", UserRole.ADMIN),
         (2, "operator", "operator123", UserRole.OPERATOR),
-        # Transitional account: keep legacy username but migrate role into supported 2-role policy.
-        (3, "engineer", "engineer123", UserRole.ADMIN),
     ]
     now = datetime.now(UTC).isoformat()
     return [
@@ -47,7 +45,7 @@ class UsersRepository(JsonRepository):
         now = datetime.now(UTC).isoformat()
         for item in users:
             role = str(item.get("role") or "").strip().lower()
-            if role != UserRole.ENGINEER.value:
+            if role != "engineer":
                 continue
             item["role"] = UserRole.ADMIN.value
             item["updated_at"] = now

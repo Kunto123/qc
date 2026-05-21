@@ -53,6 +53,22 @@ def _float_or_default(value: object, default: float) -> float:
         return default
 
 
+def _hsv_triplet_or_default(value: object, default: list[int]) -> list[int]:
+    raw = str(value or "").replace(";", ",").strip()
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if len(parts) != 3:
+        return list(default)
+    result: list[int] = []
+    for index, part in enumerate(parts):
+        upper = 180 if index == 0 else 255
+        try:
+            parsed = int(float(part))
+        except (TypeError, ValueError):
+            parsed = default[index]
+        result.append(max(0, min(upper, parsed)))
+    return result
+
+
 def _random_password(length: int = 24) -> str:
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(max(16, int(length))))
@@ -99,6 +115,11 @@ class AdminScreen(ctk.CTkFrame):
         self._templates_cache: list[dict] = []
         self._models_cache: list[dict] = []
         self._model_lookup: dict[str, dict] = {}
+        self._datasets_cache: list[dict] = []
+        self._base_models_cache: list[dict] = []
+        self._base_model_lookup: dict[str, dict] = {}
+        self._training_jobs_cache: list[dict] = []
+        self._augment_jobs_cache: list[dict] = []
         self._users_cache: list[dict] = []
         self._results_cache: list[dict] = []
 
@@ -122,6 +143,9 @@ class AdminScreen(ctk.CTkFrame):
         self.part_ready_roi_y_var = tk.StringVar(value="0.2")
         self.part_ready_roi_w_var = tk.StringVar(value="0.25")
         self.part_ready_roi_h_var = tk.StringVar(value="0.25")
+        self.part_ready_hsv_lower_var = tk.StringVar(value="0,0,0")
+        self.part_ready_hsv_upper_var = tk.StringVar(value="180,255,80")
+        self.part_ready_min_ratio_var = tk.StringVar(value="0.75")
         self.sticker_roi_x_var = tk.StringVar(value="0.2")
         self.sticker_roi_y_var = tk.StringVar(value="0.2")
         self.sticker_roi_w_var = tk.StringVar(value="0.6")
@@ -129,6 +153,13 @@ class AdminScreen(ctk.CTkFrame):
 
         self.operator_username_var = tk.StringVar()
         self.operator_rfid_var = tk.StringVar()
+
+        self.training_dataset_var = tk.StringVar()
+        self.training_base_model_var = tk.StringVar()
+        self.training_device_var = tk.StringVar(value="auto")
+        self.training_epochs_var = tk.StringVar(value="200")
+        self.augment_dataset_var = tk.StringVar()
+        self.model_import_path_var = tk.StringVar()
 
         self.monitor_line_var = tk.StringVar()
         self.monitor_station_var = tk.StringVar()
@@ -162,7 +193,7 @@ class AdminScreen(ctk.CTkFrame):
         ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
         ctk.CTkLabel(
             self.header,
-            text=f"{identity} | Presets, operators, and production monitor.",
+            text=f"{identity} | Templates, models, operators, and production monitor.",
             text_color=TEXT_SECONDARY,
             font=("Segoe UI", 10),
         ).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
@@ -182,7 +213,7 @@ class AdminScreen(ctk.CTkFrame):
         for index in range(4):
             self.overview_cards_frame.columnconfigure(index, weight=1)
         self.admin_cards = {
-            "presets": CompactStatCard(self.overview_cards_frame, "Active Presets", background="#0f172a", foreground="#f8fafc"),
+            "presets": CompactStatCard(self.overview_cards_frame, "Active Templates", background="#0f172a", foreground="#f8fafc"),
             "operators": CompactStatCard(self.overview_cards_frame, "Operators", background="#134e4a", foreground="#ecfdf5"),
             "accept": CompactStatCard(self.overview_cards_frame, "Accept", background="#166534", foreground="#f0fdf4"),
             "reject": CompactStatCard(self.overview_cards_frame, "Reject", background="#991b1b", foreground="#fef2f2"),
@@ -192,13 +223,13 @@ class AdminScreen(ctk.CTkFrame):
     def _build_tabs(self) -> None:
         notebook = ctk.CTkTabview(self, fg_color=APP_BG, corner_radius=0)
         notebook.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
-        for tab_name in ("Presets", "Operators", "Monitor"):
+        for tab_name in ("Templates", "Models & Training", "Operators", "Monitor"):
             notebook.add(tab_name)
 
         original_tab = notebook.tab
 
         def _tabs() -> list[str]:
-            return ["Presets", "Operators", "Monitor"]
+            return ["Templates", "Models & Training", "Operators", "Monitor"]
 
         def _select(tab_id: str | None = None):
             if tab_id is None:
@@ -216,11 +247,13 @@ class AdminScreen(ctk.CTkFrame):
         notebook.tab = _tab  # type: ignore[attr-defined]
 
         self._notebook = notebook
-        self.presets_tab = notebook.tab("Presets")
+        self.presets_tab = notebook.tab("Templates")
+        self.models_training_tab = notebook.tab("Models & Training")
         self.operators_tab = notebook.tab("Operators")
         self.monitor_tab = notebook.tab("Monitor")
 
         self._build_presets_tab()
+        self._build_models_training_tab()
         self._build_operators_tab()
         self._build_monitor_tab()
 
@@ -292,8 +325,12 @@ class AdminScreen(ctk.CTkFrame):
 
         ctk.CTkLabel(wizard, text="Part Ready ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=8, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
         self._roi_entries(wizard, 9, self.part_ready_roi_x_var, self.part_ready_roi_y_var, self.part_ready_roi_w_var, self.part_ready_roi_h_var)
-        ctk.CTkLabel(wizard, text="Sticker ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=10, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
-        self._roi_entries(wizard, 11, self.sticker_roi_x_var, self.sticker_roi_y_var, self.sticker_roi_w_var, self.sticker_roi_h_var)
+        ctk.CTkLabel(wizard, text="Black Reference HSV", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=10, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
+        self._entry(wizard, 11, 0, "HSV Lower", self.part_ready_hsv_lower_var)
+        self._entry(wizard, 11, 2, "HSV Upper", self.part_ready_hsv_upper_var)
+        self._entry(wizard, 12, 0, "Min Ratio", self.part_ready_min_ratio_var)
+        ctk.CTkLabel(wizard, text="Sticker ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=13, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
+        self._roi_entries(wizard, 14, self.sticker_roi_x_var, self.sticker_roi_y_var, self.sticker_roi_w_var, self.sticker_roi_h_var)
 
         ctk.CTkButton(
             wizard,
@@ -304,7 +341,109 @@ class AdminScreen(ctk.CTkFrame):
             text_color=TEXT_ON_ACCENT,
             height=34,
             corner_radius=6,
-        ).grid(row=12, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 10))
+        ).grid(row=15, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 6))
+        ctk.CTkButton(
+            wizard,
+            text="Export template.json",
+            command=self.export_runtime_template,
+            fg_color=PANEL_ALT_BG,
+            hover_color=BORDER,
+            text_color=TEXT_PRIMARY,
+            height=30,
+            corner_radius=6,
+        ).grid(row=16, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 10))
+
+    def _build_models_training_tab(self) -> None:
+        self.models_training_tab.columnconfigure(0, weight=2)
+        self.models_training_tab.columnconfigure(1, weight=2)
+        self.models_training_tab.rowconfigure(0, weight=1)
+
+        left = ttk.Frame(self.models_training_tab, padding=8)
+        right = ttk.Frame(self.models_training_tab, padding=8)
+        left.grid(row=0, column=0, sticky="nsew")
+        right.grid(row=0, column=1, sticky="nsew")
+        left.rowconfigure(0, weight=1)
+        left.rowconfigure(1, weight=1)
+        left.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
+        right.columnconfigure(0, weight=1)
+
+        models_panel = ctk.CTkFrame(left, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        models_panel.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
+        models_panel.columnconfigure(0, weight=1)
+        models_panel.rowconfigure(2, weight=1)
+        ctk.CTkLabel(models_panel, text="Models", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(models_panel, text="Registered detection models available for templates.", text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
+        self.models_table = self._build_table(
+            models_panel,
+            [
+                ("id", "ID", 60, "center"),
+                ("name", "Name", 190, "w"),
+                ("runtime", "Runtime", 100, "center"),
+                ("path", "Path", 260, "w"),
+            ],
+            row=2,
+            height=8,
+        )
+        self._build_action_row(
+            models_panel,
+            [
+                ("Refresh", self.refresh_models_training, "neutral", "left"),
+                ("Import Archive", self.import_model_archive, "neutral", "right"),
+                ("Use Selected In Template", self.use_selected_model_in_template, "primary", "right"),
+            ],
+        ).grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 10))
+
+        datasets_panel = ctk.CTkFrame(left, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        datasets_panel.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        datasets_panel.columnconfigure(0, weight=1)
+        datasets_panel.rowconfigure(2, weight=1)
+        ctk.CTkLabel(datasets_panel, text="Datasets", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(datasets_panel, text="Training source datasets.", text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
+        self.datasets_table = self._build_table(
+            datasets_panel,
+            [
+                ("id", "ID", 160, "w"),
+                ("name", "Name", 210, "w"),
+                ("status", "Status", 100, "center"),
+            ],
+            row=2,
+            height=8,
+        )
+        self.datasets_table.bind("<<TreeviewSelect>>", self._on_dataset_selected)
+
+        form = ctk.CTkFrame(right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        form.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        form.columnconfigure(1, weight=1)
+        ctk.CTkLabel(form, text="Start Training", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(form, text="Pick a dataset and base model, then queue one training job.", text_color=TEXT_SECONDARY, wraplength=480, justify="left").grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 10))
+        self._entry(form, 2, 0, "Dataset ID", self.training_dataset_var, columns=2)
+        ttk.Label(form, text="Base Model").grid(row=3, column=0, sticky="w", padx=(12, 8), pady=5)
+        self.training_base_model_selector = ttk.Combobox(form, textvariable=self.training_base_model_var, state="readonly")
+        self.training_base_model_selector.grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=5)
+        self._entry(form, 4, 0, "Device", self.training_device_var, columns=2)
+        self._entry(form, 5, 0, "Epochs", self.training_epochs_var, columns=2)
+        ctk.CTkButton(form, text="Start Training", command=self.start_simple_training, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT, height=32, corner_radius=6).grid(row=6, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 6))
+        ctk.CTkButton(form, text="Create Basic Augment Job", command=self.create_basic_augment_job, fg_color=PANEL_ALT_BG, hover_color=BORDER, text_color=TEXT_PRIMARY, height=30, corner_radius=6).grid(row=7, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 10))
+
+        jobs_panel = ctk.CTkFrame(right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        jobs_panel.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        jobs_panel.columnconfigure(0, weight=1)
+        jobs_panel.rowconfigure(2, weight=1)
+        ctk.CTkLabel(jobs_panel, text="Training Jobs", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(jobs_panel, text="Recent queue and result status.", text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
+        self.training_jobs_table = self._build_table(
+            jobs_panel,
+            [
+                ("id", "ID", 110, "w"),
+                ("dataset", "Dataset", 130, "w"),
+                ("status", "Status", 100, "center"),
+                ("progress", "Progress", 90, "center"),
+                ("model", "Base Model", 150, "w"),
+            ],
+            row=2,
+            height=12,
+        )
 
     def _build_operators_tab(self) -> None:
         self.operators_tab.columnconfigure(0, weight=3)
@@ -454,6 +593,7 @@ class AdminScreen(ctk.CTkFrame):
         self.refresh_presets()
         self.refresh_template_options()
         self.refresh_model_options()
+        self.refresh_models_training()
         self.refresh_operators()
         self.refresh_monitor()
 
@@ -502,6 +642,85 @@ class AdminScreen(ctk.CTkFrame):
                 self._on_preset_model_selected()
 
         run_async(self, self.api.list_models, callback=_done)
+
+    def refresh_models_training(self) -> None:
+        def _load():
+            return {
+                "models": self.api.list_models(),
+                "datasets": self.api.list_datasets(),
+                "base_models": self.api.list_base_models(),
+                "training_jobs": self.api.list_training_jobs(),
+                "augment_jobs": self.api.list_augment_jobs(),
+            }
+
+        def _done(payload, error):
+            if error:
+                self._set_status(f"Models/training load error: {error}")
+                return
+            data = payload or {}
+            self._models_cache = list(data.get("models") or [])
+            self._datasets_cache = list(data.get("datasets") or [])
+            self._base_models_cache = list(data.get("base_models") or [])
+            self._training_jobs_cache = list(data.get("training_jobs") or [])
+            self._augment_jobs_cache = list(data.get("augment_jobs") or [])
+            self._render_models_training()
+            self._record_refresh("Models")
+
+        run_async(self, _load, callback=_done)
+
+    def _render_models_training(self) -> None:
+        if hasattr(self, "models_table"):
+            self._clear_tree(self.models_table)
+            for item in self._models_cache:
+                self.models_table.insert(
+                    "",
+                    "end",
+                    iid=str(item.get("id")),
+                    values=(
+                        item.get("id"),
+                        _safe_text(item.get("name")),
+                        _safe_text(item.get("runtime")),
+                        _safe_text(item.get("path")),
+                    ),
+                )
+        if hasattr(self, "datasets_table"):
+            self._clear_tree(self.datasets_table)
+            for item in self._datasets_cache:
+                dataset_id = _safe_text(item.get("id"))
+                self.datasets_table.insert(
+                    "",
+                    "end",
+                    iid=dataset_id,
+                    values=(dataset_id, _safe_text(item.get("name")), _safe_text(item.get("status"), "ready")),
+                )
+        self._base_model_lookup = {}
+        base_model_values: list[str] = []
+        for item in self._base_models_cache:
+            label = str(item.get("display_label") or item.get("display_name") or item.get("id") or "").strip()
+            if not label:
+                continue
+            base_model_values.append(label)
+            self._base_model_lookup[label] = dict(item)
+        if hasattr(self, "training_base_model_selector"):
+            self.training_base_model_selector.configure(values=base_model_values)
+            if base_model_values and self.training_base_model_var.get().strip() not in base_model_values:
+                self.training_base_model_var.set(base_model_values[0])
+        if hasattr(self, "training_jobs_table"):
+            self._clear_tree(self.training_jobs_table)
+            for item in self._training_jobs_cache:
+                progress = item.get("progress_percent")
+                self.training_jobs_table.insert(
+                    "",
+                    "end",
+                    iid=str(item.get("id")),
+                    values=(
+                        _safe_text(item.get("id")),
+                        _safe_text(item.get("dataset_id")),
+                        _safe_text(item.get("status")),
+                        f"{progress}%" if progress is not None else "-",
+                        _safe_text(item.get("base_model_display_name") or item.get("base_model")),
+                    ),
+                )
 
     def refresh_operators(self) -> None:
         self._set_status("Loading operators...")
@@ -656,6 +875,9 @@ class AdminScreen(ctk.CTkFrame):
         self.part_ready_roi_y_var.set("0.2")
         self.part_ready_roi_w_var.set("0.25")
         self.part_ready_roi_h_var.set("0.25")
+        self.part_ready_hsv_lower_var.set("0,0,0")
+        self.part_ready_hsv_upper_var.set("180,255,80")
+        self.part_ready_min_ratio_var.set("0.75")
         self.sticker_roi_x_var.set("0.2")
         self.sticker_roi_y_var.set("0.2")
         self.sticker_roi_w_var.set("0.6")
@@ -712,6 +934,10 @@ class AdminScreen(ctk.CTkFrame):
         self.sticker_roi_y_var.set(str(sticker_roi.get("y", 0.2)))
         self.sticker_roi_w_var.set(str(sticker_roi.get("w", 0.6)))
         self.sticker_roi_h_var.set(str(sticker_roi.get("h", 0.6)))
+        part_ready = detail.get("part_ready") or {}
+        self.part_ready_hsv_lower_var.set(",".join(str(v) for v in part_ready.get("hsv_lower", [0, 0, 0])))
+        self.part_ready_hsv_upper_var.set(",".join(str(v) for v in part_ready.get("hsv_upper", [180, 255, 80])))
+        self.part_ready_min_ratio_var.set(str(part_ready.get("min_match_ratio", 0.75)))
 
         vision = detail.get("vision") or {}
         model_path = str(vision.get("model_path") or "")
@@ -827,10 +1053,15 @@ class AdminScreen(ctk.CTkFrame):
             },
             "part_ready": {
                 "enabled": True,
+                "method": "hsv_black_ratio",
                 "color_profile_id": None,
-                "colorspace": "LAB",
+                "colorspace": "HSV",
                 "distance_threshold": None,
-                "min_match_ratio": 0.75,
+                "min_match_ratio": _float_or_default(self.part_ready_min_ratio_var.get(), 0.75),
+                "hsv_lower": _hsv_triplet_or_default(self.part_ready_hsv_lower_var.get(), [0, 0, 0]),
+                "hsv_upper": _hsv_triplet_or_default(self.part_ready_hsv_upper_var.get(), [180, 255, 80]),
+                "stable_ms": 500,
+                "release_ms": 300,
             },
             "sticker": {
                 "part_name": expected_code,
@@ -861,6 +1092,9 @@ class AdminScreen(ctk.CTkFrame):
                 "tilt_gate_enabled": False,
                 "commit_stable_frames": 1,
                 "part_ready_settle_ms": None,
+                "white_hsv_lower": [0, 0, 160],
+                "white_hsv_upper": [180, 70, 255],
+                "min_text_contour_area_ratio": 0.002,
             },
             "persistence": {"write_to_db": True},
             "metadata": {"preset_ui": "admin_simple"},
@@ -879,6 +1113,119 @@ class AdminScreen(ctk.CTkFrame):
             return
         self.refresh_presets()
         self._set_status(f"Preset deployment #{deployment_id} deactivated.")
+
+    def export_runtime_template(self) -> None:
+        version_id = self.current_template_version_id
+        if not version_id:
+            messagebox.showwarning("Template", "Save or select a deployed template first.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")],
+            initialfile="template.json",
+            title="Export Runtime Template",
+        )
+        if not path:
+            return
+        try:
+            payload = self.api.get_runtime_template(int(version_id))
+            with open(path, "w", encoding="utf-8") as file_handle:
+                import json
+
+                json.dump(payload, file_handle, ensure_ascii=True, indent=2)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Template", str(exc))
+            return
+        self._set_status(f"template.json exported to {path}.")
+
+    def _on_dataset_selected(self, _event=None) -> None:
+        selection = self.datasets_table.selection() if hasattr(self, "datasets_table") else ()
+        if not selection:
+            return
+        dataset_id = str(selection[0])
+        if dataset_id.startswith("__"):
+            return
+        self.training_dataset_var.set(dataset_id)
+        self.augment_dataset_var.set(dataset_id)
+
+    def _selected_base_model(self) -> dict | None:
+        selected = self.training_base_model_var.get().strip()
+        if selected in self._base_model_lookup:
+            return self._base_model_lookup[selected]
+        selected_key = selected.lower()
+        return next((item for item in self._base_models_cache if str(item.get("id") or "").lower() == selected_key), None)
+
+    def start_simple_training(self) -> None:
+        dataset_id = self.training_dataset_var.get().strip()
+        base_model = self._selected_base_model()
+        if not dataset_id:
+            messagebox.showwarning("Training", "Select or enter a dataset first.")
+            return
+        if base_model is None:
+            messagebox.showwarning("Training", "Select a base model first.")
+            return
+        try:
+            payload = {
+                "dataset_id": dataset_id,
+                "base_model": base_model.get("id"),
+                "base_model_family": base_model.get("family"),
+                "base_model_variant": base_model.get("variant"),
+                "base_model_display_name": base_model.get("display_name"),
+                "base_model_weights_name": base_model.get("weights_name"),
+                "device_mode": self.training_device_var.get().strip() or "auto",
+                "epochs": int(float(self.training_epochs_var.get().strip() or "200")),
+            }
+            created = self.api.create_training_job(payload)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Training", str(exc))
+            return
+        self.refresh_models_training()
+        self._set_status(f"Training job {created.get('id', '')} queued.")
+
+    def create_basic_augment_job(self) -> None:
+        dataset_id = self.training_dataset_var.get().strip() or self.augment_dataset_var.get().strip()
+        if not dataset_id:
+            messagebox.showwarning("Augment", "Select or enter a dataset first.")
+            return
+        try:
+            created = self.api.create_augment_job(
+                {"dataset_id": dataset_id, "transforms": ["brightness", "blur"], "multiplier": 2}
+            )
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Augment", str(exc))
+            return
+        self.refresh_models_training()
+        self._set_status(f"Augment job {created.get('id', '')} created.")
+
+    def use_selected_model_in_template(self) -> None:
+        model_id = self._selected_treeview_id(self.models_table)
+        if model_id is None:
+            messagebox.showwarning("Models", "Select a model first.")
+            return
+        item = next((entry for entry in self._models_cache if int(entry.get("id") or 0) == model_id), None)
+        if not item:
+            return
+        self.preset_model_path_var.set(str(item.get("path") or ""))
+        self.preset_model_meta_path_var.set(str(item.get("meta_path") or ""))
+        self._select_model_label_for_path(str(item.get("path") or ""))
+        self._notebook.set("Templates")
+        self._set_status("Selected model copied into the template wizard.")
+
+    def import_model_archive(self) -> None:
+        path = filedialog.askopenfilename(
+            filetypes=[("Model Archive", "*.zip"), ("All Files", "*.*")],
+            title="Import Model Archive",
+        )
+        if not path:
+            return
+        try:
+            self.api.import_model_archive(path, target_lifecycle="published", skip_validation=False, force_rename=False)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Models", str(exc))
+            return
+        self.refresh_model_options()
+        self.refresh_models_training()
+        self._set_status("Model archive imported.")
 
     # ------------------------------------------------------------------
     # Operator behavior

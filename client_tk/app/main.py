@@ -25,7 +25,6 @@ from client_tk.app.theme import (
     configure_ttk_navy_theme,
 )
 from client_tk.app.screens.admin.view import AdminScreen
-from client_tk.app.screens.engineer.view import EngineerScreen
 from client_tk.app.screens.operator.view import OperatorScreen
 from client_tk.app.services.session_state import SessionState
 from shared.contracts.enums import UserRole
@@ -34,7 +33,6 @@ from shared.contracts.enums import UserRole
 ROLE_SCREEN_MAP = {
     UserRole.ADMIN.value: AdminScreen,
     UserRole.OPERATOR.value: OperatorScreen,
-    UserRole.ENGINEER.value: EngineerScreen,
 }
 
 
