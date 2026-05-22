@@ -415,12 +415,17 @@ class UiSmokeTest(unittest.TestCase):
         screen.update_idletasks()
         frame = np.zeros((100, 200, 3), dtype=np.uint8)
         payload = {
-            "part_ready_roi_meta": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
-            "sticker_roi_meta": {"x": 0.5, "y": 0.1, "width": 0.25, "height": 0.5},
+            "part_ready_roi_meta": {"x": 20, "y": 20, "width": 60, "height": 40},
+            "sticker_roi_meta": {"x": 100, "y": 10, "width": 50, "height": 50},
             "client_timings": {"frame_width": 200, "frame_height": 100},
+            "validation": {"decision": "REJECT", "detected_class": None},
+            "part_ready": {"part_ready": False, "match_ratio": 0.0},
+            "sticker_detection": {"backend": "skipped", "raw_detection_count": 0},
+            "detections": [],
+            "event_state": "idle",
         }
 
-        overlay = screen._draw_roi_overlays(frame, payload)
+        overlay = screen._build_local_detection_overlay(frame, payload)
 
         self.assertIsNotNone(overlay)
         self.assertGreater(int(np.count_nonzero(overlay[18:24, 18:24])), 0)
@@ -445,7 +450,7 @@ class UiSmokeTest(unittest.TestCase):
         screen.update_idletasks()
         frame = np.zeros((180, 320, 3), dtype=np.uint8)
 
-        with mock.patch.object(screen, "_update_local_roi_previews", side_effect=tk.TclError("image 'pyimage33' doesn't exist")):
+        with mock.patch.object(screen, "_update_roi_overlay_preview", side_effect=tk.TclError("image 'pyimage33' doesn't exist")):
             with mock.patch.object(screen.capture, "get_latest_frame", return_value=frame):
                 screen._poll_ui()
 
