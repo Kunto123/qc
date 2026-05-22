@@ -175,8 +175,8 @@ class OperatorScreen(ctk.CTkFrame):
         self.preview_strip.columnconfigure(1, weight=3)
         self.preview_strip.rowconfigure(0, weight=1)
 
-        self.part_ready_preview = LiveView(self.preview_strip, "Part Ready ROI", size=(420, 280))
-        self.main_view = LiveView(self.preview_strip, "Sticker ROI / ML Overlay", size=(900, 280))
+        self.part_ready_preview = LiveView(self.preview_strip, "Part Ready ROI", size=(960, 320))
+        self.main_view = LiveView(self.preview_strip, "Sticker ROI / ML Overlay", size=(960, 420))
 
         live_footer = ttk.Frame(self.live_container)
         live_footer.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -339,7 +339,7 @@ class OperatorScreen(ctk.CTkFrame):
 
     def _apply_preview_layout(self) -> None:
         preview_width = max(self.live_container.winfo_width(), self.winfo_width())
-        compact_preview = preview_width < 980
+        compact_preview = preview_width < 1600
         if compact_preview == self._is_preview_compact:
             return
         self._is_preview_compact = compact_preview
@@ -348,8 +348,8 @@ class OperatorScreen(ctk.CTkFrame):
         self.main_view.grid_forget()
 
         if compact_preview:
-            self.preview_strip.rowconfigure(0, weight=2)
-            self.preview_strip.rowconfigure(1, weight=3)
+            self.preview_strip.rowconfigure(0, weight=1)
+            self.preview_strip.rowconfigure(1, weight=2)
             self.preview_strip.columnconfigure(0, weight=1)
             self.preview_strip.columnconfigure(1, weight=0)
             self.part_ready_preview.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
