@@ -13,7 +13,6 @@ from client_tk.app.components.async_bridge import run_async
 from client_tk.app.components.counter_panel import BREAKDOWN_ORDER, CounterPanel
 from client_tk.app.components.live_view import LiveView
 from client_tk.app.components.result_panel import ResultPanel
-from client_tk.app.components.roi_picker_canvas import RoiPickerCanvas
 from client_tk.app.components.scrollable_frame import ScrollableFrame
 from client_tk.app.config import DEFAULT_UPLOAD_INTERVAL_MS
 from client_tk.app.services.camera_capture import CameraCaptureService
@@ -173,14 +172,10 @@ class OperatorScreen(ctk.CTkFrame):
         self.preview_strip = ttk.Frame(self.live_container)
         self.preview_strip.grid(row=0, column=0, sticky="nsew")
         self.preview_strip.columnconfigure(0, weight=1)
-        self.preview_strip.columnconfigure(1, weight=0)
         self.preview_strip.rowconfigure(0, weight=1)
 
-        self.main_view = LiveView(self.preview_strip, "ROI / ML Overlay")
+        self.main_view = LiveView(self.preview_strip, "ROI / ML Overlay", size=(1000, 560))
         self.main_view.grid(row=0, column=0, sticky="nsew")
-
-        self.part_ready_preview = LiveView(self.preview_strip, "Part Ready ROI", size=(320, 240))
-        self.part_ready_preview.grid(row=0, column=1, sticky="ne", padx=(8, 0), pady=(8, 0))
 
         live_footer = ttk.Frame(self.live_container)
         live_footer.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -196,23 +191,19 @@ class OperatorScreen(ctk.CTkFrame):
         self.sidebar_container.rowconfigure(0, weight=0)  # roi picker: fixed
         self.sidebar_container.rowconfigure(1, weight=0)  # counter: fixed
         self.sidebar_container.rowconfigure(2, weight=0)  # decision banner: fixed
-        self.sidebar_container.rowconfigure(3, weight=1)  # scroll: fills rest
-
-        # ROI visual picker — shows live camera with ROI boxes
-        self.roi_picker = RoiPickerCanvas(
-            self.sidebar_container, "ROI Visual Picker", size=(320, 180)
-        )
-        self.roi_picker.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self.sidebar_container.rowconfigure(0, weight=0)  # counter: fixed
+        self.sidebar_container.rowconfigure(1, weight=0)  # decision banner: fixed
+        self.sidebar_container.rowconfigure(2, weight=1)  # scroll: fills rest
 
         # Fixed counter strip — always visible, outside scroll area
         self.counter_panel = CounterPanel(self.sidebar_container)
-        self.counter_panel.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self.counter_panel.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
 
         # Decision status banner — fixed below counter, outside scroll area
         self.decision_status_frame = ctk.CTkFrame(
             self.sidebar_container, fg_color=PANEL_BG, corner_radius=16, border_width=1, border_color=BORDER
         )
-        self.decision_status_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self.decision_status_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
         self.decision_banner = ctk.CTkLabel(
             self.decision_status_frame,
             text="WAITING",
@@ -270,7 +261,7 @@ class OperatorScreen(ctk.CTkFrame):
         self.plc_status_label.pack(anchor="w", padx=12, pady=(0, 10))
 
         self.sidebar_scroller = ScrollableFrame(self.sidebar_container)
-        self.sidebar_scroller.grid(row=3, column=0, columnspan=2, sticky="nsew")
+        self.sidebar_scroller.grid(row=2, column=0, columnspan=2, sticky="nsew")
         self.sidebar_inner = self.sidebar_scroller.body
         self.sidebar_inner.columnconfigure(0, weight=1)
 
@@ -934,21 +925,6 @@ class OperatorScreen(ctk.CTkFrame):
         else:
             self.main_view.reset()
 
-    def _update_part_ready_preview(self, frame) -> None:
-        """Update Part Ready ROI preview with annotated frame."""
-        if frame is None or not hasattr(self, "part_ready_preview"):
-            return
-        try:
-            annotated = self._build_full_frame_with_roi(
-                frame, "part_ready", label="Part Ready ROI", color=(50, 180, 255)
-            )
-            if annotated is not None:
-                self.part_ready_preview.update_bgr(annotated)
-            else:
-                self.part_ready_preview.reset()
-        except tk.TclError:
-            pass
-
     def _update_roi_overlay_preview(self, frame) -> None:
         """Draw ROI boxes on live frame even before session starts."""
         if frame is None:
@@ -968,21 +944,6 @@ class OperatorScreen(ctk.CTkFrame):
         else:
             self.main_view.update_bgr(frame)
             self.display_source.set("Right View: Live Camera")
-
-    def _update_roi_picker(self, frame) -> None:
-        """Update ROI picker canvas with current frame and ROI values."""
-        if frame is None or not hasattr(self, "roi_picker"):
-            return
-        try:
-            self.roi_picker.load_image(frame)
-            part_ready_roi = self._read_roi_payload("part_ready")
-            sticker_roi = self._read_roi_payload("sticker")
-            self.roi_picker.set_rois(
-                part_ready_roi=part_ready_roi,
-                sticker_roi=sticker_roi,
-            )
-        except tk.TclError:
-            pass
 
     def _current_template_id(self) -> int | None:
         selected = self._template_lookup.get(self.template_choice.get().strip())
@@ -1674,10 +1635,6 @@ class OperatorScreen(ctk.CTkFrame):
                     if local_overlay is not None:
                         self.main_view.update_bgr(local_overlay)
                         self.display_source.set("Right View: Live Camera + ROIs (local)")
-                # Update Part Ready ROI preview whenever frame is available
-                if display_frame is not None:
-                    self._update_part_ready_preview(display_frame)
-                    self._update_roi_picker(display_frame)
                 if payload.get("count_committed"):
                     committed = payload.get("last_committed_result") or {}
                     validation = committed.get("validation") or {}
@@ -1723,14 +1680,10 @@ class OperatorScreen(ctk.CTkFrame):
                     self.info_var.set(f"Frame pump error: {error}")
                 if frame is not None:
                     self._update_local_roi_previews(frame)
-                    self._update_part_ready_preview(frame)
-                    self._update_roi_picker(frame)
             else:
                 self._update_status_badges()
                 if frame is not None:
                     self._update_roi_overlay_preview(frame)
-                    self._update_part_ready_preview(frame)
-                    self._update_roi_picker(frame)
                 elif self.state.active_session:
                     self.info_var.set("Session aktif — menunggu frame kamera.")
         except tk.TclError as exc:
