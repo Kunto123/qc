@@ -75,6 +75,9 @@ class StickerRule:
     expected_center_y: float | None = None
     expected_tilt_degrees: float = 0.0
     max_tilt_degrees: float | None = None
+    use_ocr: bool = False
+    ocr_expected_code: str = ""
+    ocr_flip_fallback: bool = True
     ocr_mode: str | None = None
     ocr_expected_text: str | None = None
     ocr_min_confidence: float | None = None

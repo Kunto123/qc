@@ -13,6 +13,7 @@ import numpy as np
 from backend.app.core.config import AppConfig
 from backend.app.core.device_runtime import DeviceResolution, DeviceRuntimeResolver
 from backend.app.repositories.models_repository import ModelsRepository
+from backend.app.services.text_tilt import estimate_white_text_tilt
 from shared.contracts.templates import StickerRule
 from shared.contracts.templates import VisionConfig
 
@@ -387,6 +388,70 @@ class StickerInferenceService:
             "error": None,
         }
 
+    def _ocr_with_flip_fallback(
+        self,
+        image,
+        vision: VisionConfig,
+        *,
+        expected_text: str | None,
+        regex: str | None,
+        canonical_map: dict[str, str],
+    ) -> dict[str, Any]:
+        result_normal = self._ocr_with_tesseract(
+            image,
+            vision,
+            expected_text=expected_text,
+            regex=regex,
+            canonical_map=canonical_map,
+        )
+        result_normal["was_flipped"] = False
+
+        if image is None or getattr(image, "size", 0) == 0:
+            return result_normal
+
+        flipped_image = cv2.flip(image, -1)
+        result_flipped = self._ocr_with_tesseract(
+            flipped_image,
+            vision,
+            expected_text=expected_text,
+            regex=regex,
+            canonical_map=canonical_map,
+        )
+        result_flipped["was_flipped"] = True
+
+        expected_key = self._normalize_label_key(expected_text)
+        if expected_key:
+            normal_keys = {
+                self._normalize_label_key(result_normal.get("canonical_text")),
+                self._normalize_label_key(self.parse_unique_code(str(result_normal.get("canonical_text") or result_normal.get("text") or ""))),
+            }
+            flipped_keys = {
+                self._normalize_label_key(result_flipped.get("canonical_text")),
+                self._normalize_label_key(self.parse_unique_code(str(result_flipped.get("canonical_text") or result_flipped.get("text") or ""))),
+            }
+            normal_match = expected_key in normal_keys
+            flipped_match = expected_key in flipped_keys
+            if normal_match and not flipped_match:
+                result_normal["match_expected"] = True
+                return result_normal
+            if flipped_match and not normal_match:
+                result_flipped["match_expected"] = True
+                return result_flipped
+
+        normal_conf = float(result_normal.get("confidence") or 0.0)
+        flipped_conf = float(result_flipped.get("confidence") or 0.0)
+        return result_flipped if flipped_conf > normal_conf else result_normal
+
+    @staticmethod
+    def parse_unique_code(ocr_text: str, separator: str = "-") -> str:
+        text = str(ocr_text or "").strip()
+        if not text:
+            return ""
+        parts = text.split(separator)
+        if len(parts) < 2:
+            return text
+        return parts[-1].strip()
+
     def _ocr_passthrough(
         self,
         anchor: dict[str, Any],
@@ -586,6 +651,186 @@ class StickerInferenceService:
         payload["timings"].update({"anchor_ms": anchor_ms, "ocr_ms": ocr_ms})
         return payload
 
+    def _select_sticker_detection(
+        self,
+        detections: list[dict[str, Any]],
+        expected_class: str | None,
+    ) -> dict[str, Any] | None:
+        if not detections:
+            return None
+        expected_key = self._normalize_label_key(expected_class)
+        if expected_key:
+            matches = [item for item in detections if self._normalize_label_key(item.get("label")) == expected_key]
+            if matches:
+                return max(matches, key=lambda item: float(item.get("confidence") or 0.0))
+        return max(detections, key=lambda item: float(item.get("confidence") or 0.0))
+
+    def _augment_with_ocr_only(
+        self,
+        payload: dict[str, Any],
+        image,
+        vision: VisionConfig,
+        *,
+        expected_class: str | None,
+        sticker_rule: StickerRule | None,
+    ) -> dict[str, Any]:
+        anchor_started = time.perf_counter()
+        detections = list(payload.get("detections") or [])
+        text_anchor = self._select_sticker_detection(detections, expected_class)
+        text_bbox = self._round_bbox((text_anchor or {}).get("position"))
+        text_position = self._bbox_center(text_bbox)
+
+        if image is None or getattr(image, "size", 0) == 0:
+            roi_h = roi_w = 0
+        else:
+            roi_h, roi_w = image.shape[:2]
+        roi_center = {"x": round(roi_w / 2.0, 2), "y": round(roi_h / 2.0, 2)}
+
+        anchor_offset = None
+        if text_position is not None:
+            anchor_offset = {
+                "x": round(float(text_position["x"]) - roi_center["x"], 2),
+                "y": round(float(text_position["y"]) - roi_center["y"], 2),
+                "source": "bbox_center",
+            }
+
+        expected_tilt = float(getattr(sticker_rule, "expected_tilt_degrees", 0.0) or 0.0) if sticker_rule is not None else 0.0
+        tilt_info = estimate_white_text_tilt(image, expected_tilt, sticker_rule)
+        geometry = {
+            "status": "ok" if text_anchor is not None else "missing_anchor",
+            "text_position": text_position,
+            "dot_position": None,
+            "expected_dot_position": roi_center,
+            "anchor_offset": anchor_offset,
+            "pose_angle": tilt_info.get("angle_degrees"),
+            "pose_deviation": tilt_info.get("deviation_degrees"),
+        }
+        anchor = {
+            "status": "ok" if text_anchor is not None else "missing",
+            "text_anchor": text_anchor,
+            "center_dot": None,
+            "text_bbox": text_bbox,
+            "dot_bbox": None,
+            "text_position": text_position,
+            "dot_position": None,
+            "text_confidence": None if text_anchor is None else round(float(text_anchor.get("confidence") or 0.0), 4),
+            "dot_confidence": None,
+            "text_anchor_class": expected_class or getattr(vision, "text_anchor_class", "text_anchor"),
+            "center_dot_class": None,
+        }
+        anchor_ms = round((time.perf_counter() - anchor_started) * 1000.0, 2)
+
+        ocr_started = time.perf_counter()
+        expected_code = str(getattr(sticker_rule, "ocr_expected_code", "") or "").strip() if sticker_rule is not None else ""
+        expected_text = expected_code or str(getattr(sticker_rule, "ocr_expected_text", None) or expected_class or "").strip() or None
+        regex = getattr(sticker_rule, "ocr_regex", None) if sticker_rule is not None else None
+        canonical_map = dict(getattr(sticker_rule, "ocr_canonical_map", {}) or {}) if sticker_rule is not None else {}
+        use_ocr = bool(getattr(sticker_rule, "use_ocr", False)) if sticker_rule is not None else False
+        engine = self._resolve_ocr_engine(vision)
+        if not use_ocr:
+            ocr = {
+                "status": "skipped",
+                "engine": engine,
+                "text": "",
+                "raw_text": "",
+                "canonical_text": "",
+                "confidence": None,
+                "expected_text": expected_text,
+                "match_expected": False,
+                "error": None,
+                "was_flipped": False,
+            }
+        elif text_anchor is None:
+            ocr = {
+                "status": "anchor_not_found",
+                "engine": engine,
+                "text": "",
+                "raw_text": "",
+                "canonical_text": "",
+                "confidence": None,
+                "expected_text": expected_text,
+                "match_expected": False,
+                "error": None,
+                "was_flipped": False,
+            }
+        elif engine == "passthrough":
+            ocr = self._ocr_passthrough(anchor, expected_text=expected_text, regex=regex, canonical_map=canonical_map)
+            ocr["was_flipped"] = False
+        elif engine in {"disabled", "none", "off"}:
+            ocr = {
+                "status": "disabled",
+                "engine": engine,
+                "text": "",
+                "raw_text": "",
+                "canonical_text": "",
+                "confidence": None,
+                "expected_text": expected_text,
+                "match_expected": False,
+                "error": None,
+                "was_flipped": False,
+            }
+        else:
+            crop = self._crop_text_anchor(image, text_bbox, vision)
+            prepared = self._preprocess_ocr_crop(crop, vision)
+            if prepared is None:
+                ocr = {
+                    "status": "empty_crop",
+                    "engine": engine,
+                    "text": "",
+                    "raw_text": "",
+                    "canonical_text": "",
+                    "confidence": None,
+                    "expected_text": expected_text,
+                    "match_expected": False,
+                    "error": None,
+                    "was_flipped": False,
+                }
+            elif engine == "tesseract":
+                if bool(getattr(sticker_rule, "ocr_flip_fallback", True)):
+                    ocr = self._ocr_with_flip_fallback(
+                        prepared,
+                        vision,
+                        expected_text=expected_text,
+                        regex=regex,
+                        canonical_map=canonical_map,
+                    )
+                else:
+                    ocr = self._ocr_with_tesseract(
+                        prepared,
+                        vision,
+                        expected_text=expected_text,
+                        regex=regex,
+                        canonical_map=canonical_map,
+                    )
+                    ocr["was_flipped"] = False
+            else:
+                ocr = {
+                    "status": "unsupported_engine",
+                    "engine": engine,
+                    "text": "",
+                    "raw_text": "",
+                    "canonical_text": "",
+                    "confidence": None,
+                    "expected_text": expected_text,
+                    "match_expected": False,
+                    "error": f"Unsupported OCR engine: {engine}",
+                    "was_flipped": False,
+                }
+
+        unique_code = self.parse_unique_code(str(ocr.get("canonical_text") or ocr.get("text") or ""))
+        if expected_code:
+            ocr["match_expected"] = self._normalize_label_key(unique_code) == self._normalize_label_key(expected_code)
+        ocr_ms = round((time.perf_counter() - ocr_started) * 1000.0, 2)
+
+        payload["anchor"] = anchor
+        payload["ocr"] = ocr
+        payload["geometry"] = geometry
+        payload["unique_code"] = unique_code
+        payload["tilt_info"] = tilt_info
+        payload.setdefault("timings", {})
+        payload["timings"].update({"anchor_ms": anchor_ms, "ocr_ms": ocr_ms})
+        return payload
+
     def normalize_ocr_text(
         self,
         value: Any,
@@ -669,13 +914,29 @@ class StickerInferenceService:
                 "detections": [],
                 "anchor": {},
                 "ocr": {"status": "skipped", "engine": self._resolve_ocr_engine(vision)},
-                "geometry": {},
-                "fallback_reason": "empty_roi",
-            }
+            "geometry": {},
+            "fallback_reason": "empty_roi",
+        }
+
+        validator_mode = str(getattr(sticker_rule, "validator_mode", "") or "").strip().lower() if sticker_rule is not None else ""
+        use_sticker_only = bool(getattr(sticker_rule, "use_ocr", False)) or validator_mode in {
+            "sticker_only",
+            "ocr_only",
+            "ocr_sticker",
+            "sticker_ocr",
+        }
 
         mode = self._resolve_mode()
         if mode == "classic":
             payload = self._predict_classic(image, vision, expected_class)
+            if use_sticker_only:
+                return self._augment_with_ocr_only(
+                    payload,
+                    image,
+                    vision,
+                    expected_class=expected_class,
+                    sticker_rule=sticker_rule,
+                )
             return self._augment_with_anchor_ocr(
                 payload,
                 image,
@@ -687,6 +948,14 @@ class StickerInferenceService:
         device_resolution = self._resolve_device()
         try:
             payload = self._predict_ultralytics(image, vision, device_resolution)
+            if use_sticker_only:
+                return self._augment_with_ocr_only(
+                    payload,
+                    image,
+                    vision,
+                    expected_class=expected_class,
+                    sticker_rule=sticker_rule,
+                )
             return self._augment_with_anchor_ocr(
                 payload,
                 image,
@@ -705,6 +974,14 @@ class StickerInferenceService:
             payload["device_backend"] = device_resolution.backend
             payload["device_fallback_reason"] = device_resolution.fallback_reason or str(exc)
             payload["gpu_available"] = device_resolution.gpu_available
+            if use_sticker_only:
+                return self._augment_with_ocr_only(
+                    payload,
+                    image,
+                    vision,
+                    expected_class=expected_class,
+                    sticker_rule=sticker_rule,
+                )
             return self._augment_with_anchor_ocr(
                 payload,
                 image,

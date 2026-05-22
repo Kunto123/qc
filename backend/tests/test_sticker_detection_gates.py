@@ -756,5 +756,131 @@ class OcrAnchorPrimaryGateTest(unittest.TestCase):
         self.assertEqual(result["reject_reason_code"], "ANCHOR_NOT_FOUND")
 
 
+class StickerOnlyOcrGateTest(unittest.TestCase):
+    def _make_state(self):
+        from backend.app.models.session_state import SessionState
+        from shared.contracts.enums import SessionStatus
+        from shared.contracts.templates import (
+            CameraDefaults, InspectionTemplate, PartReadyConfig,
+            PersistenceConfig, RoiGeometry, StickerRule, VisionConfig,
+        )
+
+        sticker = StickerRule(
+            part_name="P1",
+            expected_class="ADV",
+            line="L1",
+            enabled=True,
+            validator_mode="sticker_only",
+            use_ocr=True,
+            ocr_expected_code="ADV160A",
+            ocr_min_confidence=0.70,
+            max_offset_x=10.0,
+            max_offset_y=10.0,
+            max_tilt_degrees=5.0,
+            tilt_gate_enabled=True,
+        )
+        template = InspectionTemplate(
+            id=1,
+            version_id=1,
+            version_number=1,
+            name="T",
+            description="",
+            is_active=True,
+            camera=CameraDefaults(),
+            part_ready_roi=RoiGeometry(),
+            sticker_roi=RoiGeometry(),
+            vision=VisionConfig(),
+            part_ready=PartReadyConfig(),
+            sticker=sticker,
+            persistence=PersistenceConfig(),
+        )
+        state = SessionState(
+            session_id="s1",
+            client_id="c1",
+            camera_index=0,
+            template=template,
+            status=SessionStatus.RUNNING,
+        )
+        state.line_id = "L1"
+        state.station_id = "S1"
+        return state
+
+    def _payload(self, *, code: str = "ADV160A", angle: float = 0.0, offset_x: float = 0.0, detected_label: str = "ADV") -> dict:
+        center_x = 50.0 + offset_x
+        return {
+            "backend": "patched",
+            "detections": [
+                {
+                    "label": detected_label,
+                    "confidence": 0.90,
+                    "class_confidence": 0.90,
+                    "position": {"x1": center_x - 20.0, "y1": 30.0, "x2": center_x + 20.0, "y2": 70.0},
+                }
+            ],
+            "ocr": {
+                "status": "ok",
+                "engine": "passthrough",
+                "canonical_text": f"MODEL NAME - {code}",
+                "text": f"MODEL NAME - {code}",
+                "confidence": 0.86,
+                "match_expected": code == "ADV160A",
+            },
+            "unique_code": code,
+            "geometry": {
+                "status": "ok",
+                "anchor_offset": {"x": offset_x, "y": 0.0, "source": "bbox_center"},
+                "pose_angle": angle,
+                "pose_deviation": abs(angle),
+            },
+            "tilt_info": {
+                "status": "ok",
+                "angle_degrees": angle,
+                "expected_tilt_degrees": 0.0,
+                "deviation_degrees": abs(angle),
+            },
+        }
+
+    def _call_validate(self, payload: dict) -> dict:
+        service = _make_inspection_service()
+        return service._validate_sticker(
+            roi_frame=np.zeros((100, 100, 3), dtype=np.uint8),
+            state=self._make_state(),
+            detections=list(payload.get("detections") or []),
+            detection_payload=payload,
+            part_ready_payload={"part_ready": True, "part_ready_confidence": 0.99},
+            username="op",
+            user_id=None,
+        )
+
+    def test_normalize_tilt_180(self) -> None:
+        service = _make_inspection_service()
+        self.assertEqual(service._normalize_tilt_180(0), 0)
+        self.assertEqual(service._normalize_tilt_180(175), -5)
+        self.assertEqual(service._normalize_tilt_180(-175), 5)
+        self.assertEqual(service._normalize_tilt_180(90), 90)
+        self.assertEqual(service._normalize_tilt_180(180), 0)
+
+    def test_sticker_only_accepts_matching_code_and_180_tilt(self) -> None:
+        result = self._call_validate(self._payload(angle=180.0))
+        self.assertEqual(result["decision"], "ACCEPT")
+        self.assertEqual(result["unique_code"], "ADV160A")
+        self.assertEqual(result["sticker_tilt_angle"], 0.0)
+
+    def test_sticker_only_rejects_wrong_unique_code(self) -> None:
+        result = self._call_validate(self._payload(code="BAD123"))
+        self.assertEqual(result["decision"], "REJECT")
+        self.assertEqual(result["reject_reason_code"], "WRONG_TEXT")
+
+    def test_sticker_only_rejects_large_offset(self) -> None:
+        result = self._call_validate(self._payload(offset_x=30.0))
+        self.assertEqual(result["decision"], "REJECT")
+        self.assertEqual(result["reject_reason_code"], "OUT_OF_POSITION")
+
+    def test_sticker_only_rejects_tilt_after_180_normalization(self) -> None:
+        result = self._call_validate(self._payload(angle=100.0))
+        self.assertEqual(result["decision"], "REJECT")
+        self.assertEqual(result["reject_reason_code"], "OUT_OF_ANGLE")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -846,11 +846,30 @@ class InspectionSessionService:
     def _normalize_label(self, value: Any) -> str:
         return str(value or "").strip().lower()
 
+    @staticmethod
+    def _normalize_tilt_180(angle: float | None) -> float | None:
+        if angle is None:
+            return None
+        normalized = float(angle)
+        while normalized > 90.0:
+            normalized -= 180.0
+        while normalized < -90.0:
+            normalized += 180.0
+        if abs(normalized) == 0:
+            normalized = 0.0
+        return round(normalized, 2)
+
+    @staticmethod
+    def _normalize_code(value: Any) -> str:
+        return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum())
+
     def _resolve_ocr_mode(self, state: SessionState) -> str:
         sticker = state.template.sticker
         explicit = str(getattr(sticker, "ocr_mode", "") or "").strip().lower()
         validator_mode = str(getattr(sticker, "validator_mode", "") or "").strip().lower()
         raw_mode = explicit or self._default_ocr_mode
+        if bool(getattr(sticker, "use_ocr", False)) and not explicit:
+            raw_mode = "primary"
         if not explicit and validator_mode in {"ocr", "ocr_anchor", "anchor_ocr", "ocr_primary"}:
             raw_mode = "primary"
         if raw_mode in {"primary", "ocr", "ocr_primary", "anchor_ocr"}:
@@ -1064,6 +1083,172 @@ class InspectionSessionService:
             },
         }
 
+    def _validate_sticker_ocr_only(
+        self,
+        *,
+        roi_frame,
+        state: SessionState,
+        detections: list[dict[str, Any]],
+        detection_payload: dict[str, Any],
+        part_ready_payload: dict[str, Any],
+        username: str | None,
+        user_id: int | None,
+        line_id: str,
+        thresholds: dict[str, Any],
+        detection_context: dict[str, Any],
+        max_tilt_degrees_value: float | None,
+    ) -> dict[str, Any]:
+        sticker = state.template.sticker
+        candidates, expected_center = self._build_validation_candidate_summaries(
+            detections,
+            roi_frame,
+            sticker.expected_class,
+            sticker,
+        )
+        selected_candidate, candidate_source = self._select_validation_candidate(candidates)
+        matching_candidate_count = sum(1 for item in candidates if item.get("match_expected"))
+
+        tilt_info = dict(detection_payload.get("tilt_info") or {})
+        geometry = detection_payload.get("geometry") or {}
+        if not tilt_info:
+            tilt_info = {
+                "status": geometry.get("status"),
+                "angle_degrees": geometry.get("pose_angle"),
+                "expected_tilt_degrees": thresholds["expected_tilt_degrees"],
+                "deviation_degrees": geometry.get("pose_deviation"),
+                "source": "sticker_only_geometry",
+            }
+        raw_angle = tilt_info.get("angle_degrees")
+        normalized_angle = self._normalize_tilt_180(None if raw_angle is None else float(raw_angle))
+        expected_tilt = float(thresholds["expected_tilt_degrees"] or 0.0)
+        normalized_deviation = None
+        if normalized_angle is not None:
+            normalized_deviation = round(abs(float(normalized_angle) - expected_tilt), 2)
+        tilt_info["normalized_angle_degrees"] = normalized_angle
+        tilt_info["normalized_deviation_degrees"] = normalized_deviation
+
+        anchor_offset = geometry.get("anchor_offset") or {}
+        if not anchor_offset and selected_candidate is not None:
+            anchor_offset = selected_candidate.get("offset") or {}
+        offset_x = float(anchor_offset.get("x", 0.0)) if anchor_offset else 0.0
+        offset_y = float(anchor_offset.get("y", 0.0)) if anchor_offset else 0.0
+        offset_limit_x = (
+            getattr(sticker, "max_anchor_offset_x", None)
+            if getattr(sticker, "max_anchor_offset_x", None) is not None
+            else thresholds["max_offset_x"]
+        )
+        offset_limit_y = (
+            getattr(sticker, "max_anchor_offset_y", None)
+            if getattr(sticker, "max_anchor_offset_y", None) is not None
+            else thresholds["max_offset_y"]
+        )
+
+        ocr_payload = detection_payload.get("ocr") or {}
+        unique_code = str(detection_payload.get("unique_code") or "").strip()
+        expected_code = str(
+            getattr(sticker, "ocr_expected_code", "")
+            or getattr(sticker, "ocr_expected_text", "")
+            or sticker.expected_class
+            or ""
+        ).strip()
+        use_ocr = bool(getattr(sticker, "use_ocr", False))
+        ocr_min_confidence = (
+            self._default_ocr_min_confidence
+            if getattr(sticker, "ocr_min_confidence", None) is None
+            else float(getattr(sticker, "ocr_min_confidence") or 0.0)
+        )
+
+        reject_reason = None
+        if selected_candidate is None:
+            reject_reason = RejectReasonCode.NOT_FOUND.value
+        elif float(selected_candidate.get("confidence") or 0.0) < thresholds["min_roi_confidence"]:
+            reject_reason = RejectReasonCode.LOW_ROI_CONF.value
+        elif not bool(selected_candidate.get("match_expected")):
+            reject_reason = RejectReasonCode.WRONG_TYPE.value
+        elif thresholds["min_class_confidence"] is not None and float(selected_candidate.get("class_confidence") or 0.0) < float(thresholds["min_class_confidence"]):
+            reject_reason = RejectReasonCode.LOW_CLASS_CONF.value
+        elif thresholds["tilt_gate_enabled"] and max_tilt_degrees_value is not None and normalized_deviation is not None and normalized_deviation > max_tilt_degrees_value:
+            reject_reason = RejectReasonCode.OUT_OF_ANGLE.value
+        elif offset_limit_x is not None and abs(offset_x) > float(offset_limit_x):
+            reject_reason = RejectReasonCode.OUT_OF_POSITION.value
+        elif offset_limit_y is not None and abs(offset_y) > float(offset_limit_y):
+            reject_reason = RejectReasonCode.OUT_OF_POSITION.value
+        elif use_ocr and str(ocr_payload.get("status") or "") != "ok":
+            reject_reason = RejectReasonCode.LOW_OCR_CONF.value
+        elif use_ocr and ocr_payload.get("confidence") is not None and float(ocr_payload.get("confidence") or 0.0) < ocr_min_confidence:
+            reject_reason = RejectReasonCode.LOW_OCR_CONF.value
+        elif use_ocr and expected_code and self._normalize_code(unique_code) != self._normalize_code(expected_code):
+            reject_reason = RejectReasonCode.WRONG_TEXT.value
+
+        decision = DecisionCode.ACCEPT.value if reject_reason is None else DecisionCode.REJECT.value
+        status = "accepted" if reject_reason is None else reject_reason.lower()
+        bbox = dict((selected_candidate or {}).get("bbox") or {}) or None
+        selected_label = None if selected_candidate is None else selected_candidate.get("label")
+        confidence = None if selected_candidate is None else selected_candidate.get("confidence")
+        selected_center = dict((selected_candidate or {}).get("center") or {})
+        selected_offset = {"x": round(offset_x, 2), "y": round(offset_y, 2)} if selected_candidate is not None else {}
+        target = {
+            "target_id": "target-1",
+            "part_name": sticker.part_name,
+            "expected_class": sticker.expected_class,
+            "detected_class": selected_label,
+            "decision": decision,
+            "decision_code": decision,
+            "reject_reason_code": reject_reason,
+            "data1": confidence,
+            "data2": None if selected_candidate is None else selected_candidate.get("class_confidence"),
+            "position": selected_center,
+            "offset": selected_offset,
+            "candidate_source": candidate_source,
+        }
+        result = {
+            "decision": decision,
+            "decision_code": decision,
+            "reject_reason_code": reject_reason,
+            "part_name": sticker.part_name,
+            "line_id": line_id,
+            "station_id": state.station_id,
+            "data1": part_ready_payload.get("part_ready_confidence"),
+            "data2": confidence,
+            "targets": [] if selected_candidate is None else [target],
+            "operator_user_id": user_id,
+            "mp_check": username,
+            "detected_class": selected_label,
+            "expected_class": sticker.expected_class,
+            "unique_code": unique_code,
+            "sticker_confidence": confidence,
+            "sticker_bbox": bbox,
+            "sticker_backend": detection_context["backend"],
+            "sticker_tilt_angle": normalized_angle,
+            "sticker_tilt_expected": expected_tilt,
+            "sticker_tilt_deviation": normalized_deviation,
+            "sticker_tilt_threshold": max_tilt_degrees_value,
+            "validation_details": {
+                "status": status,
+                "candidate_source": "sticker_only" if candidate_source == "expected_class" else candidate_source,
+                "selected_candidate": selected_candidate,
+                "candidate_count": len(candidates),
+                "matching_candidate_count": matching_candidate_count,
+                "expected_center": expected_center,
+                "tilt": tilt_info,
+                "thresholds": {
+                    **thresholds,
+                    "ocr_min_confidence": ocr_min_confidence,
+                    "max_anchor_offset_x": None if offset_limit_x is None else float(offset_limit_x),
+                    "max_anchor_offset_y": None if offset_limit_y is None else float(offset_limit_y),
+                },
+                "candidates": candidates,
+                "ocr": ocr_payload,
+                "anchor": detection_payload.get("anchor") or {},
+                "geometry": geometry,
+                "unique_code": unique_code,
+                "model": detection_context,
+            },
+        }
+        for key, value in self._ocr_validation_fields(detection_payload).items():
+            result[key] = value
+        return result
+
     def _build_validation_candidate_summaries(
         self,
         detections: list[dict[str, Any]],
@@ -1236,6 +1421,20 @@ class InspectionSessionService:
                     "thresholds": thresholds,
                 },
             }
+        if bool(getattr(sticker, "use_ocr", False)) or validator_mode in {"sticker_only", "ocr_only", "ocr_sticker", "sticker_ocr"}:
+            return self._validate_sticker_ocr_only(
+                roi_frame=roi_frame,
+                state=state,
+                detections=detections,
+                detection_payload=detection_payload,
+                part_ready_payload=part_ready_payload,
+                username=username,
+                user_id=user_id,
+                line_id=line_id,
+                thresholds=thresholds,
+                detection_context=detection_context,
+                max_tilt_degrees_value=max_tilt_degrees_value,
+            )
         if ocr_mode == "primary":
             return self._validate_ocr_anchor(
                 state=state,

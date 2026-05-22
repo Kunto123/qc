@@ -66,6 +66,55 @@ class StickerInferenceFilterTest(unittest.TestCase):
         )
         self.assertEqual(result, "K0W-HB0")
 
+    def test_parse_unique_code_uses_last_dash_segment(self) -> None:
+        self.assertEqual(self.service.parse_unique_code("VEHICLE EMISSION MODEL NAME - ADV160A"), "ADV160A")
+        self.assertEqual(self.service.parse_unique_code("CHASIS NO - CH12345678"), "CH12345678")
+        self.assertEqual(self.service.parse_unique_code("SOME TEXT WITH - DASH - CODE123"), "CODE123")
+        self.assertEqual(self.service.parse_unique_code(""), "")
+        self.assertEqual(self.service.parse_unique_code("NO DASH HERE"), "NO DASH HERE")
+
+    def test_ocr_with_flip_fallback_prefers_flipped_expected_code(self) -> None:
+        vision = VisionConfig()
+
+        def fake_ocr(image, vision, *, expected_text, regex, canonical_map):
+            if int(image[0, 0]) == 7:
+                return {
+                    "status": "ok",
+                    "engine": "tesseract",
+                    "text": "MODEL NAME - ADV160A",
+                    "raw_text": "MODEL NAME - ADV160A",
+                    "canonical_text": "MODEL NAME - ADV160A",
+                    "confidence": 0.91,
+                    "expected_text": expected_text,
+                    "match_expected": False,
+                    "error": None,
+                }
+            return {
+                "status": "ok",
+                "engine": "tesseract",
+                "text": "noise",
+                "raw_text": "noise",
+                "canonical_text": "noise",
+                "confidence": 0.20,
+                "expected_text": expected_text,
+                "match_expected": False,
+                "error": None,
+            }
+
+        image = np.array([[0, 0], [0, 7]], dtype=np.uint8)
+        with mock.patch.object(self.service, "_ocr_with_tesseract", side_effect=fake_ocr):
+            result = self.service._ocr_with_flip_fallback(
+                image,
+                vision,
+                expected_text="ADV160A",
+                regex=None,
+                canonical_map={},
+            )
+
+        self.assertTrue(result["was_flipped"])
+        self.assertTrue(result["match_expected"])
+        self.assertEqual(result["canonical_text"], "MODEL NAME - ADV160A")
+
     def test_anchor_ocr_payload_from_passthrough_detection(self) -> None:
         image = np.zeros((100, 100, 3), dtype=np.uint8)
         vision = VisionConfig(
@@ -111,6 +160,44 @@ class StickerInferenceFilterTest(unittest.TestCase):
         self.assertTrue(result["ocr"]["match_expected"])
         self.assertEqual(result["geometry"]["anchor_offset"], {"x": 0.0, "y": 0.0, "source": "center_dot"})
         self.assertIn("ocr_ms", result["timings"])
+
+    def test_sticker_only_payload_uses_bbox_center_no_dot_and_unique_code(self) -> None:
+        image = np.zeros((100, 100, 3), dtype=np.uint8)
+        vision = VisionConfig(ocr_engine="passthrough")
+        sticker = StickerRule(
+            part_name="P1",
+            expected_class="ADV",
+            line="L1",
+            validator_mode="sticker_only",
+            use_ocr=True,
+            ocr_expected_code="ADV160A",
+        )
+        payload = {
+            "backend": "patched",
+            "detections": [
+                {
+                    "label": "ADV",
+                    "confidence": 0.92,
+                    "ocr_text": "MODEL NAME - ADV160A",
+                    "ocr_confidence": 0.88,
+                    "position": {"x1": 20.0, "y1": 30.0, "x2": 80.0, "y2": 70.0},
+                },
+            ],
+        }
+
+        result = self.service._augment_with_ocr_only(
+            payload,
+            image,
+            vision,
+            expected_class="ADV",
+            sticker_rule=sticker,
+        )
+
+        self.assertEqual(result["anchor"]["status"], "ok")
+        self.assertIsNone(result["anchor"]["center_dot"])
+        self.assertEqual(result["geometry"]["anchor_offset"], {"x": 0.0, "y": 0.0, "source": "bbox_center"})
+        self.assertEqual(result["unique_code"], "ADV160A")
+        self.assertTrue(result["ocr"]["match_expected"])
 
 
 if __name__ == "__main__":

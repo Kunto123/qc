@@ -183,6 +183,9 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_model_meta_path_var = tk.StringVar()
         self.preset_conf_threshold_var = tk.StringVar(value="0.25")
         self.preset_expected_code_var = tk.StringVar()
+        self.preset_use_ocr_var = tk.BooleanVar(value=False)
+        self.preset_ocr_flip_fallback_var = tk.BooleanVar(value=True)
+        self.preset_max_tilt_var = tk.StringVar(value="")
         self.part_ready_roi_x_var = tk.StringVar(value="0.2")
         self.part_ready_roi_y_var = tk.StringVar(value="0.2")
         self.part_ready_roi_w_var = tk.StringVar(value="0.25")
@@ -372,15 +375,18 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_model_selector.bind("<<ComboboxSelected>>", self._on_preset_model_selected)
         self._entry(wizard, 6, 0, "Confidence Threshold", self.preset_conf_threshold_var, columnspan=3)
         self._entry(wizard, 7, 0, "Sticker Code", self.preset_expected_code_var, columnspan=3)
+        ttk.Checkbutton(wizard, text="Use OCR verification", variable=self.preset_use_ocr_var).grid(row=8, column=1, sticky="w", padx=(0, 12), pady=5)
+        ttk.Checkbutton(wizard, text="Try 180 flip fallback", variable=self.preset_ocr_flip_fallback_var).grid(row=8, column=2, columnspan=2, sticky="w", padx=(0, 12), pady=5)
+        self._entry(wizard, 9, 0, "Max Tilt Degrees", self.preset_max_tilt_var, columnspan=3)
 
-        ctk.CTkLabel(wizard, text="Part Ready ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=8, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
-        self._roi_entries(wizard, 9, self.part_ready_roi_x_var, self.part_ready_roi_y_var, self.part_ready_roi_w_var, self.part_ready_roi_h_var)
-        ctk.CTkLabel(wizard, text="Black Reference HSV", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=10, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
-        self._entry(wizard, 11, 0, "HSV Lower", self.part_ready_hsv_lower_var)
-        self._entry(wizard, 11, 2, "HSV Upper", self.part_ready_hsv_upper_var)
-        self._entry(wizard, 12, 0, "Min Ratio", self.part_ready_min_ratio_var)
-        ctk.CTkLabel(wizard, text="Sticker ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=13, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
-        self._roi_entries(wizard, 14, self.sticker_roi_x_var, self.sticker_roi_y_var, self.sticker_roi_w_var, self.sticker_roi_h_var)
+        ctk.CTkLabel(wizard, text="Part Ready ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=10, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
+        self._roi_entries(wizard, 11, self.part_ready_roi_x_var, self.part_ready_roi_y_var, self.part_ready_roi_w_var, self.part_ready_roi_h_var)
+        ctk.CTkLabel(wizard, text="Black Reference HSV", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=12, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
+        self._entry(wizard, 13, 0, "HSV Lower", self.part_ready_hsv_lower_var)
+        self._entry(wizard, 13, 2, "HSV Upper", self.part_ready_hsv_upper_var)
+        self._entry(wizard, 14, 0, "Min Ratio", self.part_ready_min_ratio_var)
+        ctk.CTkLabel(wizard, text="Sticker ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=15, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
+        self._roi_entries(wizard, 16, self.sticker_roi_x_var, self.sticker_roi_y_var, self.sticker_roi_w_var, self.sticker_roi_h_var)
 
         ctk.CTkButton(
             wizard,
@@ -391,7 +397,7 @@ class AdminScreen(ctk.CTkFrame):
             text_color=TEXT_ON_ACCENT,
             height=34,
             corner_radius=6,
-        ).grid(row=15, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 6))
+        ).grid(row=17, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 6))
         ctk.CTkButton(
             wizard,
             text="Export template.json",
@@ -401,7 +407,7 @@ class AdminScreen(ctk.CTkFrame):
             text_color=TEXT_PRIMARY,
             height=30,
             corner_radius=6,
-        ).grid(row=16, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 10))
+        ).grid(row=18, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 10))
 
     # NOTE: _build_models_training_tab removed - functionality moved to separate Data/Training/Models/Calibration tabs
 
@@ -835,6 +841,9 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_station_var.set("")
         self.preset_conf_threshold_var.set("0.25")
         self.preset_expected_code_var.set("")
+        self.preset_use_ocr_var.set(False)
+        self.preset_ocr_flip_fallback_var.set(True)
+        self.preset_max_tilt_var.set("")
         self.part_ready_roi_x_var.set("0.2")
         self.part_ready_roi_y_var.set("0.2")
         self.part_ready_roi_w_var.set("0.25")
@@ -887,7 +896,10 @@ class AdminScreen(ctk.CTkFrame):
             self.preset_line_var.set(str(deployment.get("line_id") or ""))
             self.preset_station_var.set(str(deployment.get("station_id") or ""))
         sticker = detail.get("sticker") or {}
-        self.preset_expected_code_var.set(str(sticker.get("ocr_expected_text") or sticker.get("expected_class") or ""))
+        self.preset_expected_code_var.set(str(sticker.get("ocr_expected_code") or sticker.get("ocr_expected_text") or sticker.get("expected_class") or ""))
+        self.preset_use_ocr_var.set(bool(sticker.get("use_ocr", False)))
+        self.preset_ocr_flip_fallback_var.set(bool(sticker.get("ocr_flip_fallback", True)))
+        self.preset_max_tilt_var.set("" if sticker.get("max_tilt_degrees") is None else str(sticker.get("max_tilt_degrees")))
         part_ready_roi = detail.get("part_ready_roi") or {}
         sticker_roi = detail.get("sticker_roi") or detail.get("roi") or {}
         self.part_ready_roi_x_var.set(str(part_ready_roi.get("x", 0.2)))
@@ -973,6 +985,9 @@ class AdminScreen(ctk.CTkFrame):
             raise ValueError("Model is required.")
         if not expected_code:
             raise ValueError("Sticker code is required.")
+        max_tilt = None
+        if self.preset_max_tilt_var.get().strip():
+            max_tilt = _float_or_default(self.preset_max_tilt_var.get(), 5.0)
 
         return {
             "id": self.current_template_id,
@@ -1008,7 +1023,7 @@ class AdminScreen(ctk.CTkFrame):
                 "ergonomic_min_keypoint_conf": 0.35,
                 "ocr_engine": "default",
                 "ocr_language": "eng",
-                "ocr_psm": 7,
+                "ocr_psm": 13,
                 "ocr_allowlist": "",
                 "text_anchor_class": "text_anchor",
                 "center_dot_class": "center_dot",
@@ -1033,7 +1048,7 @@ class AdminScreen(ctk.CTkFrame):
                 "line": line,
                 "station": station,
                 "enabled": True,
-                "validator_mode": "ml_detection",
+                "validator_mode": "sticker_only" if self.preset_use_ocr_var.get() else "ml_detection",
                 "min_roi_confidence": 0.0,
                 "min_class_confidence": None,
                 "max_offset_x": 80,
@@ -1041,7 +1056,10 @@ class AdminScreen(ctk.CTkFrame):
                 "expected_center_x": None,
                 "expected_center_y": None,
                 "expected_tilt_degrees": 0.0,
-                "max_tilt_degrees": None,
+                "max_tilt_degrees": max_tilt,
+                "use_ocr": bool(self.preset_use_ocr_var.get()),
+                "ocr_expected_code": expected_code,
+                "ocr_flip_fallback": bool(self.preset_ocr_flip_fallback_var.get()),
                 "ocr_mode": None,
                 "ocr_expected_text": expected_code,
                 "ocr_min_confidence": None,
@@ -1053,7 +1071,7 @@ class AdminScreen(ctk.CTkFrame):
                 "expected_dot_y": None,
                 "max_anchor_offset_x": None,
                 "max_anchor_offset_y": None,
-                "tilt_gate_enabled": False,
+                "tilt_gate_enabled": max_tilt is not None,
                 "commit_stable_frames": 1,
                 "part_ready_settle_ms": None,
                 "white_hsv_lower": [0, 0, 160],
