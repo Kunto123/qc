@@ -73,7 +73,7 @@ class OperatorScreen(ctk.CTkFrame):
         self.sticker_roi_w_value = tk.StringVar(value="0.6")
         self.sticker_roi_h_value = tk.StringVar(value="0.6")
         self.template_choice = tk.StringVar()
-        self.display_source = tk.StringVar(value="Right View: Live Camera + Sticker ROI")
+        self.display_source = tk.StringVar(value="Right View: Live Camera + ROIs")
 
         self.operator_context = tk.StringVar(value=f"Operator: {self.state.user.get('username') if self.state.user else '-'}")
         self.line_context = tk.StringVar(value="Line: -")
@@ -171,12 +171,11 @@ class OperatorScreen(ctk.CTkFrame):
 
         self.preview_strip = ttk.Frame(self.live_container)
         self.preview_strip.grid(row=0, column=0, sticky="nsew")
-        self.preview_strip.columnconfigure(0, weight=2)
-        self.preview_strip.columnconfigure(1, weight=3)
+        self.preview_strip.columnconfigure(0, weight=1)
         self.preview_strip.rowconfigure(0, weight=1)
 
-        self.part_ready_preview = LiveView(self.preview_strip, "Part Ready ROI", size=(960, 320))
-        self.main_view = LiveView(self.preview_strip, "Sticker ROI / ML Overlay", size=(960, 420))
+        self.main_view = LiveView(self.preview_strip, "ROI / ML Overlay", size=(1000, 560))
+        self.main_view.grid(row=0, column=0, sticky="nsew")
 
         live_footer = ttk.Frame(self.live_container)
         live_footer.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -338,29 +337,11 @@ class OperatorScreen(ctk.CTkFrame):
         self._apply_preview_layout()
 
     def _apply_preview_layout(self) -> None:
-        preview_width = max(self.live_container.winfo_width(), self.winfo_width())
-        compact_preview = preview_width < 1600
-        if compact_preview == self._is_preview_compact:
+        if not self.winfo_exists() or not self.preview_strip.winfo_exists() or not self.main_view.winfo_exists():
             return
-        self._is_preview_compact = compact_preview
-
-        self.part_ready_preview.grid_forget()
-        self.main_view.grid_forget()
-
-        if compact_preview:
-            self.preview_strip.rowconfigure(0, weight=1)
-            self.preview_strip.rowconfigure(1, weight=2)
-            self.preview_strip.columnconfigure(0, weight=1)
-            self.preview_strip.columnconfigure(1, weight=0)
-            self.part_ready_preview.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
-            self.main_view.grid(row=1, column=0, sticky="nsew")
-        else:
-            self.preview_strip.rowconfigure(0, weight=1)
-            self.preview_strip.rowconfigure(1, weight=0)
-            self.preview_strip.columnconfigure(0, weight=2)
-            self.preview_strip.columnconfigure(1, weight=3)
-            self.part_ready_preview.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-            self.main_view.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        self.preview_strip.columnconfigure(0, weight=1)
+        self.preview_strip.rowconfigure(0, weight=1)
+        self.main_view.grid(row=0, column=0, sticky="nsew")
 
     def _on_resize(self, _event=None) -> None:
         self.after_idle(self._apply_responsive_layout)
@@ -642,6 +623,34 @@ class OperatorScreen(ctk.CTkFrame):
             for key, variable in variables.items()
         }
 
+    def _roi_meta_payload(self, kind: str) -> dict[str, float]:
+        roi = self._read_roi_payload(kind)
+        return {
+            "x": roi["x"],
+            "y": roi["y"],
+            "width": roi["w"],
+            "height": roi["h"],
+        }
+
+    def _build_preview_overlay_payload(self, frame) -> dict:
+        with self._lock:
+            base_payload = dict(self._latest_payload) if isinstance(self._latest_payload, dict) else {}
+        client_timings = dict(base_payload.get("client_timings") or {})
+        if frame is not None:
+            height, width = frame.shape[:2]
+            client_timings.setdefault("frame_width", width)
+            client_timings.setdefault("frame_height", height)
+        return {
+            "validation": base_payload.get("validation") or {},
+            "part_ready": base_payload.get("part_ready") or {},
+            "sticker_detection": base_payload.get("sticker_detection") or {},
+            "detections": base_payload.get("detections") or [],
+            "event_state": base_payload.get("event_state") or "idle",
+            "part_ready_roi_meta": self._roi_meta_payload("part_ready"),
+            "sticker_roi_meta": self._roi_meta_payload("sticker"),
+            "client_timings": client_timings,
+        }
+
     def _validated_roi_payload(self, kind: str) -> dict[str, float]:
         variables = self._roi_vars(kind)
         payload: dict[str, float] = {}
@@ -785,18 +794,13 @@ class OperatorScreen(ctk.CTkFrame):
 
     def _update_local_roi_previews(self, frame) -> None:
         if frame is None:
-            self.part_ready_preview.reset()
             self.main_view.reset()
             return
-        part_ready_crop = self._crop_local_roi(frame, self._read_roi_payload("part_ready"))
-        sticker_scene = self._build_full_frame_with_roi(frame, "sticker", label="Sticker ROI", color=(255, 214, 10))
-        if part_ready_crop is not None:
-            self.part_ready_preview.update_bgr(part_ready_crop)
-        else:
-            self.part_ready_preview.reset()
-        if sticker_scene is not None:
-            self.main_view.update_bgr(sticker_scene)
-            self.display_source.set("Right View: Live Camera + Sticker ROI")
+        overlay_payload = self._build_preview_overlay_payload(frame)
+        overlay = self._build_local_detection_overlay(frame, overlay_payload)
+        if overlay is not None:
+            self.main_view.update_bgr(overlay)
+            self.display_source.set("Right View: Live Camera + ROIs (local)")
         else:
             self.main_view.reset()
 
@@ -891,7 +895,6 @@ class OperatorScreen(ctk.CTkFrame):
     def _restart_camera_for_template_change(self) -> bool:
         self.capture.stop()
         self.main_view.reset()
-        self.part_ready_preview.reset()
         return self._start_camera(show_errors=False)
 
     def _restart_session_after_template_change(self) -> None:
@@ -1175,9 +1178,8 @@ class OperatorScreen(ctk.CTkFrame):
     def _stop_camera(self) -> None:
         self.capture.stop()
         self.main_view.reset()
-        self.part_ready_preview.reset()
         self.info_var.set("Camera stopped.")
-        self.display_source.set("Right View: Live Camera + Sticker ROI")
+        self.display_source.set("Right View: Live Camera + ROIs")
         self._update_status_badges()
 
     def _start_production(self) -> None:
@@ -1246,7 +1248,6 @@ class OperatorScreen(ctk.CTkFrame):
         if _current_frame is not None:
             self._update_local_roi_previews(_current_frame)
         else:
-            self.part_ready_preview.reset()
             self.main_view.reset()
         upload_interval_ms = self._resolve_upload_interval_ms()
         self.uploader.start(
@@ -1474,27 +1475,14 @@ class OperatorScreen(ctk.CTkFrame):
                     timing_suffix += f" enc={float(enc_ms):.0f}ms"
                 if isinstance(req_ms, (int, float)):
                     timing_suffix += f" req={float(req_ms):.0f}ms"
-                # Always prefer live camera frame for part_ready preview (fast, no decode overhead).
-                if display_frame is not None:
-                    local_part_ready = self._crop_local_roi(display_frame, self._read_roi_payload("part_ready"))
-                    if local_part_ready is not None:
-                        self.part_ready_preview.update_bgr(local_part_ready)
-                elif payload.get("part_ready_preview_image_b64"):
-                    self.part_ready_preview.update_b64(payload.get("part_ready_preview_image_b64"))
                 if payload.get("overlay_image_b64"):
                     self.main_view.update_b64(payload.get("overlay_image_b64"))
-                    self.display_source.set("Right View: ML Overlay (backend)")
-                elif display_frame is not None and payload.get("sticker_roi_meta"):
-                    # Stream mode: render detection boxes locally (no backend overlay round-trip).
-                    local_overlay = self._build_local_detection_overlay(display_frame, payload)
+                    self.display_source.set("Right View: ROI / ML Overlay (backend)")
+                elif display_frame is not None:
+                    local_overlay = self._build_local_detection_overlay(display_frame, self._build_preview_overlay_payload(display_frame))
                     if local_overlay is not None:
                         self.main_view.update_bgr(local_overlay)
-                        self.display_source.set("Right View: ML Overlay (local)")
-                elif display_frame is not None:
-                    local_scene = self._build_full_frame_with_roi(display_frame, "sticker", label="Sticker ROI", color=(255, 214, 10))
-                    if local_scene is not None:
-                        self.main_view.update_bgr(local_scene)
-                        self.display_source.set("Right View: Live Camera + Sticker ROI")
+                        self.display_source.set("Right View: Live Camera + ROIs (local)")
                 if payload.get("count_committed"):
                     committed = payload.get("last_committed_result") or {}
                     validation = committed.get("validation") or {}

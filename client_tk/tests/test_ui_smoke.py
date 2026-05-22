@@ -391,7 +391,7 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(int(screen.template_box.grid_info()["row"]), 1)
         screen.destroy()
 
-    def test_operator_local_dual_views_refresh(self) -> None:
+    def test_operator_local_roi_view_refresh(self) -> None:
         screen = OperatorScreen(self.root, self.api, self.state)
         screen.update_idletasks()
         frame = np.zeros((180, 320, 3), dtype=np.uint8)
@@ -406,9 +406,8 @@ class UiSmokeTest(unittest.TestCase):
         screen.sticker_roi_h_value.set("0.4")
         screen._update_local_roi_previews(frame)
         screen.update_idletasks()
-        self.assertIsNotNone(screen.part_ready_preview._photo)
         self.assertIsNotNone(screen.main_view._photo)
-        self.assertIn("Sticker ROI", screen.display_source.get())
+        self.assertIn("ROIs", screen.display_source.get())
         screen.destroy()
 
     def test_operator_load_deployment_keeps_deployment_version(self) -> None:
@@ -450,7 +449,6 @@ class UiSmokeTest(unittest.TestCase):
             "recent_events": [],
             "response_mode": "compact",
             "overlay_image_b64": None,
-            "part_ready_preview_image_b64": None,
         }
 
         with screen._lock:
@@ -460,7 +458,6 @@ class UiSmokeTest(unittest.TestCase):
         with mock.patch.object(screen.capture, "get_latest_frame", side_effect=[None, frame, frame, frame]):
             screen._poll_ui()
 
-        self.assertIsNotNone(screen.part_ready_preview._photo)
         self.assertIsNotNone(screen.main_view._photo)
         screen.destroy()
 
