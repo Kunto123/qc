@@ -175,8 +175,8 @@ class OperatorScreen(ctk.CTkFrame):
         self.preview_strip.columnconfigure(1, weight=3)
         self.preview_strip.rowconfigure(0, weight=1)
 
-        self.part_ready_preview = LiveView(self.preview_strip, "Part Ready ROI")
-        self.main_view = LiveView(self.preview_strip, "Sticker ROI / ML Overlay")
+        self.part_ready_preview = LiveView(self.preview_strip, "Part Ready ROI", size=(420, 280))
+        self.main_view = LiveView(self.preview_strip, "Sticker ROI / ML Overlay", size=(900, 280))
 
         live_footer = ttk.Frame(self.live_container)
         live_footer.grid(row=1, column=0, sticky="ew", pady=(8, 0))

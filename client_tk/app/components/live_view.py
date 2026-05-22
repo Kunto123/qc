@@ -15,6 +15,8 @@ class LiveView(ctk.CTkFrame):
     def __init__(self, master, title: str, *, size: tuple[int, int] | None = None):
         super().__init__(master, fg_color=PANEL_BG, corner_radius=16, border_width=1, border_color=BORDER)
         self._size = size or (360, 240)
+        self._source_frame: np.ndarray | None = None
+        self._redraw_job: str | None = None
         if size is not None:
             self.configure(width=size[0], height=size[1])
             self.pack_propagate(False)
@@ -36,6 +38,8 @@ class LiveView(ctk.CTkFrame):
             font=("Segoe UI", 11),
         )
         self._label.pack(fill="both", expand=True, padx=10, pady=10)
+        self.bind("<Configure>", self._queue_redraw, add="+")
+        self._label.bind("<Configure>", self._queue_redraw, add="+")
         self._photo = None
 
     def update_bgr(self, frame) -> None:
@@ -43,7 +47,24 @@ class LiveView(ctk.CTkFrame):
             return
         if not self.winfo_exists() or not self._label.winfo_exists():
             return
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        self._source_frame = frame.copy()
+        self._render_source_frame()
+
+    def _queue_redraw(self, _event=None) -> None:
+        if self._source_frame is None or self._redraw_job is not None:
+            return
+        try:
+            self._redraw_job = self.after_idle(self._render_source_frame)
+        except tk.TclError:
+            self._redraw_job = None
+
+    def _render_source_frame(self) -> None:
+        self._redraw_job = None
+        if self._source_frame is None:
+            return
+        if not self.winfo_exists() or not self._label.winfo_exists():
+            return
+        rgb = cv2.cvtColor(self._source_frame, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(rgb)
         target_width = self._label.winfo_width()
         target_height = self._label.winfo_height()
@@ -72,6 +93,7 @@ class LiveView(ctk.CTkFrame):
             self.update_bgr(frame)
 
     def reset(self) -> None:
+        self._source_frame = None
         self._photo = None
         if not self.winfo_exists() or not self._label.winfo_exists():
             return
