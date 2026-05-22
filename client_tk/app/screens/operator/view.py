@@ -651,6 +651,61 @@ class OperatorScreen(ctk.CTkFrame):
             "client_timings": client_timings,
         }
 
+    def _decode_image_b64(self, image_b64: str | None):
+        if not image_b64:
+            return None
+        try:
+            raw = base64.b64decode(image_b64)
+        except (TypeError, ValueError):
+            return None
+        arr = np.frombuffer(raw, np.uint8)
+        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+    def _draw_roi_overlays(self, frame, payload: dict):
+        if frame is None:
+            return None
+        overlay = frame.copy()
+        disp_h, disp_w = overlay.shape[:2]
+
+        part_ready_roi = payload.get("part_ready_roi_meta") or {}
+        sticker_roi = payload.get("sticker_roi_meta") or {}
+
+        if part_ready_roi.get("width") and part_ready_roi.get("height"):
+            px = int(float(part_ready_roi["x"]) * disp_w)
+            py = int(float(part_ready_roi["y"]) * disp_h)
+            pw = int(float(part_ready_roi["width"]) * disp_w)
+            ph = int(float(part_ready_roi["height"]) * disp_h)
+            cv2.rectangle(overlay, (px, py), (px + pw, py + ph), (50, 180, 255), 3)
+            cv2.putText(
+                overlay,
+                "Part Ready ROI",
+                (px, max(18, py - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (50, 180, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+        if sticker_roi.get("width") and sticker_roi.get("height"):
+            sx = int(float(sticker_roi.get("x", 0)) * disp_w)
+            sy = int(float(sticker_roi.get("y", 0)) * disp_h)
+            sw = int(float(sticker_roi.get("width", 0)) * disp_w)
+            sh = int(float(sticker_roi.get("height", 0)) * disp_h)
+            cv2.rectangle(overlay, (sx, sy), (sx + sw, sy + sh), (255, 200, 0), 3)
+            cv2.putText(
+                overlay,
+                "Sticker ROI",
+                (sx, max(18, sy - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 200, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
+        return overlay
+
     def _validated_roi_payload(self, kind: str) -> dict[str, float]:
         variables = self._roi_vars(kind)
         payload: dict[str, float] = {}
@@ -1476,8 +1531,19 @@ class OperatorScreen(ctk.CTkFrame):
                 if isinstance(req_ms, (int, float)):
                     timing_suffix += f" req={float(req_ms):.0f}ms"
                 if payload.get("overlay_image_b64"):
-                    self.main_view.update_b64(payload.get("overlay_image_b64"))
-                    self.display_source.set("Right View: ROI / ML Overlay (backend)")
+                            backend_overlay = self._decode_image_b64(payload.get("overlay_image_b64"))
+                            preview_payload = self._build_preview_overlay_payload(display_frame)
+                            if backend_overlay is not None:
+                                overlay = self._draw_roi_overlays(backend_overlay, preview_payload)
+                                if overlay is not None:
+                                    self.main_view.update_bgr(overlay)
+                                    self.display_source.set("Right View: ROI / ML Overlay (backend + ROI)")
+                                else:
+                                    self.main_view.update_bgr(backend_overlay)
+                                    self.display_source.set("Right View: ROI / ML Overlay (backend)")
+                            else:
+                                self.main_view.update_b64(payload.get("overlay_image_b64"))
+                                self.display_source.set("Right View: ROI / ML Overlay (backend)")
                 elif display_frame is not None:
                     local_overlay = self._build_local_detection_overlay(display_frame, self._build_preview_overlay_payload(display_frame))
                     if local_overlay is not None:

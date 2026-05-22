@@ -410,6 +410,23 @@ class UiSmokeTest(unittest.TestCase):
         self.assertIn("ROIs", screen.display_source.get())
         screen.destroy()
 
+    def test_operator_draws_roi_overlays_on_frame(self) -> None:
+        screen = OperatorScreen(self.root, self.api, self.state)
+        screen.update_idletasks()
+        frame = np.zeros((100, 200, 3), dtype=np.uint8)
+        payload = {
+            "part_ready_roi_meta": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
+            "sticker_roi_meta": {"x": 0.5, "y": 0.1, "width": 0.25, "height": 0.5},
+            "client_timings": {"frame_width": 200, "frame_height": 100},
+        }
+
+        overlay = screen._draw_roi_overlays(frame, payload)
+
+        self.assertIsNotNone(overlay)
+        self.assertGreater(int(np.count_nonzero(overlay[18:24, 18:24])), 0)
+        self.assertGreater(int(np.count_nonzero(overlay[8:14, 98:104])), 0)
+        screen.destroy()
+
     def test_operator_load_deployment_keeps_deployment_version(self) -> None:
         screen = OperatorScreen(self.root, self.api, self.state)
         screen.update_idletasks()
