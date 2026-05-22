@@ -25,14 +25,17 @@ _RESIZE_HIT_RADIUS = 12
 
 
 class AnnotationCanvas(ctk.CTkFrame):
-    def __init__(self, master, title: str = "Image Annotation", *, size: tuple[int, int] = (960, 520)):
+    def __init__(self, master, title: str = "Image Annotation", *, size: tuple[int, int] | None = None):
         super().__init__(master, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
-        self._display_size = size
-        self.configure(width=size[0], height=size[1] + 34)
-        self.pack_propagate(False)
-        self.grid_propagate(False)
+        self._display_size = size or (960, 520)
+        if size is not None:
+            self.configure(width=size[0], height=size[1] + 34)
+            self.pack_propagate(False)
+            self.grid_propagate(False)
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
+
+        canvas_width, canvas_height = self._display_size
 
         ctk.CTkLabel(self, text=title, font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
             row=0,
@@ -44,8 +47,8 @@ class AnnotationCanvas(ctk.CTkFrame):
 
         self._canvas = tk.Canvas(
             self,
-            width=size[0],
-            height=size[1],
+            width=canvas_width,
+            height=canvas_height,
             bg="#0f172a",
             highlightthickness=0,
             cursor="crosshair",

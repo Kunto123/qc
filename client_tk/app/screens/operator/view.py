@@ -175,8 +175,8 @@ class OperatorScreen(ctk.CTkFrame):
         self.preview_strip.columnconfigure(1, weight=3)
         self.preview_strip.rowconfigure(0, weight=1)
 
-        self.part_ready_preview = LiveView(self.preview_strip, "Part Ready ROI", size=(420, 560))
-        self.main_view = LiveView(self.preview_strip, "Sticker ROI / ML Overlay", size=(900, 560))
+        self.part_ready_preview = LiveView(self.preview_strip, "Part Ready ROI")
+        self.main_view = LiveView(self.preview_strip, "Sticker ROI / ML Overlay")
 
         live_footer = ttk.Frame(self.live_container)
         live_footer.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -258,23 +258,10 @@ class OperatorScreen(ctk.CTkFrame):
         )
         self.plc_status_label.pack(anchor="w", padx=12, pady=(0, 10))
 
-        self.sidebar_canvas = tk.Canvas(
-            self.sidebar_container,
-            highlightthickness=0,
-            bg=self._resolve_canvas_background(),
-        )
-        self.sidebar_scrollbar = ttk.Scrollbar(self.sidebar_container, orient="vertical", command=self.sidebar_canvas.yview)
-        self.sidebar_canvas.configure(yscrollcommand=self.sidebar_scrollbar.set)
-        self.sidebar_canvas.grid(row=2, column=0, sticky="nsew")
-        self.sidebar_scrollbar.grid(row=2, column=1, sticky="ns")
-
-        self.sidebar_inner = ttk.Frame(self.sidebar_canvas)
-        self.sidebar_window = self.sidebar_canvas.create_window((0, 0), window=self.sidebar_inner, anchor="nw")
-
+        self.sidebar_scroller = ScrollableFrame(self.sidebar_container)
+        self.sidebar_scroller.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        self.sidebar_inner = self.sidebar_scroller.body
         self.sidebar_inner.columnconfigure(0, weight=1)
-        self.sidebar_inner.bind("<Configure>", self._sync_sidebar_scroll)
-        self.sidebar_canvas.bind("<Configure>", self._resize_sidebar_inner)
-        self.sidebar_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
         # Reject breakdown — at top of scrollable area
         breakdown_frame = ctk.CTkFrame(
@@ -321,28 +308,6 @@ class OperatorScreen(ctk.CTkFrame):
         )
         self.recent_list.pack(fill="both", expand=True, padx=4, pady=4)
 
-    def _resolve_canvas_background(self) -> str:
-        style = ttk.Style(self)
-        background = style.lookup("TFrame", "background")
-        if background:
-            return str(background)
-        return APP_BG
-
-    def _sync_sidebar_scroll(self, _event=None) -> None:
-        self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all"))
-
-    def _resize_sidebar_inner(self, event) -> None:
-        self.sidebar_canvas.itemconfigure(self.sidebar_window, width=event.width)
-
-    def _on_mousewheel(self, event) -> None:
-        if self._closed or not self.winfo_exists():
-            return
-        widget = self.winfo_containing(event.x_root, event.y_root)
-        if widget is None:
-            return
-        if widget == self.sidebar_canvas or str(widget).startswith(str(self.sidebar_inner)):
-            self.sidebar_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
     def _apply_responsive_layout(self) -> None:
         width = max(self.winfo_width(), self.winfo_toplevel().winfo_width())
         compact = width < RESPONSIVE_BREAKPOINT
@@ -387,15 +352,15 @@ class OperatorScreen(ctk.CTkFrame):
             self.preview_strip.rowconfigure(1, weight=3)
             self.preview_strip.columnconfigure(0, weight=1)
             self.preview_strip.columnconfigure(1, weight=0)
-            self.part_ready_preview.grid(row=0, column=0, sticky="nw", pady=(0, 8))
-            self.main_view.grid(row=1, column=0, sticky="nw")
+            self.part_ready_preview.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+            self.main_view.grid(row=1, column=0, sticky="nsew")
         else:
             self.preview_strip.rowconfigure(0, weight=1)
             self.preview_strip.rowconfigure(1, weight=0)
             self.preview_strip.columnconfigure(0, weight=2)
             self.preview_strip.columnconfigure(1, weight=3)
-            self.part_ready_preview.grid(row=0, column=0, sticky="nw", padx=(0, 8))
-            self.main_view.grid(row=0, column=1, sticky="nw", padx=(8, 0))
+            self.part_ready_preview.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+            self.main_view.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
     def _on_resize(self, _event=None) -> None:
         self.after_idle(self._apply_responsive_layout)
@@ -1616,8 +1581,6 @@ class OperatorScreen(ctk.CTkFrame):
             except tk.TclError:
                 pass
             self._auto_start_after_id = None
-        if hasattr(self, "sidebar_canvas"):
-            self.sidebar_canvas.unbind_all("<MouseWheel>")
         self._close_settings()
         if self._plc_release_window and self._plc_release_window.winfo_exists():
             self._plc_release_window.destroy()

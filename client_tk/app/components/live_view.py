@@ -12,12 +12,13 @@ from client_tk.app.theme import BORDER, PANEL_BG, TEXT_PRIMARY, TEXT_SECONDARY
 
 
 class LiveView(ctk.CTkFrame):
-    def __init__(self, master, title: str, *, size: tuple[int, int] = (360, 240)):
+    def __init__(self, master, title: str, *, size: tuple[int, int] | None = None):
         super().__init__(master, fg_color=PANEL_BG, corner_radius=16, border_width=1, border_color=BORDER)
-        self._size = size
-        self.configure(width=size[0], height=size[1])
-        self.pack_propagate(False)
-        self.grid_propagate(False)
+        self._size = size or (360, 240)
+        if size is not None:
+            self.configure(width=size[0], height=size[1])
+            self.pack_propagate(False)
+            self.grid_propagate(False)
         self._title = ctk.CTkLabel(
             self,
             text=title,

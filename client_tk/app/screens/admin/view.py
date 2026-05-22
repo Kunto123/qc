@@ -122,6 +122,7 @@ class AdminScreen(ctk.CTkFrame):
         self._layout_compact: bool | None = None
         self._overview_cards_visible = True
         self._last_refresh: dict[str, str] = {}
+        self._tab_scrollers: dict[str, ScrollableFrame] = {}
 
         self._deployments_cache: list[dict] = []
         self._templates_cache: list[dict] = []
@@ -317,13 +318,23 @@ class AdminScreen(ctk.CTkFrame):
         ctk.CTkLabel(status_bar, textvariable=self.status_var, text_color=TEXT_SECONDARY).grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(status_bar, textvariable=self.refresh_time_var, text_color=TEXT_SECONDARY, font=("Segoe UI", 9)).grid(row=0, column=1, sticky="e")
 
+    def _make_scrollable_body(self, tab: ttk.Frame, key: str) -> tk.Frame:
+        scroller = ScrollableFrame(tab)
+        scroller.pack(fill="both", expand=True)
+        self._tab_scrollers[key] = scroller
+        scroller.body.columnconfigure(0, weight=1)
+        scroller.body.rowconfigure(0, weight=1)
+        return scroller.body
+
     def _build_presets_tab(self) -> None:
         self.presets_tab.columnconfigure(0, weight=3)
         self.presets_tab.columnconfigure(1, weight=2)
         self.presets_tab.rowconfigure(0, weight=1)
 
-        self.presets_left = ttk.Frame(self.presets_tab, padding=8)
-        self.presets_right = ttk.Frame(self.presets_tab, padding=8)
+        body = self._make_scrollable_body(self.presets_tab, "Templates")
+
+        self.presets_left = ttk.Frame(body, padding=8)
+        self.presets_right = ttk.Frame(body, padding=8)
         self.presets_left.grid(row=0, column=0, sticky="nsew")
         self.presets_right.grid(row=0, column=1, sticky="nsew")
 
@@ -416,8 +427,10 @@ class AdminScreen(ctk.CTkFrame):
         self.operators_tab.columnconfigure(1, weight=2)
         self.operators_tab.rowconfigure(0, weight=1)
 
-        self.operators_left = ttk.Frame(self.operators_tab, padding=8)
-        self.operators_right = ttk.Frame(self.operators_tab, padding=8)
+        body = self._make_scrollable_body(self.operators_tab, "Operators")
+
+        self.operators_left = ttk.Frame(body, padding=8)
+        self.operators_right = ttk.Frame(body, padding=8)
         self.operators_left.grid(row=0, column=0, sticky="nsew")
         self.operators_right.grid(row=0, column=1, sticky="nsew")
 
@@ -464,7 +477,9 @@ class AdminScreen(ctk.CTkFrame):
         self.monitor_tab.columnconfigure(0, weight=1)
         self.monitor_tab.rowconfigure(2, weight=1)
 
-        filters = ctk.CTkFrame(self.monitor_tab, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        body = self._make_scrollable_body(self.monitor_tab, "Monitor")
+
+        filters = ctk.CTkFrame(body, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
         filters.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
         for index in range(6):
             filters.columnconfigure(index, weight=1 if index % 2 else 0)
@@ -474,7 +489,7 @@ class AdminScreen(ctk.CTkFrame):
         ctk.CTkButton(filters, text="Refresh", command=self.refresh_monitor, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).grid(row=1, column=4, sticky="e", padx=(8, 4), pady=(4, 10))
         ctk.CTkButton(filters, text="Export CSV", command=self.export_monitor_csv, fg_color=SUCCESS_HOVER, hover_color=SUCCESS, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).grid(row=1, column=5, sticky="e", padx=(4, 10), pady=(4, 10))
 
-        self.monitor_cards_frame = ttk.Frame(self.monitor_tab, padding=(8, 0, 8, 6))
+        self.monitor_cards_frame = ttk.Frame(body, padding=(8, 0, 8, 6))
         self.monitor_cards_frame.grid(row=1, column=0, sticky="ew")
         for index in range(6):
             self.monitor_cards_frame.columnconfigure(index, weight=1)
@@ -488,13 +503,13 @@ class AdminScreen(ctk.CTkFrame):
         }
         self._layout_monitor_cards(compact=False)
 
-        body = ttk.Frame(self.monitor_tab, padding=8)
-        body.grid(row=2, column=0, sticky="nsew")
-        body.columnconfigure(0, weight=3)
-        body.columnconfigure(1, weight=2)
-        body.rowconfigure(0, weight=1)
-        self.monitor_left = ttk.Frame(body)
-        self.monitor_right = ttk.Frame(body)
+        content = ttk.Frame(body, padding=8)
+        content.grid(row=2, column=0, sticky="nsew")
+        content.columnconfigure(0, weight=3)
+        content.columnconfigure(1, weight=2)
+        content.rowconfigure(0, weight=1)
+        self.monitor_left = ttk.Frame(content)
+        self.monitor_right = ttk.Frame(content)
         self.monitor_left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         self.monitor_right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
 
@@ -1482,8 +1497,13 @@ class AdminScreen(ctk.CTkFrame):
         self.data_tab.rowconfigure(0, weight=1)
         self.data_tab.rowconfigure(1, weight=0)
 
+        body = self._make_scrollable_body(self.data_tab, "Data")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=2)
+        body.rowconfigure(1, weight=1)
+
         # Top section: dataset list + upload + versions (existing layout)
-        top_shell = ttk.Frame(self.data_tab)
+        top_shell = ttk.Frame(body)
         top_shell.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 4))
         top_shell.columnconfigure(0, weight=3)
         top_shell.columnconfigure(1, weight=2)
@@ -1593,7 +1613,7 @@ class AdminScreen(ctk.CTkFrame):
         ttk.Button(ver_btn, text="Refresh", command=self._admin_refresh_versions).pack(side="left")
 
         # Bottom section: Annotation workflow (full width)
-        annot_shell = ttk.LabelFrame(self.data_tab, text="Annotation Workflow", padding=6)
+        annot_shell = ttk.LabelFrame(body, text="Annotation Workflow", padding=6)
         annot_shell.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
         annot_shell.columnconfigure(0, weight=1)
         annot_shell.rowconfigure(1, weight=1)
@@ -1632,7 +1652,7 @@ class AdminScreen(ctk.CTkFrame):
         canvas_row.columnconfigure(0, weight=1)
         canvas_row.rowconfigure(0, weight=1)
 
-        self._admin_annotation_canvas = AnnotationCanvas(canvas_row, title="Image Annotation", size=(900, 480))
+        self._admin_annotation_canvas = AnnotationCanvas(canvas_row, title="Image Annotation")
         self._admin_annotation_canvas.grid(row=0, column=0, sticky="nsew")
 
         # Nav bar
@@ -1849,7 +1869,9 @@ class AdminScreen(ctk.CTkFrame):
         self.training_tab.columnconfigure(0, weight=1)
         self.training_tab.rowconfigure(0, weight=1)
 
-        shell = ttk.Frame(self.training_tab)
+        body = self._make_scrollable_body(self.training_tab, "Training")
+
+        shell = ttk.Frame(body)
         shell.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         shell.columnconfigure(0, weight=1)
         shell.rowconfigure(0, weight=1)
@@ -1968,7 +1990,7 @@ class AdminScreen(ctk.CTkFrame):
         bottom.columnconfigure(0, weight=1)
         bottom.rowconfigure(0, weight=1)
 
-        self._admin_training_jobs_list = tk.Listbox(bottom, height=10)
+        self._admin_training_jobs_list = tk.Listbox(bottom)
         self._admin_training_jobs_list.grid(row=0, column=0, sticky="nsew")
         self._admin_training_jobs_list.bind("<<ListboxSelect>>", self._on_admin_training_job_selected)
 
@@ -2175,7 +2197,9 @@ class AdminScreen(ctk.CTkFrame):
         self.models_tab.columnconfigure(0, weight=1)
         self.models_tab.rowconfigure(0, weight=1)
 
-        shell = ttk.Frame(self.models_tab)
+        body = self._make_scrollable_body(self.models_tab, "Models")
+
+        shell = ttk.Frame(body)
         shell.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         shell.columnconfigure(0, weight=2)
         shell.columnconfigure(1, weight=3)
@@ -2298,7 +2322,9 @@ class AdminScreen(ctk.CTkFrame):
         self.calibration_tab.columnconfigure(0, weight=1)
         self.calibration_tab.rowconfigure(0, weight=1)
 
-        shell = ttk.Frame(self.calibration_tab)
+        body = self._make_scrollable_body(self.calibration_tab, "Calibration")
+
+        shell = ttk.Frame(body)
         shell.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         shell.columnconfigure(0, weight=1)
         shell.rowconfigure(0, weight=1)
