@@ -8,6 +8,7 @@ from tkinter import messagebox, ttk
 
 import customtkinter as ctk
 import cv2
+import numpy as np
 
 from client_tk.app.components.async_bridge import run_async
 from client_tk.app.components.counter_panel import BREAKDOWN_ORDER, CounterPanel
@@ -60,7 +61,9 @@ class OperatorScreen(ctk.CTkFrame):
         self._auto_start_done = False
         self._auto_start_after_id: str | None = None
         self._resize_debounce_after_id: str | None = None
-        self._roi_overlay_dirty = True
+        self._cached_overlay_frame: np.ndarray | None = None
+        self._last_payload_seq: int = 0
+        self._last_rendered_payload_seq: int = 0
 
         self.line_value = tk.StringVar()
         self.station_value = tk.StringVar()
@@ -945,22 +948,6 @@ class OperatorScreen(ctk.CTkFrame):
             self.main_view.update_bgr(overlay)
             self.display_source.set("Right View: Live Camera + ROIs (local)")
 
-    def _update_local_roi_previews(self, frame) -> None:
-        # Skip if overlay is not dirty — prevents unnecessary re-render jitter.
-        if not self._roi_overlay_dirty:
-            return
-        if frame is None:
-            self.main_view.reset()
-            return
-        overlay_payload = self._build_preview_overlay_payload(frame)
-        overlay = self._build_local_detection_overlay(frame, overlay_payload)
-        if overlay is not None:
-            self.main_view.update_bgr(overlay)
-            self.display_source.set("Right View: Live Camera + ROIs (local)")
-        else:
-            self.main_view.reset()
-        self._roi_overlay_dirty = False
-
     def _update_roi_overlay_preview(self, frame) -> None:
         """Draw ROI boxes on live frame even before session starts."""
         if frame is None:
@@ -975,9 +962,11 @@ class OperatorScreen(ctk.CTkFrame):
                 annotated, "sticker", label="Sticker ROI", color=(255, 200, 0)
             )
         if annotated is not None:
+            self._cached_overlay_frame = annotated.copy()
             self.main_view.update_bgr(annotated)
             self.display_source.set("Right View: Live Camera + ROIs (no session)")
         else:
+            self._cached_overlay_frame = frame.copy()
             self.main_view.update_bgr(frame)
             self.display_source.set("Right View: Live Camera")
 
@@ -1508,16 +1497,40 @@ class OperatorScreen(ctk.CTkFrame):
             self._latest_payload = payload
             self._latest_error = None
         self._auth_error_notified = False
-        # Mark overlay as dirty so the next poll or frame update renders it.
-        self._roi_overlay_dirty = True
-        # Immediately render the overlay with the new payload so the user
-        # sees the updated result without waiting for the next 100ms poll.
+        # Increment payload sequence so _poll_ui knows this is a new result.
+        self._last_payload_seq += 1
+        # Immediately render overlay live so user sees result without waiting for poll.
         try:
             frame = self.capture.get_latest_frame()
             if frame is not None:
-                self._render_roi_overlay(frame, payload)
+                self._render_roi_overlay_frame(frame, payload)
         except tk.TclError:
             pass
+
+    def _render_roi_overlay_frame(self, frame, payload: dict) -> None:
+        """Render detection overlay on frame and cache the result."""
+        overlay = self._build_local_detection_overlay(frame, payload)
+        if overlay is not None:
+            self._cached_overlay_frame = overlay.copy()
+            self.main_view.update_bgr(overlay)
+            self.display_source.set("Right View: Live Camera + ROIs (local)")
+        elif frame is not None:
+            # No detections but still show live frame (don't show stale overlay).
+            self._cached_overlay_frame = frame.copy()
+            self.main_view.update_bgr(frame)
+            self.display_source.set("Right View: Live Camera")
+
+    def _show_cached_overlay_or_frame(self, frame) -> None:
+        """Show cached overlay if available, otherwise show raw frame.
+
+        This prevents the live view from going blank between backend responses.
+        """
+        if self._cached_overlay_frame is not None:
+            self.main_view.update_bgr(self._cached_overlay_frame)
+        elif frame is not None:
+            self.main_view.update_bgr(frame)
+            self.display_source.set("Right View: Live Camera")
+        # else: keep whatever is currently displayed (don't reset)
 
     @staticmethod
     def _is_auth_error(message: str | None) -> bool:
@@ -1659,9 +1672,22 @@ class OperatorScreen(ctk.CTkFrame):
                 self._sync_recent_events(payload)
                 self._refresh_context_summary()
                 self._update_status_badges(payload)
-                display_frame = frame
-                if display_frame is None:
-                    display_frame = self.capture.get_latest_frame()
+
+                # ---- Overlay rendering (throttled) ----
+                # Only rebuild the expensive overlay when the payload is genuinely
+                # new (tracked via _last_payload_seq).  Between backend responses
+                # we keep showing the cached overlay so the live view never goes
+                # blank.
+                current_seq = self._last_payload_seq
+                if current_seq != self._last_rendered_payload_seq:
+                    self._last_rendered_payload_seq = current_seq
+                    display_frame = frame if frame is not None else self.capture.get_latest_frame()
+                    self._render_payload_overlay(display_frame, payload)
+                else:
+                    # No new payload — just refresh the live camera underlay if possible.
+                    self._refresh_live_camera(frame, payload)
+
+                # Timing info
                 timings = payload.get("timings") or {}
                 total_ms = timings.get("total_ms")
                 inference_ms = timings.get("inference_ms")
@@ -1677,25 +1703,7 @@ class OperatorScreen(ctk.CTkFrame):
                     timing_suffix += f" enc={float(enc_ms):.0f}ms"
                 if isinstance(req_ms, (int, float)):
                     timing_suffix += f" req={float(req_ms):.0f}ms"
-                if payload.get("overlay_image_b64"):
-                            backend_overlay = self._decode_image_b64(payload.get("overlay_image_b64"))
-                            preview_payload = self._build_preview_overlay_payload(display_frame)
-                            if backend_overlay is not None:
-                                overlay = self._draw_roi_overlays(backend_overlay, preview_payload)
-                                if overlay is not None:
-                                    self.main_view.update_bgr(overlay)
-                                    self.display_source.set("Right View: ROI / ML Overlay (backend + ROI)")
-                                else:
-                                    self.main_view.update_bgr(backend_overlay)
-                                    self.display_source.set("Right View: ROI / ML Overlay (backend)")
-                            else:
-                                self.main_view.update_b64(payload.get("overlay_image_b64"))
-                                self.display_source.set("Right View: ROI / ML Overlay (backend)")
-                elif display_frame is not None:
-                    local_overlay = self._build_local_detection_overlay(display_frame, payload)
-                    if local_overlay is not None:
-                        self.main_view.update_bgr(local_overlay)
-                        self.display_source.set("Right View: Live Camera + ROIs (local)")
+
                 if payload.get("count_committed"):
                     committed = payload.get("last_committed_result") or {}
                     validation = committed.get("validation") or {}
@@ -1722,6 +1730,7 @@ class OperatorScreen(ctk.CTkFrame):
                         f"backend={live_detection.get('backend') or '-'} raw={live_detection.get('raw_detection_count') if live_detection.get('raw_detection_count') is not None else '-'}"
                         f"{timing_suffix}"
                     )
+
             elif error:
                 self.state.latest_error = error
                 if self._is_auth_error(error):
@@ -1739,20 +1748,62 @@ class OperatorScreen(ctk.CTkFrame):
                 self._update_status_badges()
                 if not self._is_auth_error(error):
                     self.info_var.set(f"Frame pump error: {error}")
-                if frame is not None:
-                    self._update_local_roi_previews(frame)
+                # On error, show cached overlay (don't blank the view).
+                self._show_cached_overlay_or_frame(frame)
+
             else:
+                # No payload yet and no error — keep showing cached overlay or live frame.
                 self._update_status_badges()
+                self._show_cached_overlay_or_frame(frame)
                 if frame is not None:
-                    self._update_roi_overlay_preview(frame)
+                    self.display_source.set("Right View: Live Camera")
                 elif self.state.active_session:
                     self.info_var.set("Session aktif — menunggu frame kamera.")
+
         except tk.TclError as exc:
             self.state.latest_error = str(exc)
             self.info_var.set(f"UI render warning: {exc}")
             self._update_status_badges()
         finally:
             self._schedule_poll()
+
+    def _render_payload_overlay(self, frame, payload: dict) -> None:
+        """Build and display the full detection overlay from a backend payload.
+
+        Called only when the payload sequence changes (newresult from backend),
+        NOT on every poll cycle.  This avoids unnecessary rebuilds and prevents
+        ROI jitter from scaling against varying frame sizes.
+        """
+        if frame is None:
+            return
+
+        # Try backend overlay first (most accurate — coordinates in backend frame space).
+        if payload.get("overlay_image_b64"):
+            backend_overlay = self._decode_image_b64(payload.get("overlay_image_b64"))
+            if backend_overlay is not None:
+                preview_payload = self._build_preview_overlay_payload(frame)
+                overlay = self._draw_roi_overlays(backend_overlay, preview_payload)
+                if overlay is not None:
+                    self._cached_overlay_frame = overlay.copy()
+                    self.main_view.update_bgr(overlay)
+                    self.display_source.set("Right View: ROI / ML Overlay (backend + ROI)")
+                else:
+                    self._cached_overlay_frame = backend_overlay.copy()
+                    self.main_view.update_bgr(backend_overlay)
+                    self.display_source.set("Right View: ROI / ML Overlay (backend)")
+                return
+
+        # Fallback: client-side composed overlay.
+        self._render_roi_overlay_frame(frame, payload)
+
+    def _refresh_live_camera(self, frame, payload: dict) -> None:
+        """Between backend responses, optionally refresh the live camera underlay.
+
+        To avoid ROI jitter we do NOT rebuild the overlay — we only update the
+        display if there is no cached overlay at all.
+        """
+        if self._cached_overlay_frame is None and frame is not None:
+            self._show_cached_overlay_or_frame(frame)
 
     def shutdown(self) -> None:
         if self._closed:
