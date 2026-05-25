@@ -51,8 +51,11 @@ class PlcWorker:
         # Input debounce
         self._last_input_press: dict[int, float] = {}
         self._input_debounce_s: float = 0.5
+        self._template_cycle_event_id: int = 0
         # Template cycling callback
         self._template_cycle_callback = None
+        # State change callback (called when PLC state changes)
+        self._on_state_change_callback = None
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -115,11 +118,17 @@ class PlcWorker:
     def set_template_cycle_callback(self, callback) -> None:
         self._template_cycle_callback = callback
 
+    def set_on_state_change_callback(self, callback) -> None:
+        """Callback dipanggil saat PLC state berubahan. old_state, new_state."""
+        self._on_state_change_callback = callback
+
     def status(self) -> dict:
         with self._lock:
             return {
+                "running": self._thread is not None and self._thread.is_alive(),
                 "state": self._state,
                 "connected": self._adapter.is_connected(),
+                "template_cycle_event_id": self._template_cycle_event_id,
                 **self._adapter.status(),
             }
 
@@ -132,6 +141,12 @@ class PlcWorker:
             old = self._state
             self._state = new_state
         logger.info("[plc-worker] %s → %s", old, new_state)
+        # Notify callback if registered
+        if self._on_state_change_callback and old != new_state:
+            try:
+                self._on_state_change_callback(old, new_state)
+            except Exception as exc:
+                logger.error("[plc-worker] state change callback error: %s", exc)
 
     def _write_coil(self, addr: int, value: bool) -> None:
         try:
@@ -222,6 +237,8 @@ class PlcWorker:
             if now - last > self._input_debounce_s:
                 self._last_input_press[1] = now
                 logger.info("[plc-worker] INPUT 2 — Ganti Template")
+                with self._lock:
+                    self._template_cycle_event_id += 1
                 if self._template_cycle_callback:
                     try:
                         self._template_cycle_callback()

@@ -155,7 +155,7 @@ class StickerInferenceService:
         text = str(value or "").strip().lower()
         return "".join(ch for ch in text if ch.isalnum())
 
-    def _predict_ultralytics(self, image, vision: VisionConfig, device_resolution: DeviceResolution) -> dict[str, Any]:
+    def _predict_ultralytics(self, image, vision: VisionConfig, device_resolution: DeviceResolution, expected_class: str | None = None) -> dict[str, Any]:
         model_path = self._resolve_model_path(vision)
         if not model_path:
             raise FileNotFoundError("Sticker model path is not configured.")
@@ -174,11 +174,16 @@ class StickerInferenceService:
         result = model.predict(image, **kwargs)[0]
         names = result.names or {}
         raw_box_count = int(len(result.boxes)) if result.boxes is not None else 0
+        # Build allowed labels from vision.classes + anchor classes + expected_class
         allowed_label_values = [str(label) for label in (vision.classes or []) if str(label).strip()]
+        # Always include expected_class (from template sticker.expected_class)
+        if expected_class and str(expected_class).strip():
+            allowed_label_values.append(str(expected_class).strip())
         if allowed_label_values:
             for label in (getattr(vision, "text_anchor_class", ""), getattr(vision, "center_dot_class", "")):
                 if str(label or "").strip():
                     allowed_label_values.append(str(label))
+        # Normalize to lowercase for case-insensitive matching
         allowed_labels = {label.strip().lower() for label in allowed_label_values} or None
         allowed_label_keys = ({self._normalize_label_key(label) for label in allowed_label_values if self._normalize_label_key(label)} or None)
         detections = self._normalize_detections(
@@ -947,7 +952,7 @@ class StickerInferenceService:
 
         device_resolution = self._resolve_device()
         try:
-            payload = self._predict_ultralytics(image, vision, device_resolution)
+            payload = self._predict_ultralytics(image, vision, device_resolution, expected_class=expected_class)
             if use_sticker_only:
                 return self._augment_with_ocr_only(
                     payload,

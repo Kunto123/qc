@@ -80,9 +80,14 @@ class RoiPickerCanvas(ctk.CTkFrame):
         self._source_frame: np.ndarray | None = None
         self._part_ready_roi: dict = {}
         self._sticker_roi: dict = {}
+        self._active_roi_kind: str | None = None
+        self._drag_mode: str | None = None
+        self._drag_start: tuple[float, float] | None = None
+        self._drag_start_roi: dict | None = None
         self._cx: float = 0.5
         self._cy: float = 0.5
         self.on_center_changed: Callable[[float, float], None] | None = None
+        self.on_roi_changed: Callable[[str, dict], None] | None = None
 
         self._canvas = tk.Canvas(
             self,
@@ -93,7 +98,10 @@ class RoiPickerCanvas(ctk.CTkFrame):
             highlightthickness=0,
         )
         self._canvas.grid(row=1, column=0, sticky="nw", padx=10)
-        self._canvas.bind("<Button-1>", self._on_click)
+        self._canvas.bind("<Button-1>", self._on_press)
+        self._canvas.bind("<B1-Motion>", self._on_drag)
+        self._canvas.bind("<ButtonRelease-1>", self._on_release)
+        self._canvas.bind("<Motion>", self._on_motion)
         self._canvas.bind("<Configure>", lambda _: self.redraw())
 
         self._hint = ctk.CTkLabel(
@@ -116,10 +124,23 @@ class RoiPickerCanvas(ctk.CTkFrame):
 
     def set_rois(self, part_ready_roi: dict | None = None, sticker_roi: dict | None = None) -> None:
         if part_ready_roi is not None:
-            self._part_ready_roi = dict(part_ready_roi)
+            self._part_ready_roi = self._normalize_roi(part_ready_roi)
         if sticker_roi is not None:
-            self._sticker_roi = dict(sticker_roi)
+            self._sticker_roi = self._normalize_roi(sticker_roi)
         self.redraw()
+
+    def set_active_roi(self, kind: str | None) -> None:
+        if kind not in {"part_ready", "sticker", None}:
+            raise ValueError("kind must be 'part_ready', 'sticker', or None")
+        self._active_roi_kind = kind
+        self.redraw()
+
+    def get_roi(self, kind: str) -> dict:
+        if kind == "part_ready":
+            return dict(self._part_ready_roi)
+        if kind == "sticker":
+            return dict(self._sticker_roi)
+        raise ValueError("kind must be 'part_ready' or 'sticker'")
 
     def set_expected_center(self, cx: float | None, cy: float | None) -> None:
         self._cx = float(cx) if cx is not None else 0.5
@@ -186,10 +207,14 @@ class RoiPickerCanvas(ctk.CTkFrame):
         if self._part_ready_roi:
             rx, ry, rw, rh = _roi_px(self._part_ready_roi)
             _draw_roi_box(canvas_frame, rx, ry, rw, rh, _COLOR_PART_READY, "Part Ready ROI")
+            if self._active_roi_kind == "part_ready":
+                self._draw_handles(canvas_frame, rx, ry, rw, rh, _COLOR_PART_READY)
 
         if self._sticker_roi:
             rx, ry, rw, rh = _roi_px(self._sticker_roi)
             _draw_roi_box(canvas_frame, rx, ry, rw, rh, _COLOR_STICKER, "Sticker ROI")
+            if self._active_roi_kind == "sticker":
+                self._draw_handles(canvas_frame, rx, ry, rw, rh, _COLOR_STICKER)
             exp_px = rx + int(self._cx * rw)
             exp_py = ry + int(self._cy * rh)
             _draw_crosshair(canvas_frame, exp_px, exp_py, _COLOR_CROSSHAIR, "EXP CTR")
@@ -197,26 +222,197 @@ class RoiPickerCanvas(ctk.CTkFrame):
         return canvas_frame
 
     # ------------------------------------------------------------------
-    # Click handler
+    # Drag handlers
     # ------------------------------------------------------------------
 
-    def _on_click(self, event: tk.Event) -> None:
-        if self._source_frame is None or not self._sticker_roi:
-            return
+    def _draw_handles(self, frame, x: int, y: int, w: int, h: int, color) -> None:
+        for px, py in ((x, y), (x + w, y), (x, y + h), (x + w, y + h)):
+            cv2.rectangle(frame, (px - 5, py - 5), (px + 5, py + 5), color, -1)
+            cv2.rectangle(frame, (px - 5, py - 5), (px + 5, py + 5), (255, 255, 255), 1)
+
+    def _image_layout(self) -> tuple[int, int, int, int] | None:
+        if self._source_frame is None:
+            return None
         cw = self._canvas.winfo_width()
         ch = self._canvas.winfo_height()
+        if cw < 8:
+            cw = self._display_size[0]
+        if ch < 8:
+            ch = self._display_size[1]
         src_h, src_w = self._source_frame.shape[:2]
         scale = min(cw / max(src_w, 1), ch / max(src_h, 1))
         dw = max(1, int(src_w * scale))
         dh = max(1, int(src_h * scale))
         off_x = (cw - dw) // 2
         off_y = (ch - dh) // 2
+        return off_x, off_y, dw, dh
 
-        roi = self._sticker_roi
-        rx = off_x + int(float(roi.get("x", 0.0)) * dw)
-        ry = off_y + int(float(roi.get("y", 0.0)) * dh)
-        rw = max(1, int(float(roi.get("w", 1.0)) * dw))
-        rh = max(1, int(float(roi.get("h", 1.0)) * dh))
+    def _event_to_norm(self, event: tk.Event) -> tuple[float, float] | None:
+        layout = self._image_layout()
+        if layout is None:
+            return None
+        off_x, off_y, dw, dh = layout
+        nx = (float(event.x) - off_x) / max(dw, 1)
+        ny = (float(event.y) - off_y) / max(dh, 1)
+        return max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny))
+
+    def _roi_for_kind(self, kind: str | None) -> dict:
+        if kind == "part_ready":
+            return self._part_ready_roi
+        if kind == "sticker":
+            return self._sticker_roi
+        return {}
+
+    def _set_roi_for_kind(self, kind: str, roi: dict, *, notify: bool = True) -> None:
+        normalized = self._normalize_roi(roi)
+        if kind == "part_ready":
+            self._part_ready_roi = normalized
+        elif kind == "sticker":
+            self._sticker_roi = normalized
+        else:
+            return
+        self.redraw()
+        if notify and self.on_roi_changed:
+            self.on_roi_changed(kind, dict(normalized))
+
+    def _normalize_roi(self, roi: dict) -> dict:
+        x = self._to_float(roi.get("x"), 0.0)
+        y = self._to_float(roi.get("y"), 0.0)
+        w = self._to_float(roi.get("w", roi.get("width")), 1.0)
+        h = self._to_float(roi.get("h", roi.get("height")), 1.0)
+        min_size = 0.01
+        w = max(min_size, min(1.0, w))
+        h = max(min_size, min(1.0, h))
+        x = max(0.0, min(1.0 - w, x))
+        y = max(0.0, min(1.0 - h, y))
+        return {"x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4)}
+
+    def _to_float(self, value, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _roi_to_display_rect(self, roi: dict) -> tuple[int, int, int, int] | None:
+        layout = self._image_layout()
+        if layout is None or not roi:
+            return None
+        off_x, off_y, dw, dh = layout
+        x = off_x + int(float(roi.get("x", 0.0)) * dw)
+        y = off_y + int(float(roi.get("y", 0.0)) * dh)
+        w = max(1, int(float(roi.get("w", 1.0)) * dw))
+        h = max(1, int(float(roi.get("h", 1.0)) * dh))
+        return x, y, w, h
+
+    def _hit_test(self, event: tk.Event, roi: dict) -> str | None:
+        rect = self._roi_to_display_rect(roi)
+        if rect is None:
+            return None
+        x, y, w, h = rect
+        px, py = int(event.x), int(event.y)
+        handles = {
+            "nw": (x, y),
+            "ne": (x + w, y),
+            "sw": (x, y + h),
+            "se": (x + w, y + h),
+        }
+        for mode, (hx, hy) in handles.items():
+            if abs(px - hx) <= 8 and abs(py - hy) <= 8:
+                return mode
+        if x <= px <= x + w and y <= py <= y + h:
+            return "move"
+        return None
+
+    def _on_press(self, event: tk.Event) -> None:
+        if self._source_frame is None:
+            return
+        if self._active_roi_kind is None:
+            self._on_expected_center_click(event)
+            return
+        roi = self._roi_for_kind(self._active_roi_kind)
+        point = self._event_to_norm(event)
+        if point is None:
+            return
+        mode = self._hit_test(event, roi)
+        if mode is None:
+            current = self._normalize_roi(roi or {"x": 0.2, "y": 0.2, "w": 0.25, "h": 0.25})
+            mode = "move"
+            roi = {
+                **current,
+                "x": point[0] - current["w"] / 2,
+                "y": point[1] - current["h"] / 2,
+            }
+            self._set_roi_for_kind(self._active_roi_kind, roi)
+            roi = self._roi_for_kind(self._active_roi_kind)
+        self._drag_mode = mode
+        self._drag_start = point
+        self._drag_start_roi = dict(roi)
+
+    def _on_drag(self, event: tk.Event) -> None:
+        if not self._active_roi_kind or not self._drag_mode or self._drag_start is None or self._drag_start_roi is None:
+            return
+        point = self._event_to_norm(event)
+        if point is None:
+            return
+        sx, sy = self._drag_start
+        dx = point[0] - sx
+        dy = point[1] - sy
+        roi = dict(self._drag_start_roi)
+        x = float(roi.get("x", 0.0))
+        y = float(roi.get("y", 0.0))
+        w = float(roi.get("w", 1.0))
+        h = float(roi.get("h", 1.0))
+        min_size = 0.01
+
+        if self._drag_mode == "move":
+            roi["x"] = x + dx
+            roi["y"] = y + dy
+        else:
+            left = x
+            top = y
+            right = x + w
+            bottom = y + h
+            if "w" in self._drag_mode:
+                left = max(0.0, min(right - min_size, left + dx))
+            if "e" in self._drag_mode:
+                right = min(1.0, max(left + min_size, right + dx))
+            if "n" in self._drag_mode:
+                top = max(0.0, min(bottom - min_size, top + dy))
+            if "s" in self._drag_mode:
+                bottom = min(1.0, max(top + min_size, bottom + dy))
+            roi = {"x": left, "y": top, "w": right - left, "h": bottom - top}
+
+        self._set_roi_for_kind(self._active_roi_kind, roi)
+
+    def _on_release(self, _event: tk.Event) -> None:
+        self._drag_mode = None
+        self._drag_start = None
+        self._drag_start_roi = None
+
+    def _on_motion(self, event: tk.Event) -> None:
+        if self._active_roi_kind is None:
+            self._canvas.configure(cursor="crosshair")
+            return
+        mode = self._hit_test(event, self._roi_for_kind(self._active_roi_kind))
+        cursors = {
+            "move": "fleur",
+            "nw": "size_nw_se",
+            "se": "size_nw_se",
+            "ne": "size_ne_sw",
+            "sw": "size_ne_sw",
+        }
+        try:
+            self._canvas.configure(cursor=cursors.get(mode, "crosshair"))
+        except tk.TclError:
+            self._canvas.configure(cursor="crosshair")
+
+    def _on_expected_center_click(self, event: tk.Event) -> None:
+        if self._source_frame is None or not self._sticker_roi:
+            return
+        rect = self._roi_to_display_rect(self._sticker_roi)
+        if rect is None:
+            return
+        rx, ry, rw, rh = rect
 
         if not (rx <= event.x <= rx + rw and ry <= event.y <= ry + rh):
             self._hint.configure(text="Klik dalam area kuning (Sticker ROI) untuk set expected center.")

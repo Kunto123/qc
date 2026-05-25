@@ -35,6 +35,9 @@ class CameraCaptureService:
 
         if self._capture is None or not self._capture.isOpened():
             raise RuntimeError(f"Cannot open camera index {camera_index}")
+        self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        self._capture.set(cv2.CAP_PROP_FPS, 30)
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()

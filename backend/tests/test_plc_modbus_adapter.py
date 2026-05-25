@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from pymodbus.framer import FramerType
 
 from backend.app.services.plc_adapter import DryRunPlcAdapter, ModbusRtuPlcAdapter, ModbusTcpPlcAdapter, build_plc_adapter
+from backend.app.workers.plc_worker import PlcWorker
 
 
 def _make_mock_client(*, coil_value: bool = True, register_value: int = 0) -> mock.MagicMock:
@@ -388,6 +389,64 @@ class ModbusTcpPlcAdapterTest(unittest.TestCase):
         self.assertEqual(adapter.status()["hold_address"], 5)
         self.assertEqual(adapter.status()["release_address"], 6)
         self.assertEqual(adapter.status()["unit_id"], 3)
+
+    def test_plc_worker_input2_increments_template_cycle_event_once_per_debounce(self) -> None:
+        class FakeAdapter:
+            def __init__(self) -> None:
+                self.all_off_count = 0
+                self.inputs = [False, True, False, False, False, False, False, False]
+
+            def read_inputs(self, address: int = 0, count: int = 8):
+                return list(self.inputs)
+
+            def write_coil(self, address: int, value: bool) -> None:
+                return None
+
+            def all_off(self, num_channels: int) -> None:
+                self.all_off_count += 1
+
+            def is_connected(self) -> bool:
+                return True
+
+            def status(self) -> dict:
+                return {}
+
+        adapter = FakeAdapter()
+        worker = PlcWorker(adapter)
+
+        worker._poll_inputs()  # noqa: SLF001
+        self.assertEqual(worker.status()["template_cycle_event_id"], 1)
+
+        worker._poll_inputs()  # noqa: SLF001
+        self.assertEqual(worker.status()["template_cycle_event_id"], 1)
+        self.assertEqual(adapter.all_off_count, 0)
+
+    def test_plc_worker_input1_manual_release_still_all_off(self) -> None:
+        class FakeAdapter:
+            def __init__(self) -> None:
+                self.all_off_count = 0
+
+            def read_inputs(self, address: int = 0, count: int = 8):
+                return [True, False, False, False, False, False, False, False]
+
+            def write_coil(self, address: int, value: bool) -> None:
+                return None
+
+            def all_off(self, num_channels: int) -> None:
+                self.all_off_count += 1
+
+            def is_connected(self) -> bool:
+                return True
+
+            def status(self) -> dict:
+                return {}
+
+        adapter = FakeAdapter()
+        worker = PlcWorker(adapter)
+        worker._poll_inputs()  # noqa: SLF001
+
+        self.assertEqual(adapter.all_off_count, 1)
+        self.assertEqual(worker.status()["state"], "IDLE")
 
 
 if __name__ == "__main__":

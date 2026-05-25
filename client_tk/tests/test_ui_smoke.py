@@ -170,6 +170,9 @@ class _StubApi:
     def list_deployments(self):
         return []
 
+    def plc_status(self):
+        return {"enabled": False}
+
     def create_template(self, payload: dict):
         result = dict(payload)
         result["id"] = int(result.get("id") or 11)
@@ -650,6 +653,7 @@ class UiSmokeTest(unittest.TestCase):
             screen.preset_model_path_var.set("data/models/sticker.pt")
             screen.preset_conf_threshold_var.set("0.42")
             screen.preset_expected_code_var.set("K0W-HB0")
+            screen.preset_expected_class_var.set("K0W-HB0")
 
             screen.save_and_deploy_preset()
 
@@ -661,6 +665,55 @@ class UiSmokeTest(unittest.TestCase):
             self.assertEqual(deployed_payloads[-1]["template_id"], 99)
             self.assertEqual(deployed_payloads[-1]["template_version_id"], 100)
             self.assertEqual(deployed_payloads[-1]["line_id"], "LINE-A")
+            screen.destroy()
+
+    def test_admin_visual_roi_picker_updates_preset_payload(self) -> None:
+        screen = AdminScreen(self.root, self.api, self.state)
+        screen.preset_roi_choice_var.set("Sticker ROI")
+        screen._on_preset_roi_selected()
+        frame = np.zeros((200, 300, 3), dtype=np.uint8)
+        screen.preset_roi_picker.load_image(frame)
+        self.root.update_idletasks()
+
+        canvas = screen.preset_roi_picker._canvas
+        canvas.update_idletasks()
+        screen.preset_roi_picker._on_press(SimpleNamespace(x=170, y=120))
+        screen.preset_roi_picker._on_drag(SimpleNamespace(x=210, y=145))
+        screen.preset_roi_picker._on_release(SimpleNamespace(x=210, y=145))
+
+        self.assertNotEqual(screen.sticker_roi_x_var.get(), "0.2")
+        self.assertNotEqual(screen.sticker_roi_y_var.get(), "0.2")
+
+        screen._reset_preset_roi()
+        self.assertEqual(screen.sticker_roi_x_var.get(), "0.2")
+        self.assertEqual(screen.sticker_roi_y_var.get(), "0.2")
+        self.assertEqual(screen.sticker_roi_w_var.get(), "0.6")
+        self.assertEqual(screen.sticker_roi_h_var.get(), "0.6")
+        screen.destroy()
+
+    def test_operator_in2_cycles_active_deployments(self) -> None:
+        deployments = [
+            {"id": 1, "template_id": 1, "template_name": "QC Line A", "template_version_id": 1, "line_id": "LINE-A", "station_id": "ST-01", "is_active": True},
+            {"id": 2, "template_id": 1, "template_name": "QC Line B", "template_version_id": 2, "line_id": "LINE-B", "station_id": "ST-02", "is_active": True},
+        ]
+        with mock.patch.object(self.api, "list_deployments", return_value=deployments):
+            screen = OperatorScreen(self.root, self.api, self.state)
+            screen.state.active_deployment = deployments[0]
+            screen.template_version_value.set("1")
+            screen.line_value.set("LINE-A")
+            screen.station_value.set("ST-01")
+            with mock.patch.object(screen, "_restart_camera_for_template_change", return_value=True), mock.patch.object(
+                screen,
+                "_restart_session_after_template_change",
+                return_value=None,
+            ):
+                screen._last_plc_template_cycle_event_id = 1
+                screen._handle_plc_template_cycle_event({"template_cycle_event_id": 2})
+
+            self.assertEqual(screen.state.active_deployment["id"], 2)
+            self.assertEqual(screen.template_version_value.get(), "2")
+            self.assertEqual(screen.line_value.get(), "LINE-B")
+            self.assertEqual(screen.station_value.get(), "ST-02")
             screen.destroy()
 
     def test_admin_quick_add_operator_creates_user_and_binds_rfid(self) -> None:

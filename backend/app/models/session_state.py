@@ -56,3 +56,9 @@ class SessionState:
     # Inference cooldown: timestamp (ms) of last inference run.
     # Prevents inference from running more than once per second.
     last_inference_ms: int = 0
+    # Inference interval (ms): minimum time between inference runs.
+    # 0 = unlimited (every frame), 200 = max ~5 fps inference.
+    inference_interval_ms: int = 200
+    # Manual release COOLDOWN: timestamp (seconds since epoch) until which
+    # re-clamp is blocked after IN1 (manual release). Prevents instant re-clamp.
+    manual_release_cooldown_until: float = 0.0

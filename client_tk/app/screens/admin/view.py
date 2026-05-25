@@ -190,6 +190,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_ocr_flip_fallback_var = tk.BooleanVar(value=True)
         self.preset_max_tilt_var = tk.StringVar(value="")
         self.preset_camera_index_var = tk.StringVar(value="0")
+        self.preset_roi_choice_var = tk.StringVar(value="Sticker ROI")
         self.part_ready_roi_x_var = tk.StringVar(value="0.2")
         self.part_ready_roi_y_var = tk.StringVar(value="0.2")
         self.part_ready_roi_w_var = tk.StringVar(value="0.25")
@@ -199,6 +200,7 @@ class AdminScreen(ctk.CTkFrame):
         self.part_ready_min_ratio_var = tk.StringVar(value="0.75")
         self._preset_hsv_image_path: str = ""
         self._preset_hsv_image: np.ndarray | None = None
+        self._preset_roi_image_path: str = ""
         self.sticker_roi_x_var = tk.StringVar(value="0.2")
         self.sticker_roi_y_var = tk.StringVar(value="0.2")
         self.sticker_roi_w_var = tk.StringVar(value="0.6")
@@ -424,14 +426,46 @@ class AdminScreen(ctk.CTkFrame):
             foreground="#475569", wraplength=400, justify="left", font=("Segoe UI", 8),
         ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
-        # ROI sections
-        ctk.CTkLabel(wizard, text="Part Ready ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
-            row=13, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
-        self._roi_entries(wizard, 14, self.part_ready_roi_x_var, self.part_ready_roi_y_var, self.part_ready_roi_w_var, self.part_ready_roi_h_var)
+        # Visual ROI picker. Values are kept in StringVars for payload compatibility,
+        # but production users edit them through the image overlay only.
+        roi_panel = ctk.CTkFrame(wizard, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        roi_panel.grid(row=13, column=0, columnspan=4, sticky="ew", padx=12, pady=(12, 2))
+        roi_panel.columnconfigure(0, weight=1)
+        ctk.CTkLabel(roi_panel, text="Visual ROI Picker", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
+            row=0, column=0, sticky="w", padx=10, pady=(10, 4)
+        )
+        roi_toolbar = ctk.CTkFrame(roi_panel, fg_color="transparent")
+        roi_toolbar.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
+        roi_toolbar.columnconfigure(1, weight=1)
+        ttk.Label(roi_toolbar, text="ROI").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self.preset_roi_selector = ttk.Combobox(
+            roi_toolbar,
+            textvariable=self.preset_roi_choice_var,
+            values=["Part Ready ROI", "Sticker ROI"],
+            state="readonly",
+            width=18,
+        )
+        self.preset_roi_selector.grid(row=0, column=1, sticky="w", padx=(0, 8))
+        self.preset_roi_selector.bind("<<ComboboxSelected>>", self._on_preset_roi_selected)
+        ttk.Button(roi_toolbar, text="Pick Image", command=self._pick_preset_roi_image).grid(row=0, column=2, padx=(0, 4))
+        ttk.Button(roi_toolbar, text="Capture from Camera", command=self._capture_preset_roi_from_camera).grid(row=0, column=3, padx=(0, 4))
+        ttk.Button(roi_toolbar, text="Reset", command=self._reset_preset_roi).grid(row=0, column=4)
 
-        ctk.CTkLabel(wizard, text="Sticker ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
-            row=15, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
-        self._roi_entries(wizard, 16, self.sticker_roi_x_var, self.sticker_roi_y_var, self.sticker_roi_w_var, self.sticker_roi_h_var)
+        self.preset_roi_picker = RoiPickerCanvas(roi_panel, "Drag/resize selected ROI on the image", size=(520, 292))
+        self.preset_roi_picker.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 10))
+        self.preset_roi_picker.on_roi_changed = self._on_preset_roi_changed
+        self._on_preset_roi_selected()
+        for var in (
+            self.part_ready_roi_x_var,
+            self.part_ready_roi_y_var,
+            self.part_ready_roi_w_var,
+            self.part_ready_roi_h_var,
+            self.sticker_roi_x_var,
+            self.sticker_roi_y_var,
+            self.sticker_roi_w_var,
+            self.sticker_roi_h_var,
+        ):
+            var.trace_add("write", lambda *_: self._sync_preset_roi_picker())
 
         # Action buttons
         btn_row = ttk.Frame(wizard)
@@ -929,6 +963,10 @@ class AdminScreen(ctk.CTkFrame):
         self.sticker_roi_y_var.set("0.2")
         self.sticker_roi_w_var.set("0.6")
         self.sticker_roi_h_var.set("0.6")
+        self._preset_roi_image_path = ""
+        if hasattr(self, "preset_roi_picker"):
+            self.preset_roi_picker.clear()
+            self._sync_preset_roi_picker()
         self._set_status("Preset wizard reset.")
 
     def _on_preset_selected(self, _event=None) -> None:
@@ -987,6 +1025,7 @@ class AdminScreen(ctk.CTkFrame):
         self.sticker_roi_y_var.set(str(sticker_roi.get("y", 0.2)))
         self.sticker_roi_w_var.set(str(sticker_roi.get("w", 0.6)))
         self.sticker_roi_h_var.set(str(sticker_roi.get("h", 0.6)))
+        self._sync_preset_roi_picker()
         part_ready = detail.get("part_ready") or {}
         self.part_ready_hsv_lower_var.set(",".join(str(v) for v in part_ready.get("hsv_lower", [0, 0, 0])))
         self.part_ready_hsv_upper_var.set(",".join(str(v) for v in part_ready.get("hsv_upper", [180, 255, 80])))
@@ -1016,6 +1055,125 @@ class AdminScreen(ctk.CTkFrame):
                 return
 
     # ── HSV color picker from image ──
+
+    # Visual preset ROI picker
+
+    def _preset_roi_kind(self) -> str:
+        return "part_ready" if self.preset_roi_choice_var.get().strip() == "Part Ready ROI" else "sticker"
+
+    def _roi_payload_from_vars(
+        self,
+        x_var: tk.StringVar,
+        y_var: tk.StringVar,
+        w_var: tk.StringVar,
+        h_var: tk.StringVar,
+        *,
+        defaults: dict[str, float],
+    ) -> dict[str, float]:
+        return {
+            "x": _float_or_default(x_var.get(), defaults["x"]),
+            "y": _float_or_default(y_var.get(), defaults["y"]),
+            "w": _float_or_default(w_var.get(), defaults["w"]),
+            "h": _float_or_default(h_var.get(), defaults["h"]),
+        }
+
+    def _sync_preset_roi_picker(self) -> None:
+        if not hasattr(self, "preset_roi_picker"):
+            return
+        self.preset_roi_picker.set_rois(
+            part_ready_roi=self._roi_payload_from_vars(
+                self.part_ready_roi_x_var,
+                self.part_ready_roi_y_var,
+                self.part_ready_roi_w_var,
+                self.part_ready_roi_h_var,
+                defaults={"x": 0.2, "y": 0.2, "w": 0.25, "h": 0.25},
+            ),
+            sticker_roi=self._roi_payload_from_vars(
+                self.sticker_roi_x_var,
+                self.sticker_roi_y_var,
+                self.sticker_roi_w_var,
+                self.sticker_roi_h_var,
+                defaults={"x": 0.2, "y": 0.2, "w": 0.6, "h": 0.6},
+            ),
+        )
+        self.preset_roi_picker.set_active_roi(self._preset_roi_kind())
+
+    def _on_preset_roi_selected(self, _event=None) -> None:
+        self._sync_preset_roi_picker()
+
+    def _on_preset_roi_changed(self, kind: str, roi: dict) -> None:
+        target = (
+            (self.part_ready_roi_x_var, self.part_ready_roi_y_var, self.part_ready_roi_w_var, self.part_ready_roi_h_var)
+            if kind == "part_ready"
+            else (self.sticker_roi_x_var, self.sticker_roi_y_var, self.sticker_roi_w_var, self.sticker_roi_h_var)
+        )
+        for key, var in zip(("x", "y", "w", "h"), target, strict=True):
+            value = f"{float(roi.get(key, 0.0)):.4f}".rstrip("0").rstrip(".")
+            var.set(value or "0")
+
+    def _pick_preset_roi_image(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Pick ROI Reference Image",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp"), ("All", "*.*")],
+        )
+        if not path:
+            return
+        frame = cv2.imread(path)
+        if frame is None:
+            messagebox.showerror("ROI Picker", f"Gagal membaca gambar: {path}")
+            return
+        self._preset_roi_image_path = path
+        self.preset_roi_picker.load_image(frame)
+        self._sync_preset_roi_picker()
+        self._set_status(f"ROI reference loaded: {Path(path).name}")
+
+    def _capture_preset_roi_from_camera(self) -> None:
+        try:
+            from client_tk.app.services.camera_capture import CameraCaptureService
+        except ImportError:
+            messagebox.showerror("Camera", "Camera service not available.")
+            return
+
+        cam_idx = int(_float_or_default(self.preset_camera_index_var.get(), 0))
+        cap_service = CameraCaptureService()
+        try:
+            cap_service.start(cam_idx)
+            import time
+            time.sleep(0.5)
+            frame = cap_service.get_latest_frame()
+            if frame is None:
+                messagebox.showwarning("Camera", "Camera returned no frame in time. Try again.")
+                return
+            self._preset_roi_image_path = ""
+            self.preset_roi_picker.load_image(frame.copy())
+            self._preset_hsv_image = frame.copy()
+            self._preset_hsv_image_path = ""
+            self._preset_hsv_image_path_var.set(f"Camera {cam_idx}")
+            self._sync_preset_roi_picker()
+            self._set_status(f"Captured ROI reference from camera {cam_idx}.")
+        except Exception as exc:
+            messagebox.showerror("Camera", f"Failed to capture from camera {cam_idx}: {exc}")
+        finally:
+            try:
+                cap_service.stop()
+            except Exception:
+                pass
+
+    def _reset_preset_roi(self) -> None:
+        kind = self._preset_roi_kind()
+        if kind == "part_ready":
+            self.part_ready_roi_x_var.set("0.2")
+            self.part_ready_roi_y_var.set("0.2")
+            self.part_ready_roi_w_var.set("0.25")
+            self.part_ready_roi_h_var.set("0.25")
+            self._set_status("Part Ready ROI reset to default.")
+        else:
+            self.sticker_roi_x_var.set("0.2")
+            self.sticker_roi_y_var.set("0.2")
+            self.sticker_roi_w_var.set("0.6")
+            self.sticker_roi_h_var.set("0.6")
+            self._set_status("Sticker ROI reset to default.")
+        self._sync_preset_roi_picker()
 
     def _pick_hsv_image(self) -> None:
         """Open a file dialog to pick an image for HSV calculation."""

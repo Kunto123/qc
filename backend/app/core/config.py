@@ -90,6 +90,10 @@ class AppConfig:
     # QC_SUITE_STREAM_PORT: port for the persistent-frame streaming server (default 8101).
     # QC_SUITE_STREAM_HOST: bind address for the streaming server; empty string means
     #   inherit QC_SUITE_HOST so the two servers share the same bind address.
+    # Inference interval (ms): minimum time between YOLO inference runs.
+    # 200 = max ~5 fps inference. 0 = every frame (unlimited).
+    inference_interval_ms: int = max(0, int(os.getenv("QC_SUITE_INFERENCE_INTERVAL_MS", "200")))
+
     stream_port: int = max(1, int(os.getenv("QC_SUITE_STREAM_PORT", "8101")))
     stream_host: str = os.getenv("QC_SUITE_STREAM_HOST", "").strip()
     # PLC / Remote-IO clamp control.

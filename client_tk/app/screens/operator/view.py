@@ -30,7 +30,7 @@ BADGE_COLORS = {
 }
 RESPONSIVE_BREAKPOINT = 1240
 HEARTBEAT_INTERVAL_MS = 20_000
-PLC_POLL_INTERVAL_MS = 8_000
+PLC_POLL_INTERVAL_MS = 2_000  # 2 detik, responsif untuk template cycling
 AUTO_START_FRAME_WAIT_MS = 150
 AUTO_START_MAX_ATTEMPTS = 40
 
@@ -65,12 +65,13 @@ class OperatorScreen(ctk.CTkFrame):
         self._last_payload_seq: int = 0
         self._last_rendered_payload_seq: int = 0
         self._overlay_render_after_id: str | None = None
-        self._overlay_render_interval_ms: int = 300  # throttle: max ~3.3 fps render
+        self._overlay_render_interval_ms: int = 100  # throttle: max ~10 fps render
         self._overlay_thread: threading.Thread | None = None
         self._overlay_pending_frame = None
         self._overlay_pending_payload = None
         self._overlay_ready = threading.Event()
         self._skip_overlay_count: int = 0
+        self._last_plc_template_cycle_event_id: int | None = None
 
         self.line_value = tk.StringVar()
         self.station_value = tk.StringVar()
@@ -323,11 +324,16 @@ class OperatorScreen(ctk.CTkFrame):
         self.recent_list.pack(fill="both", expand=True, padx=4, pady=4)
 
     def _apply_responsive_layout(self) -> None:
-        width = max(self.winfo_width(), self.winfo_toplevel().winfo_width())
-        compact = width < RESPONSIVE_BREAKPOINT
-        self._layout_top_bar(compact=compact)
-        self._layout_context_bar(compact=compact)
-        self._layout_status_strip(compact=compact)
+        if self._closed or not self.winfo_exists():
+            return
+        try:
+            width = max(self.winfo_width(), self.winfo_toplevel().winfo_width())
+            compact = width < RESPONSIVE_BREAKPOINT
+            self._layout_top_bar(compact=compact)
+            self._layout_context_bar(compact=compact)
+            self._layout_status_strip(compact=compact)
+        except tk.TclError:
+            return
         if compact != self._is_compact_layout:
             self._is_compact_layout = compact
 
@@ -1330,9 +1336,16 @@ class OperatorScreen(ctk.CTkFrame):
         if not deployment:
             messagebox.showwarning("Deployment", "Tidak ada deployment aktif.")
             return
+        self._apply_deployment_record(deployment, source="Deployment loaded")
+
+    def _apply_deployment_record(self, deployment: dict, *, source: str) -> None:
+        session_was_running = self.state.active_session is not None
+        previous_camera_index = self.camera_value.get().strip()
+        if session_was_running:
+            self._stop_session()
         self.state.active_deployment = deployment
-        self.line_value.set(str(deployment.get("line_id") or line_id))
-        self.station_value.set(str(deployment.get("station_id") or station_id))
+        self.line_value.set(str(deployment.get("line_id") or self.line_value.get().strip()))
+        self.station_value.set(str(deployment.get("station_id") or self.station_value.get().strip()))
         deployment_version_id = int(deployment.get("template_version_id") or 0)
         self.template_version_value.set(str(deployment_version_id or ""))
         detail = None
@@ -1354,7 +1367,14 @@ class OperatorScreen(ctk.CTkFrame):
                 lock_version_id=deployment_version_id or None,
                 keep_line_station=True,
             )
-        self.info_var.set(f"Deployment loaded: {deployment.get('template_name')}")
+        camera_changed = self.camera_value.get().strip() != previous_camera_index
+        if camera_changed:
+            self._restart_camera_for_template_change()
+        if session_was_running:
+            self.info_var.set(f"{source}: restarting session with {deployment.get('template_name')}")
+            self._restart_session_after_template_change()
+        else:
+            self.info_var.set(f"{source}: {deployment.get('template_name')}")
         self._refresh_context_summary()
         self._update_status_badges()
 
@@ -1688,10 +1708,56 @@ class OperatorScreen(ctk.CTkFrame):
             if self._closed:
                 return
             if result and not error:
+                self._handle_plc_template_cycle_event(result)
                 self._update_plc_badge_from_status(result)
 
         run_async(self, _load, callback=_on_done)
         self._schedule_plc_poll()
+
+    def _handle_plc_template_cycle_event(self, status: dict) -> None:
+        raw_event_id = status.get("template_cycle_event_id")
+        try:
+            event_id = int(raw_event_id)
+        except (TypeError, ValueError):
+            return
+        if self._last_plc_template_cycle_event_id is None:
+            self._last_plc_template_cycle_event_id = event_id
+            return
+        if event_id <= self._last_plc_template_cycle_event_id:
+            return
+        self._last_plc_template_cycle_event_id = event_id
+        self._cycle_active_deployment_from_plc()
+
+    def _cycle_active_deployment_from_plc(self) -> None:
+        """Cycle ke deployment berikutnya berdasarkan IN2 PLC event."""
+        # Gunakan cached deployments, fetch ulang jika belum ada
+        if not hasattr(self, "_plc_deployments_cache") or not self._plc_deployments_cache:
+            try:
+                self._plc_deployments_cache = self.api.list_deployments()
+            except Exception as exc:
+                self.info_var.set(f"IN2 template switch failed: {exc}")
+                return
+        deployments = self._plc_deployments_cache
+        active = [item for item in deployments if bool(item.get("is_active", True))]
+        active.sort(key=lambda item: int(item.get("id") or 0))
+        if len(active) <= 1:
+            self.info_var.set("IN2 diterima, tapi hanya ada satu deployment aktif.")
+            return
+
+        current_deployment_id = int((self.state.active_deployment or {}).get("id") or 0)
+        current_version_id = int(self.template_version_value.get() or 0)
+        current_index = -1
+        for index, item in enumerate(active):
+            if current_deployment_id and int(item.get("id") or 0) == current_deployment_id:
+                current_index = index
+                break
+            if not current_deployment_id and current_version_id and int(item.get("template_version_id") or 0) == current_version_id:
+                current_index = index
+                break
+        next_deployment = active[(current_index + 1) % len(active)]
+        self._apply_deployment_record(next_deployment, source="IN2 template switch")
+        # Refresh cache untuk next cycle
+        self._plc_deployments_cache = None
 
     def _update_plc_badge_from_status(self, status: dict) -> None:
         if not status.get("enabled", True):
@@ -1801,11 +1867,11 @@ class OperatorScreen(ctk.CTkFrame):
                     live_detection = payload.get("sticker_detection") or {}
                     self.info_var.set(
                         f"Gate={'READY' if live_part_ready.get('part_ready') else 'BLOCK'} "
-                        f"(ratio {live_part_ready.get('match_ratio') if live_part_ready.get('match_ratio') is not None else '-'}) | "
+                        f"(ratio {live_part_ready.get('match_ratio') if live_part_ready.get('match_ratio') is not None else '-'} | pr_status={live_part_ready.get('status') or '-'}) | "
                         f"Live decision: {live_validation.get('decision') or '-'} | "
                         f"Detected: {live_validation.get('detected_class') or '-'} | "
                         f"Reject: {live_validation.get('reject_reason_code') or 'OK'} | "
-                        f"backend={live_detection.get('backend') or '-'} raw={live_detection.get('raw_detection_count') if live_detection.get('raw_detection_count') is not None else '-'}"
+                        f"backend={live_detection.get('backend') or '-'} reason={live_detection.get('reason') or '-'} raw={live_detection.get('raw_detection_count') if live_detection.get('raw_detection_count') is not None else '-'}"
                         f"{timing_suffix}"
                     )
 

@@ -192,6 +192,29 @@ class InspectionSessionService:
         self._plc_worker = plc_worker
         self._reject_log_repo = reject_log_repo
         self._operator_state_machine = OperatorInspectionStateMachine()
+        self._default_inference_interval_ms = (
+            max(0, int(getattr(app_config, "inference_interval_ms", 200)))
+            if app_config is not None
+            else 200
+        )
+        # Register PLC state change callback
+        if self._plc_worker is not None:
+            self._plc_worker.set_on_state_change_callback(self._on_plc_state_change)
+
+    def _on_plc_state_change(self, old_state: str, new_state: str) -> None:
+        """Callback dari PLC worker saat state berubah.
+        Reset plc_part_ready_triggered saat PLC kembali ke IDLE (manual release).
+        """
+        if new_state == "IDLE" and old_state != "IDLE":
+            cooldown_until = time.time() + 2.0  # 2 detik cooldown
+            for state in self._sessions.values():
+                state.plc_part_ready_triggered = False
+                state.inspection_result_cache = None
+                state.operator_state = "IDLE"
+                state.settle_frame_count = 0
+                state.last_inference_ms = 0
+                state.manual_release_cooldown_until = cooldown_until
+            logger.info("[inspection] PLC manual release — 2s cooldown started")
 
     def start_session(
         self,
@@ -213,6 +236,7 @@ class InspectionSessionService:
             line_id=line_id,
             station_id=station_id,
             session_reject_breakdown=_empty_reject_breakdown(),
+            inference_interval_ms=self._default_inference_interval_ms,
         )
         with self._lock:
             self._sessions[session_id] = state
@@ -373,10 +397,16 @@ class InspectionSessionService:
             state.plc_part_ready_triggered = False
 
         # Trigger PLC clamp hold on the first frame where part is settled.
+        # But check manual release cooldown (2s delay after IN1 release).
+        _cooldown_until = float(getattr(state, "manual_release_cooldown_until", 0.0))
         if part_ready_settled and not state.plc_part_ready_triggered:
-            state.plc_part_ready_triggered = True
-            if self._plc_worker is not None:
-                self._plc_worker.enqueue_part_ready(event_id=state.current_event_id)
+            if _cooldown_until > 0 and time.time() < _cooldown_until:
+                # Still in cooldown — skip clamp trigger
+                logger.debug("[inspection] cooldown active, skip clamp re-trigger")
+            else:
+                state.plc_part_ready_triggered = True
+                if self._plc_worker is not None:
+                    self._plc_worker.enqueue_part_ready(event_id=state.current_event_id)
 
         # Augment part_ready dict in-place with settle observability fields.
         part_ready["part_ready_settled"] = part_ready_settled
@@ -440,20 +470,22 @@ class InspectionSessionService:
             inference_started = time.perf_counter()
             # DEBUG: log sticker ROI and frame info
             logger.info(
-                "[inference] sticker_roi=%s frame=%dx%d crop=%dx%d",
+                "[inference] sticker_roi=%s frame=%dx%d crop=%dx%d expected=%s",
                 state.template.sticker_roi,
                 frame.shape[1], frame.shape[0],
                 sticker_frame.shape[1], sticker_frame.shape[0],
+                state.template.sticker.expected_class,
             )
             inference_payload = self._run_sticker_inference(sticker_frame, state)
             inference_ms = _elapsed_ms(inference_started)
             detections = list(inference_payload.get("detections") or [])
-            # DEBUG: log detection results
+            # DEBUG: log detection results with class names
             logger.info(
-                "[inference] raw=%d filtered=%d expected_class=%s",
+                "[inference] raw=%d filtered=%d classes=%s allowed=%s",
                 inference_payload.get("raw_detection_count", 0),
                 len(detections),
-                state.template.sticker.expected_class,
+                inference_payload.get("class_names", []),
+                inference_payload.get("allowed_labels_filter", []),
             )
             stage_timings = dict(inference_payload.get("timings") or {})
             for key, value in stage_timings.items():
@@ -828,14 +860,18 @@ class InspectionSessionService:
             }
         record = self._profiles_repo.get(config.color_profile_id)
         if not record:
+            logger.warning(
+                "[part_ready] color_profile_id=%s not found — bypassing gate",
+                config.color_profile_id,
+            )
             return {
                 "enabled": True,
-                "part_ready": False,
-                "part_ready_confidence": 0.0,
-                "decision": DecisionCode.REJECT.value,
-                "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
-                "status": "missing_profile",
-                "match_ratio": 0.0,
+                "part_ready": True,
+                "part_ready_confidence": 1.0,
+                "decision": DecisionCode.ACCEPT.value,
+                "reject_reason_code": None,
+                "status": "missing_profile_bypass",
+                "match_ratio": 1.0,
                 "mean_distance": None,
                 "color_profile_id": config.color_profile_id,
             }
