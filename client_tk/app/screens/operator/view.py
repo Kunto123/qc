@@ -59,6 +59,8 @@ class OperatorScreen(ctk.CTkFrame):
         self._auth_error_notified = False
         self._auto_start_done = False
         self._auto_start_after_id: str | None = None
+        self._resize_debounce_after_id: str | None = None
+        self._roi_overlay_dirty = True
 
         self.line_value = tk.StringVar()
         self.station_value = tk.StringVar()
@@ -347,7 +349,23 @@ class OperatorScreen(ctk.CTkFrame):
         self.main_view.grid(row=0, column=0, sticky="nsew")
 
     def _on_resize(self, _event=None) -> None:
-        self.after_idle(self._apply_responsive_layout)
+        # Debounce: cancel pending layout, schedule new one 200ms later.
+        # Prevents flicker from rapid successive resize events.
+        if self._resize_debounce_after_id:
+            try:
+                self.after_cancel(self._resize_debounce_after_id)
+            except tk.TclError:
+                pass
+        self._resize_debounce_after_id = self.after(200, self._apply_responsive_layout)
+
+    def _clear_resize_debounce(self) -> None:
+        """Cancel any pending resize debounce callback."""
+        if self._resize_debounce_after_id:
+            try:
+                self.after_cancel(self._resize_debounce_after_id)
+            except tk.TclError:
+                pass
+            self._resize_debounce_after_id = None
 
     def _layout_top_bar(self, *, compact: bool) -> None:
         for widget in self.action_bar.grid_slaves():
@@ -588,7 +606,7 @@ class OperatorScreen(ctk.CTkFrame):
 
     def _format_roi_value(self, value) -> str:
         try:
-            return f"{float(value):.4g}"
+            return f"{float(value):.6g}"
         except (TypeError, ValueError):
             return str(value or "")
 
@@ -913,7 +931,24 @@ class OperatorScreen(ctk.CTkFrame):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
         return overlay
 
+    def _render_roi_overlay(self, frame, payload: dict) -> None:
+        """Render ROI overlay on the live frame using payload data.
+
+        Extracted from _build_local_detection_overlay + _draw_roi_overlays
+        so the same logic can be called immediately from _set_result callback
+        rather than waiting for the next poll cycle.
+        """
+        if frame is None:
+            return
+        overlay = self._build_local_detection_overlay(frame, payload)
+        if overlay is not None:
+            self.main_view.update_bgr(overlay)
+            self.display_source.set("Right View: Live Camera + ROIs (local)")
+
     def _update_local_roi_previews(self, frame) -> None:
+        # Skip if overlay is not dirty — prevents unnecessary re-render jitter.
+        if not self._roi_overlay_dirty:
+            return
         if frame is None:
             self.main_view.reset()
             return
@@ -924,6 +959,7 @@ class OperatorScreen(ctk.CTkFrame):
             self.display_source.set("Right View: Live Camera + ROIs (local)")
         else:
             self.main_view.reset()
+        self._roi_overlay_dirty = False
 
     def _update_roi_overlay_preview(self, frame) -> None:
         """Draw ROI boxes on live frame even before session starts."""
@@ -970,8 +1006,23 @@ class OperatorScreen(ctk.CTkFrame):
         version_id = lock_version_id or detail.get("version_id") or detail.get("current_version_id")
         if version_id:
             self.template_version_value.set(str(version_id))
-        self._set_roi_values("part_ready", detail.get("part_ready_roi") or detail.get("roi") or {})
-        self._set_roi_values("sticker", detail.get("sticker_roi") or detail.get("roi") or {})
+
+        # Prefer explicit per-ROI fields.  Fall back to legacy shared "roi" only
+        # when the explicit field is missing — never apply the same legacy "roi"
+        # to both slots which causes sticker ROI to inherit part-ready geometry.
+        part_ready_roi = detail.get("part_ready_roi") or {}
+        sticker_roi = detail.get("sticker_roi") or {}
+        legacy_roi = detail.get("roi") or {}
+        if not part_ready_roi and legacy_roi:
+            part_ready_roi = legacy_roi
+        if not sticker_roi and legacy_roi:
+            # Only use legacy roi for sticker when part_ready already has its
+            # own explicit value — otherwise the two ROIs would be identical.
+            if detail.get("part_ready_roi"):
+                sticker_roi = legacy_roi
+
+        self._set_roi_values("part_ready", part_ready_roi)
+        self._set_roi_values("sticker", sticker_roi)
         camera_config = detail.get("camera") or {}
         if camera_config.get("camera_index") is not None:
             self.camera_value.set(str(camera_config["camera_index"]))
@@ -1457,6 +1508,16 @@ class OperatorScreen(ctk.CTkFrame):
             self._latest_payload = payload
             self._latest_error = None
         self._auth_error_notified = False
+        # Mark overlay as dirty so the next poll or frame update renders it.
+        self._roi_overlay_dirty = True
+        # Immediately render the overlay with the new payload so the user
+        # sees the updated result without waiting for the next 100ms poll.
+        try:
+            frame = self.capture.get_latest_frame()
+            if frame is not None:
+                self._render_roi_overlay(frame, payload)
+        except tk.TclError:
+            pass
 
     @staticmethod
     def _is_auth_error(message: str | None) -> bool:
@@ -1721,6 +1782,7 @@ class OperatorScreen(ctk.CTkFrame):
             except tk.TclError:
                 pass
             self._auto_start_after_id = None
+        self._clear_resize_debounce()
         self._close_settings()
         if self._plc_release_window and self._plc_release_window.winfo_exists():
             self._plc_release_window.destroy()

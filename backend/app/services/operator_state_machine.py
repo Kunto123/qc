@@ -27,6 +27,11 @@ class OperatorInspectionStateMachine:
     InspectionSessionService so existing API contracts stay stable.
     """
 
+    # Minimum number of consecutive settled frames before transitioning
+    # from IDLE -> INSPECTION.  Prevents premature inference triggered by
+    # a transient part_ready blip (auto-exposure flicker, vibration).
+    SETTLE_MIN_FRAMES = 3
+
     def update(
         self,
         session_state,
@@ -40,6 +45,7 @@ class OperatorInspectionStateMachine:
             session_state.inspection_result_cache = None
             session_state.inspection_has_run_for_current_part = False
             session_state.part_removed_seen_at = datetime.now(UTC)
+            session_state.settle_frame_count = 0
             return OperatorStateDecision(
                 state=OperatorRuntimeState.IDLE,
                 run_inspection=False,
@@ -56,11 +62,23 @@ class OperatorInspectionStateMachine:
             )
 
         if settled:
-            session_state.operator_state = OperatorRuntimeState.INSPECTION.value
-            session_state.inspection_has_run_for_current_part = True
+            # Hysteresis: require N consecutive settled frames before
+            # committing to INSPECTION state.
+            session_state.settle_frame_count = int(getattr(session_state, "settle_frame_count", 0)) + 1
+            if session_state.settle_frame_count >= self.SETTLE_MIN_FRAMES:
+                session_state.operator_state = OperatorRuntimeState.INSPECTION.value
+                session_state.inspection_has_run_for_current_part = True
+                return OperatorStateDecision(
+                    state=OperatorRuntimeState.INSPECTION,
+                    run_inspection=True,
+                    use_cached_result=False,
+                    reset_event=False,
+                )
+            # Still in hysteresis window — hold at IDLE.
+            session_state.operator_state = OperatorRuntimeState.IDLE.value
             return OperatorStateDecision(
-                state=OperatorRuntimeState.INSPECTION,
-                run_inspection=True,
+                state=OperatorRuntimeState.IDLE,
+                run_inspection=False,
                 use_cached_result=False,
                 reset_event=False,
             )

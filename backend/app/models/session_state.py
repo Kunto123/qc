@@ -50,3 +50,6 @@ class SessionState:
     inspection_has_run_for_current_part: bool = False
     inspection_result_cache: dict[str, Any] | None = None
     part_removed_seen_at: datetime | None = None
+    # Hysteresis counter: number of consecutive settled frames.
+    # Reset to 0 when part_ready/presence is lost.
+    settle_frame_count: int = 0
