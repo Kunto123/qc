@@ -53,3 +53,6 @@ class SessionState:
     # Hysteresis counter: number of consecutive settled frames.
     # Reset to 0 when part_ready/presence is lost.
     settle_frame_count: int = 0
+    # Inference cooldown: timestamp (ms) of last inference run.
+    # Prevents inference from running more than once per second.
+    last_inference_ms: int = 0

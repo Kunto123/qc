@@ -64,6 +64,13 @@ class OperatorScreen(ctk.CTkFrame):
         self._cached_overlay_frame: np.ndarray | None = None
         self._last_payload_seq: int = 0
         self._last_rendered_payload_seq: int = 0
+        self._overlay_render_after_id: str | None = None
+        self._overlay_render_interval_ms: int = 300  # throttle: max ~3.3 fps render
+        self._overlay_thread: threading.Thread | None = None
+        self._overlay_pending_frame = None
+        self._overlay_pending_payload = None
+        self._overlay_ready = threading.Event()
+        self._skip_overlay_count: int = 0
 
         self.line_value = tk.StringVar()
         self.station_value = tk.StringVar()
@@ -536,6 +543,14 @@ class OperatorScreen(ctk.CTkFrame):
         self._template_detail_lookup = {}
         self._template_version_detail_lookup = {}
         for item in items:
+            # Only hide explicitly inactive/retired templates.
+            # Templates without lifecycle_status (legacy) are treated as active.
+            is_active = bool(item.get("is_active", True))
+            if not is_active:
+                continue
+            lifecycle = str(item.get("lifecycle_status") or "").strip().lower()
+            if lifecycle in ("draft", "review", "retired"):
+                continue
             label = f"{item['name']} | v{item.get('version_number')} | version_id={item.get('version_id')}"
             values.append(label)
             self._template_lookup[label] = item
@@ -1427,7 +1442,7 @@ class OperatorScreen(ctk.CTkFrame):
         # Restore raw preview immediately so camera stays visible during first backend round-trip.
         _current_frame = self.capture.get_latest_frame()
         if _current_frame is not None:
-            self._update_local_roi_previews(_current_frame)
+            self._show_cached_overlay_or_frame(_current_frame)
         else:
             self.main_view.reset()
         upload_interval_ms = self._resolve_upload_interval_ms()
@@ -1497,13 +1512,81 @@ class OperatorScreen(ctk.CTkFrame):
             self._latest_payload = payload
             self._latest_error = None
         self._auth_error_notified = False
-        # Increment payload sequence so _poll_ui knows this is a new result.
         self._last_payload_seq += 1
-        # Immediately render overlay live so user sees result without waiting for poll.
+        # Schedule overlay render (debounced).  If a render is already pending,
+        # let it run — the poll will pick up the latest payload seq and re-render
+        # on the next tick.  This prevents CTK image callback crashes from rapid
+        # update_bgr() calls.
+        self._schedule_overlay_render()
+
+    def _schedule_overlay_render(self) -> None:
+        """Schedule a debounced overlay render.  Prevents rapid-fire CTK crashes."""
+        if self._overlay_render_after_id is not None:
+            return  # already scheduled
+        self._overlay_render_after_id = self.after(
+            self._overlay_render_interval_ms,
+            self._do_scheduled_overlay_render,
+        )
+
+    def _do_scheduled_overlay_render(self) -> None:
+        self._overlay_render_after_id = None
+        if self._closed:
+            return
+        # Skip if a previous render is still running — don't queue up
+        if self._overlay_thread is not None and self._overlay_thread.is_alive():
+            self._skip_overlay_count += 1
+            return
         try:
             frame = self.capture.get_latest_frame()
-            if frame is not None:
-                self._render_roi_overlay_frame(frame, payload)
+            with self._lock:
+                payload = self._latest_payload
+            if not payload:
+                return
+            current_seq = self._last_payload_seq
+            if current_seq == self._last_rendered_payload_seq:
+                return
+            self._last_rendered_payload_seq = current_seq
+            display_frame = frame if frame is not None else self.capture.get_latest_frame()
+            if display_frame is None:
+                return
+            # Offload heavy overlay composition to a background thread
+            self._overlay_pending_frame = display_frame
+            self._overlay_pending_payload = dict(payload)
+            self._overlay_ready.clear()
+            self._overlay_thread = threading.Thread(
+                target=self._overlay_render_worker, daemon=True
+            )
+            self._overlay_thread.start()
+            # Schedule the UI update (lightweight) on the main thread
+            self.after(50, self._overlay_render_ui_update)
+        except tk.TclError:
+            pass
+
+    def _overlay_render_worker(self) -> None:
+        """Background thread: compose the overlay image."""
+        try:
+            overlay = self._build_local_detection_overlay(
+                self._overlay_pending_frame, self._overlay_pending_payload
+            )
+            if overlay is not None:
+                self._cached_overlay_frame = overlay.copy()
+        except Exception:
+            pass
+        finally:
+            self._overlay_ready.set()
+
+    def _overlay_render_ui_update(self) -> None:
+        """Main thread: update the display after background render finishes."""
+        if self._closed:
+            return
+        if not self._overlay_ready.is_set():
+            # Render not done yet — check again shortly
+            self.after(30, self._overlay_render_ui_update)
+            return
+        try:
+            if self._cached_overlay_frame is not None:
+                self.main_view.update_bgr(self._cached_overlay_frame)
+                self.display_source.set("Right View: Live Camera + ROIs (local)")
         except tk.TclError:
             pass
 
@@ -1674,18 +1757,13 @@ class OperatorScreen(ctk.CTkFrame):
                 self._update_status_badges(payload)
 
                 # ---- Overlay rendering (throttled) ----
-                # Only rebuild the expensive overlay when the payload is genuinely
-                # new (tracked via _last_payload_seq).  Between backend responses
-                # we keep showing the cached overlay so the live view never goes
-                # blank.
+                # Rebuild only when payload is genuinely new.  The actual render
+                # is done by _do_scheduled_overlay_render (debounced).  Here we
+                # just update UI text — no image rendering in the fast poll loop.
                 current_seq = self._last_payload_seq
                 if current_seq != self._last_rendered_payload_seq:
-                    self._last_rendered_payload_seq = current_seq
-                    display_frame = frame if frame is not None else self.capture.get_latest_frame()
-                    self._render_payload_overlay(display_frame, payload)
-                else:
-                    # No new payload — just refresh the live camera underlay if possible.
-                    self._refresh_live_camera(frame, payload)
+                    # New payload arrived — ensure a render is scheduled.
+                    self._schedule_overlay_render()
 
                 # Timing info
                 timings = payload.get("timings") or {}
@@ -1834,6 +1912,16 @@ class OperatorScreen(ctk.CTkFrame):
                 pass
             self._auto_start_after_id = None
         self._clear_resize_debounce()
+        if self._overlay_render_after_id:
+            try:
+                self.after_cancel(self._overlay_render_after_id)
+            except tk.TclError:
+                pass
+            self._overlay_render_after_id = None
+        # Wait for background render thread to finish (max 1s)
+        if self._overlay_thread is not None and self._overlay_thread.is_alive():
+            self._overlay_thread.join(timeout=1.0)
+        self._overlay_thread = None
         self._close_settings()
         if self._plc_release_window and self._plc_release_window.winfo_exists():
             self._plc_release_window.destroy()

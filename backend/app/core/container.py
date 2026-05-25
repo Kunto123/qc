@@ -76,7 +76,11 @@ model_export_service = ModelExportService(models_repo, templates_repo, deploymen
 
 _plc_adapter = build_plc_adapter(app_config)
 plc_worker: PlcWorker | None = (
-    PlcWorker(_plc_adapter, hold_ms=app_config.plc_clamp_hold_ms)
+    PlcWorker(
+        _plc_adapter,
+        accept_pulse_ms=app_config.plc_accept_pulse_ms,
+        num_channels=4,
+    )
     if app_config.plc_enabled
     else None
 )

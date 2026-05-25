@@ -128,6 +128,7 @@ class AdminScreen(ctk.CTkFrame):
         self._templates_cache: list[dict] = []
         self._models_cache: list[dict] = []
         self._model_lookup: dict[str, dict] = {}
+        self._template_model_lookup: dict[str, dict] = {}
         self._datasets_cache: list[dict] = []
         self._base_models_cache: list[dict] = []
         self._base_model_lookup: dict[str, dict] = {}
@@ -188,6 +189,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_use_ocr_var = tk.BooleanVar(value=False)
         self.preset_ocr_flip_fallback_var = tk.BooleanVar(value=True)
         self.preset_max_tilt_var = tk.StringVar(value="")
+        self.preset_camera_index_var = tk.StringVar(value="0")
         self.part_ready_roi_x_var = tk.StringVar(value="0.2")
         self.part_ready_roi_y_var = tk.StringVar(value="0.2")
         self.part_ready_roi_w_var = tk.StringVar(value="0.25")
@@ -195,6 +197,8 @@ class AdminScreen(ctk.CTkFrame):
         self.part_ready_hsv_lower_var = tk.StringVar(value="0,0,0")
         self.part_ready_hsv_upper_var = tk.StringVar(value="180,255,80")
         self.part_ready_min_ratio_var = tk.StringVar(value="0.75")
+        self._preset_hsv_image_path: str = ""
+        self._preset_hsv_image: np.ndarray | None = None
         self.sticker_roi_x_var = tk.StringVar(value="0.2")
         self.sticker_roi_y_var = tk.StringVar(value="0.2")
         self.sticker_roi_w_var = tk.StringVar(value="0.6")
@@ -391,18 +395,52 @@ class AdminScreen(ctk.CTkFrame):
         ttk.Checkbutton(wizard, text="Use OCR verification", variable=self.preset_use_ocr_var).grid(row=9, column=1, sticky="w", padx=(0, 12), pady=5)
         ttk.Checkbutton(wizard, text="Try 180 flip fallback", variable=self.preset_ocr_flip_fallback_var).grid(row=9, column=2, columnspan=2, sticky="w", padx=(0, 12), pady=5)
         self._entry(wizard, 10, 0, "Max Tilt Degrees", self.preset_max_tilt_var, columnspan=3)
+        self._entry(wizard, 11, 0, "Camera Index", self.preset_camera_index_var, columnspan=3)
 
-        ctk.CTkLabel(wizard, text="Part Ready ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=11, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
-        self._roi_entries(wizard, 12, self.part_ready_roi_x_var, self.part_ready_roi_y_var, self.part_ready_roi_w_var, self.part_ready_roi_h_var)
-        ctk.CTkLabel(wizard, text="Black Reference HSV", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=13, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
-        self._entry(wizard, 14, 0, "HSV Lower", self.part_ready_hsv_lower_var)
-        self._entry(wizard, 14, 2, "HSV Upper", self.part_ready_hsv_upper_var)
-        self._entry(wizard, 15, 0, "Min Ratio", self.part_ready_min_ratio_var)
-        ctk.CTkLabel(wizard, text="Sticker ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(row=16, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
-        self._roi_entries(wizard, 17, self.sticker_roi_x_var, self.sticker_roi_y_var, self.sticker_roi_w_var, self.sticker_roi_h_var)
+        # ── Part HSV section with color picker ──
+        hsv_frame = ttk.LabelFrame(wizard, text="Part HSV (pick from image or capture from camera)", padding=6)
+        hsv_frame.grid(row=12, column=0, columnspan=4, sticky="ew", padx=12, pady=(12, 2))
+        hsv_frame.columnconfigure(1, weight=1)
+        hsv_frame.columnconfigure(3, weight=1)
+
+        # Image picker row
+        picker_row = ttk.Frame(hsv_frame)
+        picker_row.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+        self._preset_hsv_image_path_var = tk.StringVar(value="")
+        ttk.Button(picker_row, text="Pick Image", command=self._pick_hsv_image).pack(side="left")
+        ttk.Button(picker_row, text="Capture from Camera", command=self._capture_hsv_from_camera).pack(side="left", padx=(4, 0))
+        ttk.Label(picker_row, textvariable=self._preset_hsv_image_path_var, wraplength=250).pack(side="left", padx=(8, 0))
+        ttk.Button(picker_row, text="Calculate HSV", command=self._calculate_hsv_from_image).pack(side="right")
+
+        # HSV value entries
+        self._entry(hsv_frame, 1, 0, "HSV Lower", self.part_ready_hsv_lower_var)
+        self._entry(hsv_frame, 1, 2, "HSV Upper", self.part_ready_hsv_upper_var)
+        self._entry(hsv_frame, 2, 0, "Min Ratio", self.part_ready_min_ratio_var, columnspan=3)
+
+        # Tolerance hint
+        ttk.Label(
+            hsv_frame,
+            text="Tip: Use 'Capture from Camera' with the actual part in view for best results. HSV values are auto-calculated but editable.",
+            foreground="#475569", wraplength=400, justify="left", font=("Segoe UI", 8),
+        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        # ROI sections
+        ctk.CTkLabel(wizard, text="Part Ready ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
+            row=13, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
+        self._roi_entries(wizard, 14, self.part_ready_roi_x_var, self.part_ready_roi_y_var, self.part_ready_roi_w_var, self.part_ready_roi_h_var)
+
+        ctk.CTkLabel(wizard, text="Sticker ROI", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
+            row=15, column=0, columnspan=4, sticky="w", padx=12, pady=(12, 2))
+        self._roi_entries(wizard, 16, self.sticker_roi_x_var, self.sticker_roi_y_var, self.sticker_roi_w_var, self.sticker_roi_h_var)
+
+        # Action buttons
+        btn_row = ttk.Frame(wizard)
+        btn_row.grid(row=18, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 6))
+        btn_row.columnconfigure(0, weight=1)
+        btn_row.columnconfigure(1, weight=1)
 
         ctk.CTkButton(
-            wizard,
+            btn_row,
             text="Save & Deploy Preset",
             command=self.save_and_deploy_preset,
             fg_color=ACCENT,
@@ -410,17 +448,17 @@ class AdminScreen(ctk.CTkFrame):
             text_color=TEXT_ON_ACCENT,
             height=34,
             corner_radius=6,
-        ).grid(row=17, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 6))
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
         ctk.CTkButton(
-            wizard,
+            btn_row,
             text="Export template.json",
             command=self.export_runtime_template,
             fg_color=PANEL_ALT_BG,
             hover_color=BORDER,
             text_color=TEXT_PRIMARY,
-            height=30,
+            height=34,
             corner_radius=6,
-        ).grid(row=18, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 10))
+        ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
     # NOTE: _build_models_training_tab removed - functionality moved to separate Data/Training/Models/Calibration tabs
 
@@ -581,7 +619,7 @@ class AdminScreen(ctk.CTkFrame):
         self.refresh_monitor()
         self._admin_refresh_datasets()
         self._admin_refresh_training_jobs()
-        self._admin_refresh_models()
+        self.refresh_model_options()
         self._admin_refresh_calibration()
 
     def refresh_presets(self) -> None:
@@ -608,25 +646,43 @@ class AdminScreen(ctk.CTkFrame):
         run_async(self, self.api.list_templates, callback=_done)
 
     def refresh_model_options(self) -> None:
+        """Refresh model dropdown in template tab AND model list in models tab."""
         def _done(items, error):
             if error:
-                self._model_lookup = {}
+                self._template_model_lookup = {}
                 self.preset_model_selector.configure(values=[])
+                self._model_lookup = {}
+                self._admin_model_list.delete(0, "end")
                 return
-            self._models_cache = list(items or [])
-            self._model_lookup = {}
+            models = list(items or [])
+
+            # ── Template dropdown lookup ──
+            self._template_model_lookup = {}
             values: list[str] = []
-            for item in self._models_cache:
-                label = f"{item.get('id')} | {item.get('name') or item.get('path') or 'model'}"
-                path = str(item.get("path") or "").strip()
-                if path:
-                    label = f"{label} | {path}"
+            for item in models:
+                raw_name = item.get("name") or item.get("path") or "model"
+                raw_path = str(item.get("path") or "").strip()
+                label = f"{item.get('id')} | {raw_name}"
+                if raw_path:
+                    label = f"{label} | {raw_path}"
                 values.append(label)
-                self._model_lookup[label] = dict(item)
+                self._template_model_lookup[label] = dict(item)
             self.preset_model_selector.configure(values=values)
             if values and not self.preset_model_choice_var.get().strip():
                 self.preset_model_choice_var.set(values[0])
                 self._on_preset_model_selected()
+
+            # ── Models page listbox ──
+            self._models_cache = models
+            self._admin_model_list.delete(0, "end")
+            self._model_lookup = {}
+            for item in models:
+                name = str(item.get("name") or "")
+                path = str(item.get("path") or "")
+                status = str(item.get("status") or "")
+                display = f"{name} | {status} | {path}"
+                self._admin_model_list.insert("end", display)
+                self._model_lookup[display] = dict(item)
 
         run_async(self, self.api.list_models, callback=_done)
 
@@ -861,6 +917,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_use_ocr_var.set(False)
         self.preset_ocr_flip_fallback_var.set(True)
         self.preset_max_tilt_var.set("")
+        self.preset_camera_index_var.set("0")
         self.part_ready_roi_x_var.set("0.2")
         self.part_ready_roi_y_var.set("0.2")
         self.part_ready_roi_w_var.set("0.25")
@@ -918,6 +975,8 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_use_ocr_var.set(bool(sticker.get("use_ocr", False)))
         self.preset_ocr_flip_fallback_var.set(bool(sticker.get("ocr_flip_fallback", True)))
         self.preset_max_tilt_var.set("" if sticker.get("max_tilt_degrees") is None else str(sticker.get("max_tilt_degrees")))
+        camera_cfg = detail.get("camera") or {}
+        self.preset_camera_index_var.set(str(camera_cfg.get("camera_index", 0)))
         part_ready_roi = detail.get("part_ready_roi") or {}
         sticker_roi = detail.get("sticker_roi") or detail.get("roi") or {}
         self.part_ready_roi_x_var.set(str(part_ready_roi.get("x", 0.2)))
@@ -941,7 +1000,7 @@ class AdminScreen(ctk.CTkFrame):
         self._select_model_label_for_path(model_path)
 
     def _on_preset_model_selected(self, _event=None) -> None:
-        item = self._model_lookup.get(self.preset_model_choice_var.get().strip())
+        item = self._template_model_lookup.get(self.preset_model_choice_var.get().strip())
         if not item:
             return
         self.preset_model_path_var.set(str(item.get("path") or ""))
@@ -951,10 +1010,117 @@ class AdminScreen(ctk.CTkFrame):
         normalized = str(model_path or "").strip().lower()
         if not normalized:
             return
-        for label, item in self._model_lookup.items():
+        for label, item in self._template_model_lookup.items():
             if str(item.get("path") or "").strip().lower() == normalized:
                 self.preset_model_choice_var.set(label)
                 return
+
+    # ── HSV color picker from image ──
+
+    def _pick_hsv_image(self) -> None:
+        """Open a file dialog to pick an image for HSV calculation."""
+        path = filedialog.askopenfilename(
+            title="Pick Reference Image",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp"), ("All", "*.*")],
+        )
+        if not path:
+            return
+        self._preset_hsv_image_path = path
+        self._preset_hsv_image_path_var.set(Path(path).name)
+        try:
+            frame = cv2.imread(path)
+            if frame is not None:
+                self._preset_hsv_image = frame
+        except Exception:
+            self._preset_hsv_image = None
+
+    def _capture_hsv_from_camera(self) -> None:
+        """Capture a reference frame from the selected camera and use it for HSV calculation."""
+        try:
+            from client_tk.app.services.camera_capture import CameraCaptureService
+        except ImportError:
+            messagebox.showerror("Camera", "Camera service not available.")
+            return
+
+        cam_idx = 0
+        try:
+            cam_idx = int(self.preset_camera_index_var.get() or 0)
+        except (TypeError, ValueError):
+            pass
+
+        cap_service = CameraCaptureService()
+        try:
+            cap_service.start(cam_idx)
+            import time
+            time.sleep(0.5)  # let camera warm up
+            frame = cap_service.get_latest_frame()
+            if frame is None:
+                messagebox.showwarning("Camera", "Camera returned no frame in time. Try again.")
+                return
+            self._preset_hsv_image = frame.copy()
+            self._preset_hsv_image_path = ""
+            self._preset_hsv_image_path_var.set(cam_idx)
+            messagebox.showinfo(
+                "Camera",
+                f"Captured frame from camera {cam_idx} ({frame.shape[1]}x{frame.shape[0]}).\n"
+                "Click 'Calculate HSV' to compute values.",
+            )
+        except Exception as exc:
+            messagebox.showerror("Camera", f"Failed to capture from camera {cam_idx}: {exc}")
+        finally:
+            try:
+                cap_service.stop()
+            except Exception:
+                pass
+
+    def _calculate_hsv_from_image(self) -> None:
+        """Calculate HSV lower/upper from the picked reference image.
+
+        Uses the Part Ready ROI to crop the region of interest, then computes
+        mean ± 2*std in HSV space.  Results are editable afterwards.
+        """
+        if self._preset_hsv_image is None:
+            messagebox.showwarning("HSV", "Pick an image first.")
+            return
+
+        try:
+            # Crop using Part Ready ROI values
+            h, w = self._preset_hsv_image.shape[:2]
+            x = max(0, min(w - 1, int(_float_or_default(self.part_ready_roi_x_var.get(), 0.2) * w)))
+            y = max(0, min(h - 1, int(_float_or_default(self.part_ready_roi_y_var.get(), 0.2) * h)))
+            roi_w = max(1, int(_float_or_default(self.part_ready_roi_w_var.get(), 0.25) * w))
+            roi_h = max(1, int(_float_or_default(self.part_ready_roi_h_var.get(), 0.25) * h))
+            x2 = min(w, x + roi_w)
+            y2 = min(h, y + roi_h)
+            roi = self._preset_hsv_image[y:y2, x:x2]
+
+            if roi.size == 0:
+                messagebox.showwarning("HSV", "ROI is empty. Check ROI values.")
+                return
+
+            hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            mean = hsv_roi.mean(axis=(0, 1))
+            std = hsv_roi.std(axis=(0, 1))
+
+            lower = [max(0, int(mean[i] - 2 * std[i])) for i in range(3)]
+            upper = [min(255, int(mean[i] + 2 * std[i])) for i in range(3)]
+            # Clamp H to 180
+            lower[0] = min(180, lower[0])
+            upper[0] = min(180, upper[0])
+
+            self.part_ready_hsv_lower_var.set(f"{lower[0]},{lower[1]},{lower[2]}")
+            self.part_ready_hsv_upper_var.set(f"{upper[0]},{upper[1]},{upper[2]}")
+
+            messagebox.showinfo(
+                "HSV",
+                f"Calculated from ROI ({x},{y}→{x2},{y2}):\n"
+                f"  Mean HSV: {mean[0]:.0f}, {mean[1]:.0f}, {mean[2]:.0f}\n"
+                f"  Lower: {lower[0]},{lower[1]},{lower[2]}\n"
+                f"  Upper: {upper[0]},{upper[1]},{upper[2]}\n\n"
+                f"You can edit these values to fine-tune.",
+            )
+        except Exception as exc:
+            messagebox.showerror("HSV", f"Calculation failed: {exc}")
 
     def save_and_deploy_preset(self) -> None:
         try:
@@ -971,6 +1137,12 @@ class AdminScreen(ctk.CTkFrame):
             version_id = int(saved.get("version_id") or saved.get("current_version_id") or 0)
             if not template_id or not version_id:
                 raise ValueError("Saved preset did not return template id and version id.")
+            # Auto-transition lifecycle: draft → review → approved → published
+            for transition in ("review", "approved", "published"):
+                try:
+                    self.api.transition_template_lifecycle(template_id, transition, f"Auto-transition on deploy")
+                except Exception:
+                    pass  # ignore if transition not allowed (e.g. already in that state)
             deployment = self.api.deploy_template(
                 {
                     "template_id": template_id,
@@ -1017,7 +1189,10 @@ class AdminScreen(ctk.CTkFrame):
             "name": name,
             "description": self.preset_description_var.get().strip(),
             "is_active": True,
-            "camera": {"camera_index": 0, "width": None, "height": None, "fps": None},
+            "camera": {
+                "camera_index": int(_float_or_default(self.preset_camera_index_var.get(), 0)),
+                "width": None, "height": None, "fps": None,
+            },
             "part_ready_roi": {
                 "x": _float_or_default(self.part_ready_roi_x_var.get(), 0.2),
                 "y": _float_or_default(self.part_ready_roi_y_var.get(), 0.2),
@@ -1034,7 +1209,7 @@ class AdminScreen(ctk.CTkFrame):
                 "model_path": model_path,
                 "model_meta_path": self.preset_model_meta_path_var.get().strip() or None,
                 "runtime": "ultralytics",
-                "conf_threshold": _float_or_default(self.preset_conf_threshold_var.get(), 0.25),
+                "conf_threshold": _float_or_default(self.preset_conf_threshold_var.get(), 0.15),
                 "stream_fps": 10.0,
                 "inference_fps": 4.0,
                 "imgsz": 640,
@@ -2222,41 +2397,26 @@ class AdminScreen(ctk.CTkFrame):
 
         btn_bar = ttk.Frame(left)
         btn_bar.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        ttk.Button(btn_bar, text="Refresh", command=self._admin_refresh_models).pack(side="left")
+        ttk.Button(btn_bar, text="Refresh", command=self.refresh_model_options).pack(side="left")
         ttk.Button(btn_bar, text="Export", command=self._admin_export_model).pack(side="left", padx=4)
         ttk.Button(btn_bar, text="Delete", command=self._admin_delete_model).pack(side="left")
 
         right = ttk.LabelFrame(shell, text="Import / Detail", padding=8)
         right.grid(row=0, column=1, sticky="nsew")
 
-        import_frame = ttk.LabelFrame(right, text="Import Model", padding=6)
+        import_frame = ttk.LabelFrame(right, text="Upload Model (.pt)", padding=6)
         import_frame.pack(fill="x")
         self._admin_import_path_var = tk.StringVar(value="No file selected")
+        self._admin_import_name_var = tk.StringVar()
+        ttk.Label(import_frame, text="Model Name:").pack(anchor="w")
+        ttk.Entry(import_frame, textvariable=self._admin_import_name_var).pack(fill="x", pady=(2, 4))
         ttk.Button(import_frame, text="Choose .pt File", command=self._admin_choose_import_file).pack(anchor="w")
         ttk.Label(import_frame, textvariable=self._admin_import_path_var, wraplength=300).pack(anchor="w", pady=(2, 0))
-        ttk.Button(import_frame, text="Import", command=self._admin_import_model).pack(anchor="w", pady=(4, 0))
+        ttk.Button(import_frame, text="Upload", command=self._admin_import_model).pack(anchor="w", pady=(4, 0))
         self._admin_import_path: str = ""
 
         self._admin_model_detail_var = tk.StringVar(value="Select a model to view details.")
         ttk.Label(right, textvariable=self._admin_model_detail_var, foreground="#475569", wraplength=400, justify="left").pack(anchor="w", pady=(10, 0))
-
-    def _admin_refresh_models(self) -> None:
-        def _load():
-            return self.api.list_models()
-        def _done(result, error):
-            if error or not isinstance(result, list):
-                return
-            self._models_cache = result
-            self._admin_model_list.delete(0, "end")
-            self._model_lookup = {}
-            for item in result:
-                name = str(item.get("name") or "")
-                path = str(item.get("path") or "")
-                status = str(item.get("status") or "")
-                display = f"{name} | {status} | {path}"
-                self._admin_model_list.insert("end", display)
-                self._model_lookup[display] = item
-        run_async(self, _load, callback=_done)
 
     def _on_admin_model_selected(self, _event=None) -> None:
         sel = self._admin_model_list.curselection()
@@ -2276,16 +2436,28 @@ class AdminScreen(ctk.CTkFrame):
 
     def _admin_import_model(self) -> None:
         if not self._admin_import_path:
-            messagebox.showwarning("Import", "Choose a .pt file first.")
+            messagebox.showwarning("Upload", "Choose a .pt file first.")
+            return
+        name = self._admin_import_name_var.get().strip()
+        if not name:
+            messagebox.showwarning("Upload", "Enter a model name.")
             return
         try:
-            self.api.import_model_archive(self._admin_import_path)
+            self.api.upload_model_file(
+                {
+                    "name": name,
+                    "file_name": Path(self._admin_import_path).name,
+                    "content_b64": base64.b64encode(Path(self._admin_import_path).read_bytes()).decode("ascii"),
+                }
+            )
         except Exception as exc:
-            messagebox.showerror("Import", str(exc))
+            messagebox.showerror("Upload", str(exc))
             return
         self._admin_import_path = ""
         self._admin_import_path_var.set("No file selected")
-        self._admin_refresh_models()
+        self._admin_import_name_var.set("")
+        self.refresh_model_options()
+        messagebox.showinfo("Upload", f"Model '{name}' uploaded successfully.")
 
     def _admin_export_model(self) -> None:
         sel = self._admin_model_list.curselection()
@@ -2317,9 +2489,11 @@ class AdminScreen(ctk.CTkFrame):
             return
         try:
             self.api.delete_model(int(model_id))
+            self.refresh_model_options()
+            self._admin_model_detail_var.set("Select a model to view details.")
+            messagebox.showinfo("Delete", f"Model '{model.get('name')}' deleted.")
         except Exception as exc:
             messagebox.showerror("Delete", str(exc))
-        self._admin_refresh_models()
 
     # ==================================================================
     # Calibration Tab - Color calibration profiles

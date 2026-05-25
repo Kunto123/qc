@@ -134,6 +134,18 @@ class AppConfig:
         int(os.getenv("QC_SUITE_PLC_MODBUS_READBACK_EXPECTED_RELEASE_VALUE", "0")),
     )
 
+    # ── 4-Relay + 2-Input Modbus mapping ──
+    # Coil addresses (FC05/FC15) — 4 output relays
+    plc_relay_clamp_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_CLAMP_ADDRESS", "0")))
+    plc_relay_buzzer_green_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_BUZZER_GREEN_ADDRESS", "1")))
+    plc_relay_red_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_RED_ADDRESS", "2")))
+    plc_relay_buzzer_reject_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_BUZZER_REJECT_ADDRESS", "3")))
+    # Input addresses (FC02) — 2 digital inputs
+    plc_input_release_address: int = max(0, int(os.getenv("QC_SUITE_PLC_INPUT_RELEASE_ADDRESS", "0")))
+    plc_input_template_address: int = max(0, int(os.getenv("QC_SUITE_PLC_INPUT_TEMPLATE_ADDRESS", "1")))
+    # Accept pulse duration (ms)
+    plc_accept_pulse_ms: int = max(100, int(os.getenv("QC_SUITE_PLC_ACCEPT_PULSE_MS", "1000")))
+
     def _has_sqlserver_credentials(self) -> bool:
         return bool(
             self.sql_server

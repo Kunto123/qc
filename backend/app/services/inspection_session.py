@@ -438,9 +438,23 @@ class InspectionSessionService:
         inference_ms = 0.0
         if _effective_pr_ready:
             inference_started = time.perf_counter()
+            # DEBUG: log sticker ROI and frame info
+            logger.info(
+                "[inference] sticker_roi=%s frame=%dx%d crop=%dx%d",
+                state.template.sticker_roi,
+                frame.shape[1], frame.shape[0],
+                sticker_frame.shape[1], sticker_frame.shape[0],
+            )
             inference_payload = self._run_sticker_inference(sticker_frame, state)
             inference_ms = _elapsed_ms(inference_started)
             detections = list(inference_payload.get("detections") or [])
+            # DEBUG: log detection results
+            logger.info(
+                "[inference] raw=%d filtered=%d expected_class=%s",
+                inference_payload.get("raw_detection_count", 0),
+                len(detections),
+                state.template.sticker.expected_class,
+            )
             stage_timings = dict(inference_payload.get("timings") or {})
             for key, value in stage_timings.items():
                 try:
@@ -520,6 +534,13 @@ class InspectionSessionService:
         persistence_started = time.perf_counter()
         db_write = {"written": False, "reason": "not_committed"}
         if count_committed:
+            # Notify PLC worker of inspection decision
+            decision = validation.get("decision", "")
+            if self._plc_worker is not None and decision in ("ACCEPT", "REJECT"):
+                try:
+                    self._plc_worker.notify_decision(decision, event_id=event_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("[inspection] plc_worker.notify_decision failed: %s", exc)
             db_write = self._maybe_persist(
                 validation,
                 state,
