@@ -51,7 +51,7 @@ class StickerInferenceService:
 
     def _resolve_mode(self) -> str:
         mode = str(self._config.sticker_inference_mode or "auto").strip().lower()
-        return mode if mode in {"auto", "ultralytics", "classic"} else "auto"
+        return mode if mode in {"auto", "ultralytics", "classic", "tflite"} else "auto"
 
     def _resolve_model_path(self, vision: VisionConfig) -> str:
         direct = str(vision.model_path or "").strip()
@@ -88,8 +88,27 @@ class StickerInferenceService:
 
     def _load_yolo_class(self):
         from ultralytics import YOLO  # type: ignore
-
         return YOLO
+
+    def _load_tflite_interpreter(self, model_path: str):
+        """Load TFLite model via tflite_runtime (lightweight, no tensorflow needed)."""
+        resolved = str(Path(model_path).resolve())
+        with self._runtime_lock:
+            interp = self._loaded_models.get(resolved)
+            if interp is not None:
+                return interp
+        try:
+            from tflite_runtime.interpreter import Interpreter  # type: ignore
+            interpreter = Interpreter(model_path=resolved)
+        except ImportError:
+            raise ModuleNotFoundError(
+                "tflite-runtime is required for TFLite inference. "
+                "Install it with: pip install tflite-runtime"
+            )
+        interpreter.allocate_tensors()
+        with self._runtime_lock:
+            self._loaded_models[resolved] = interpreter
+        return interpreter
 
     def _resolve_device(self) -> DeviceResolution:
         return self._device_runtime.resolve()
@@ -207,6 +226,117 @@ class StickerInferenceService:
             "device_backend": device_resolution.backend,
             "device_fallback_reason": device_resolution.fallback_reason,
             "gpu_available": device_resolution.gpu_available,
+        }
+
+    def _predict_tflite(self, image, vision: VisionConfig, expected_class: str | None = None) -> dict[str, Any]:
+        """Run inference via TFLite interpreter (CPU-friendly)."""
+        model_path = self._resolve_model_path(vision)
+        if not model_path:
+            raise FileNotFoundError("Sticker model path is not configured.")
+        resolved_model_path = Path(model_path)
+        if not resolved_model_path.exists():
+            raise FileNotFoundError(f"TFLite model not found: {resolved_model_path}")
+
+        interpreter = self._load_tflite_interpreter(str(resolved_model_path))
+        input_details = interpreter.get_input_details()
+        output_details = interpreter.get_output_details()
+
+        # Get input shape and dtype
+        input_shape = input_details[0]["shape"]  # e.g. [1, 640, 640, 3]
+        input_dtype = input_details[0]["dtype"]
+
+        # Preprocess: resize to model input size, normalize to [0,1]
+        h_in, w_in = int(input_shape[1]), int(input_shape[2])
+        img_resized = cv2.resize(image, (w_in, h_in))
+        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        img_normalized = img_rgb.astype(input_dtype)
+        if input_dtype == np.float32:
+            img_normalized = img_normalized / 255.0
+        input_data = np.expand_dims(img_normalized, axis=0)
+
+        # Run inference
+        interpreter.set_tensor(input_details[0]["index"], input_data)
+        interpreter.invoke()
+        output_data = interpreter.get_tensor(output_details[0]["index"])
+
+        # Parse output: TFLite YOLO output shape is typically [1, num_detections, 6+]
+        # where each detection is [x_center, y_center, w, h, conf, class_id, ...]
+        # or [1, 6+ , num_detections] depending on export format
+        raw_box_count = 0
+        detections = []
+
+        if output_data is not None and output_data.size > 0:
+            # Handle different output formats
+            out = output_data[0]  # remove batch dim
+            # If shape is [num_detections, 6+], iterate rows
+            # If shape is [6+, num_detections], transpose
+            if out.ndim == 2:
+                if out.shape[0] < out.shape[1]:
+                    # Shape is [6+, num_detections] → transpose
+                    out = out.T
+                # Now out is [num_detections, 6+]
+                raw_box_count = int(out.shape[0])
+                for row in out:
+                    conf = float(row[4]) if len(row) > 4 else 0.0
+                    if conf < float(vision.conf_threshold):
+                        continue
+                    class_id = int(row[5]) if len(row) > 5 else 0
+                    # Build detection dict
+                    xc, yc, w_b, h_b = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+                    # Convert from center format to xyxy (normalized 0-1)
+                    x1 = max(0.0, xc - w_b / 2)
+                    y1 = max(0.0, yc - h_b / 2)
+                    x2 = min(1.0, xc + w_b / 2)
+                    y2 = min(1.0, yc + h_b / 2)
+                    detections.append({
+                        "label": str(class_id),
+                        "confidence": round(conf, 4),
+                        "class_confidence": round(conf, 4),
+                        "class_id": class_id,
+                        "position": {"x1": round(x1, 4), "y1": round(y1, 4), "x2": round(x2, 4), "y2": round(y2, 4)},
+                        "bbox": [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)],
+                    })
+
+        # Load class names from meta
+        meta = self._load_meta(self._resolve_meta_path(vision))
+        class_names = meta.get("class_names", [])
+        names_map = {i: name for i, name in enumerate(class_names)}
+
+        # Apply allowed labels filter
+        allowed_label_values = [str(label) for label in (vision.classes or []) if str(label).strip()]
+        if expected_class and str(expected_class).strip():
+            allowed_label_values.append(str(expected_class).strip())
+        if allowed_label_values:
+            for label in (getattr(vision, "text_anchor_class", ""), getattr(vision, "center_dot_class", "")):
+                if str(label or "").strip():
+                    allowed_label_values.append(str(label))
+        allowed_labels = {label.strip().lower() for label in allowed_label_values} or None
+
+        # Filter detections by allowed labels
+        filtered = []
+        for det in detections:
+            label = names_map.get(det["class_id"], str(det["class_id"]))
+            det["label"] = label
+            if allowed_labels is not None:
+                if label.strip().lower() not in allowed_labels:
+                    continue
+            filtered.append(det)
+
+        return {
+            "backend": "tflite",
+            "mode": "tflite",
+            "model_path": str(resolved_model_path),
+            "meta_path": self._resolve_meta_path(vision) or None,
+            "class_names": class_names,
+            "detections": filtered,
+            "raw_detection_count": raw_box_count,
+            "allowed_labels_filter": sorted(allowed_labels) if allowed_labels is not None else None,
+            "fallback_reason": None,
+            "device_mode": "cpu",
+            "effective_device": "cpu",
+            "device_backend": "tflite",
+            "device_fallback_reason": None,
+            "gpu_available": False,
         }
 
     def _select_anchor_detection(
@@ -936,37 +1066,56 @@ class StickerInferenceService:
             payload = self._predict_classic(image, vision, expected_class)
             if use_sticker_only:
                 return self._augment_with_ocr_only(
-                    payload,
-                    image,
-                    vision,
-                    expected_class=expected_class,
-                    sticker_rule=sticker_rule,
+                    payload, image, vision,
+                    expected_class=expected_class, sticker_rule=sticker_rule,
                 )
             return self._augment_with_anchor_ocr(
-                payload,
-                image,
-                vision,
-                expected_class=expected_class,
-                sticker_rule=sticker_rule,
+                payload, image, vision,
+                expected_class=expected_class, sticker_rule=sticker_rule,
             )
 
+        # Auto-detect TFLite from file extension when mode is "auto"
+        if mode == "auto":
+            model_path = self._resolve_model_path(vision)
+            if model_path and Path(model_path).suffix.lower() == ".tflite":
+                mode = "tflite"
+            else:
+                mode = "ultralytics"
+
+        # TFLite mode: CPU-only, no GPU device resolution needed
+        if mode == "tflite":
+            try:
+                payload = self._predict_tflite(image, vision, expected_class=expected_class)
+                if use_sticker_only:
+                    return self._augment_with_ocr_only(
+                        payload, image, vision,
+                        expected_class=expected_class, sticker_rule=sticker_rule,
+                    )
+                return self._augment_with_anchor_ocr(
+                    payload, image, vision,
+                    expected_class=expected_class, sticker_rule=sticker_rule,
+                )
+            except Exception as exc:
+                logging.warning("TFLite inference failed, fallback to classic: %s", exc)
+                payload = self._predict_classic(image, vision, expected_class)
+                payload["fallback_reason"] = f"tflite_error: {exc}"
+                return self._augment_with_anchor_ocr(
+                    payload, image, vision,
+                    expected_class=expected_class, sticker_rule=sticker_rule,
+                )
+
+        # Ultralytics mode (auto/ultralytics)
         device_resolution = self._resolve_device()
         try:
             payload = self._predict_ultralytics(image, vision, device_resolution, expected_class=expected_class)
             if use_sticker_only:
                 return self._augment_with_ocr_only(
-                    payload,
-                    image,
-                    vision,
-                    expected_class=expected_class,
-                    sticker_rule=sticker_rule,
+                    payload, image, vision,
+                    expected_class=expected_class, sticker_rule=sticker_rule,
                 )
             return self._augment_with_anchor_ocr(
-                payload,
-                image,
-                vision,
-                expected_class=expected_class,
-                sticker_rule=sticker_rule,
+                payload, image, vision,
+                expected_class=expected_class, sticker_rule=sticker_rule,
             )
         except Exception as exc:
             if mode == "ultralytics":

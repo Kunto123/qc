@@ -696,7 +696,8 @@ class AdminScreen(ctk.CTkFrame):
             for item in models:
                 raw_name = item.get("name") or item.get("path") or "model"
                 raw_path = str(item.get("path") or "").strip()
-                label = f"{item.get('id')} | {raw_name}"
+                raw_runtime = str(item.get("runtime") or "ultralytics").strip()
+                label = f"{item.get('id')} | {raw_name} | {raw_runtime}"
                 if raw_path:
                     label = f"{label} | {raw_path}"
                 values.append(label)
@@ -714,7 +715,8 @@ class AdminScreen(ctk.CTkFrame):
                 name = str(item.get("name") or "")
                 path = str(item.get("path") or "")
                 status = str(item.get("status") or "")
-                display = f"{name} | {status} | {path}"
+                runtime = str(item.get("runtime") or "ultralytics")
+                display = f"{name} | {runtime} | {status} | {path}"
                 self._admin_model_list.insert("end", display)
                 self._model_lookup[display] = dict(item)
 
@@ -2562,13 +2564,20 @@ class AdminScreen(ctk.CTkFrame):
         right = ttk.LabelFrame(shell, text="Import / Detail", padding=8)
         right.grid(row=0, column=1, sticky="nsew")
 
-        import_frame = ttk.LabelFrame(right, text="Upload Model (.pt)", padding=6)
+        import_frame = ttk.LabelFrame(right, text="Upload Model (.pt / .tflite)", padding=6)
         import_frame.pack(fill="x")
         self._admin_import_path_var = tk.StringVar(value="No file selected")
         self._admin_import_name_var = tk.StringVar()
+        self._admin_import_format_var = tk.StringVar(value="auto")
         ttk.Label(import_frame, text="Model Name:").pack(anchor="w")
         ttk.Entry(import_frame, textvariable=self._admin_import_name_var).pack(fill="x", pady=(2, 4))
-        ttk.Button(import_frame, text="Choose .pt File", command=self._admin_choose_import_file).pack(anchor="w")
+        fmt_row = ttk.Frame(import_frame)
+        fmt_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(fmt_row, text="Format:").pack(side="left")
+        ttk.Radiobutton(fmt_row, text="Auto-detect", variable=self._admin_import_format_var, value="auto").pack(side="left", padx=(4, 0))
+        ttk.Radiobutton(fmt_row, text="PyTorch (.pt)", variable=self._admin_import_format_var, value="pt").pack(side="left", padx=(4, 0))
+        ttk.Radiobutton(fmt_row, text="TFLite (.tflite)", variable=self._admin_import_format_var, value="tflite").pack(side="left", padx=(4, 0))
+        ttk.Button(import_frame, text="Choose File", command=self._admin_choose_import_file).pack(anchor="w")
         ttk.Label(import_frame, textvariable=self._admin_import_path_var, wraplength=300).pack(anchor="w", pady=(2, 0))
         ttk.Button(import_frame, text="Upload", command=self._admin_import_model).pack(anchor="w", pady=(4, 0))
         self._admin_import_path: str = ""
@@ -2583,29 +2592,59 @@ class AdminScreen(ctk.CTkFrame):
         display = self._admin_model_list.get(sel[0])
         model = self._model_lookup.get(display, {})
         if model:
-            detail = f"Name: {model.get('name')}\nPath: {model.get('path')}\nStatus: {model.get('status')}\nCreated: {model.get('created_at')}"
+            detail = f"Name: {model.get('name')}\nPath: {model.get('path')}\nRuntime: {model.get('runtime', 'ultralytics')}\nStatus: {model.get('status')}\nCreated: {model.get('created_at')}"
             self._admin_model_detail_var.set(detail)
 
     def _admin_choose_import_file(self) -> None:
-        path = filedialog.askopenfilename(filetypes=[("PyTorch Model", "*.pt")])
+        path = filedialog.askopenfilename(
+            filetypes=[
+                ("All Model Files", "*.pt *.tflite"),
+                ("PyTorch Model", "*.pt"),
+                ("TFLite Model", "*.tflite"),
+            ]
+        )
         if path:
             self._admin_import_path = path
             self._admin_import_path_var.set(Path(path).name)
+            # Auto-detect format from extension
+            ext = Path(path).suffix.lower()
+            if ext == ".tflite":
+                self._admin_import_format_var.set("tflite")
+            elif ext == ".pt":
+                self._admin_import_format_var.set("pt")
+            # Auto-fill model name if empty
+            if not self._admin_import_name_var.get().strip():
+                self._admin_import_name_var.set(Path(path).stem)
 
     def _admin_import_model(self) -> None:
         if not self._admin_import_path:
-            messagebox.showwarning("Upload", "Choose a .pt file first.")
+            messagebox.showwarning("Upload", "Choose a file first.")
             return
         name = self._admin_import_name_var.get().strip()
         if not name:
             messagebox.showwarning("Upload", "Enter a model name.")
             return
+        # Detect format from extension or user selection
+        fmt = self._admin_import_format_var.get()
+        ext = Path(self._admin_import_path).suffix.lower()
+        if fmt == "auto":
+            if ext == ".tflite":
+                runtime = "tflite"
+            elif ext == ".onnx":
+                runtime = "onnx"
+            else:
+                runtime = "ultralytics"
+        elif fmt == "tflite":
+            runtime = "tflite"
+        else:
+            runtime = "ultralytics"
         try:
             self.api.upload_model_file(
                 {
                     "name": name,
                     "file_name": Path(self._admin_import_path).name,
                     "content_b64": base64.b64encode(Path(self._admin_import_path).read_bytes()).decode("ascii"),
+                    "runtime": runtime,
                 }
             )
         except Exception as exc:
@@ -2615,7 +2654,7 @@ class AdminScreen(ctk.CTkFrame):
         self._admin_import_path_var.set("No file selected")
         self._admin_import_name_var.set("")
         self.refresh_model_options()
-        messagebox.showinfo("Upload", f"Model '{name}' uploaded successfully.")
+        messagebox.info("Upload", f"Model '{name}' uploaded ({runtime}).")
 
     def _admin_export_model(self) -> None:
         sel = self._admin_model_list.curselection()

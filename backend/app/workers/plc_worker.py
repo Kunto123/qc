@@ -52,6 +52,8 @@ class PlcWorker:
         self._last_input_press: dict[int, float] = {}
         self._input_debounce_s: float = 0.5
         self._template_cycle_event_id: int = 0
+        self._last_template_cycle_at: float | None = None
+        self._last_input_snapshot: list[bool] = []
         # Template cycling callback
         self._template_cycle_callback = None
         # State change callback (called when PLC state changes)
@@ -129,6 +131,8 @@ class PlcWorker:
                 "state": self._state,
                 "connected": self._adapter.is_connected(),
                 "template_cycle_event_id": self._template_cycle_event_id,
+                "last_template_cycle_at": self._last_template_cycle_at,
+                "last_input_snapshot": list(self._last_input_snapshot),
                 **self._adapter.status(),
             }
 
@@ -239,6 +243,8 @@ class PlcWorker:
                 logger.info("[plc-worker] INPUT 2 — Ganti Template")
                 with self._lock:
                     self._template_cycle_event_id += 1
+                    self._last_template_cycle_at = now
+                    self._last_input_snapshot = list(inputs[:8])
                 if self._template_cycle_callback:
                     try:
                         self._template_cycle_callback()

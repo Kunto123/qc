@@ -50,6 +50,7 @@ class AppConfig:
     sticker_ocr_fail_fast: bool = os.getenv("QC_SUITE_STICKER_OCR_FAIL_FAST", "0").strip() == "1"
     default_ocr_engine: str = os.getenv("QC_SUITE_OCR_ENGINE", "disabled").strip().lower() or "disabled"
     default_ocr_min_confidence: float = max(0.0, min(1.0, float(os.getenv("QC_SUITE_OCR_MIN_CONFIDENCE", "0.70"))))
+    sticker_inference_mode: str = os.getenv("QC_SUITE_STICKER_INFERENCE_MODE", "auto").strip().lower() or "auto"
     default_sticker_model_path: str = DEFAULT_STICKER_MODEL_PATH
     default_sticker_model_meta_path: str = DEFAULT_STICKER_MODEL_META_PATH
     training_engine_mode: str = os.getenv("QC_SUITE_TRAINING_ENGINE_MODE", "real").strip().lower() or "real"

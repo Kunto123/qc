@@ -1627,11 +1627,14 @@ class OperatorScreen(ctk.CTkFrame):
         """Show cached overlay if available, otherwise show raw frame.
 
         This prevents the live view from going blank between backend responses.
+        Does NOT call update_bgr() to avoid freezing the UI — overlay updates
+        are handled by _overlay_render_ui_update() only.
         """
+        # Don't call update_bgr here — it's heavy and called every 100ms poll.
+        # Just update the display source text so user knows the state.
         if self._cached_overlay_frame is not None:
-            self.main_view.update_bgr(self._cached_overlay_frame)
+            self.display_source.set("Right View: Live Camera + ROIs (cached)")
         elif frame is not None:
-            self.main_view.update_bgr(frame)
             self.display_source.set("Right View: Live Camera")
         # else: keep whatever is currently displayed (don't reset)
 
@@ -1726,38 +1729,49 @@ class OperatorScreen(ctk.CTkFrame):
         if event_id <= self._last_plc_template_cycle_event_id:
             return
         self._last_plc_template_cycle_event_id = event_id
-        self._cycle_active_deployment_from_plc()
+        # Cycle template dari dropdown (bukan deployment list)
+        self._cycle_template_dropdown()
 
-    def _cycle_active_deployment_from_plc(self) -> None:
-        """Cycle ke deployment berikutnya berdasarkan IN2 PLC event."""
-        # Gunakan cached deployments, fetch ulang jika belum ada
-        if not hasattr(self, "_plc_deployments_cache") or not self._plc_deployments_cache:
-            try:
-                self._plc_deployments_cache = self.api.list_deployments()
-            except Exception as exc:
-                self.info_var.set(f"IN2 template switch failed: {exc}")
+    def _cycle_template_dropdown(self) -> None:
+        """Ganti template aktif ke template berikutnya di dropdown (wrap-around)."""
+        # Ambil daftar template dari dropdown
+        values = list(self.template_selector.cget("values") or [])
+        if not values:
+            # Dropdown kosong — coba reload
+            self.info_var.set("IN2: memuat template...")
+            self._load_template_choices()
+            values = list(self.template_selector.cget("values") or [])
+            if not values:
+                self.info_var.set("IN2: tidak ada template tersedia.")
                 return
-        deployments = self._plc_deployments_cache
-        active = [item for item in deployments if bool(item.get("is_active", True))]
-        active.sort(key=lambda item: int(item.get("id") or 0))
-        if len(active) <= 1:
-            self.info_var.set("IN2 diterima, tapi hanya ada satu deployment aktif.")
+
+        if len(values) <= 1:
+            self.info_var.set("IN2: hanya satu template tersedia.")
             return
 
-        current_deployment_id = int((self.state.active_deployment or {}).get("id") or 0)
-        current_version_id = int(self.template_version_value.get() or 0)
-        current_index = -1
-        for index, item in enumerate(active):
-            if current_deployment_id and int(item.get("id") or 0) == current_deployment_id:
-                current_index = index
+        # Cari index template saat ini
+        current = self.template_choice.get().strip()
+        current_index = 0
+        for i, v in enumerate(values):
+            if v == current:
+                current_index = i
                 break
-            if not current_deployment_id and current_version_id and int(item.get("template_version_id") or 0) == current_version_id:
-                current_index = index
-                break
-        next_deployment = active[(current_index + 1) % len(active)]
-        self._apply_deployment_record(next_deployment, source="IN2 template switch")
-        # Refresh cache untuk next cycle
-        self._plc_deployments_cache = None
+
+        # Pilih template berikutnya (wrap-around)
+        next_index = (current_index + 1) % len(values)
+        next_label = values[next_index]
+
+        # Set template choice dan trigger selected handler
+        self.template_choice.set(next_label)
+        self._on_template_selected()
+        self.info_var.set(f"IN2 template switch: {next_label.split(' | ')[0]}")
+
+    # Legacy methods — tidak dipakai lagi untuk IN2
+    def _on_plc_deployments_loaded(self, deployments, error) -> None:
+        pass
+
+    def _cycle_active_deployment_from_plc(self) -> None:
+        pass
 
     def _update_plc_badge_from_status(self, status: dict) -> None:
         if not status.get("enabled", True):
@@ -1823,12 +1837,16 @@ class OperatorScreen(ctk.CTkFrame):
                 self._update_status_badges(payload)
 
                 # ---- Overlay rendering (throttled) ----
-                # Rebuild only when payload is genuinely new.  The actual render
-                # is done by _do_scheduled_overlay_render (debounced).  Here we
-                # just update UI text — no image rendering in the fast poll loop.
+                # Only schedule render if:
+                # 1. Payload seq is genuinely new
+                # 2. No render is already scheduled
+                # 3. Last render completed at least 300ms ago
                 current_seq = self._last_payload_seq
-                if current_seq != self._last_rendered_payload_seq:
-                    # New payload arrived — ensure a render is scheduled.
+                if (
+                    current_seq != self._last_rendered_payload_seq
+                    and self._overlay_render_after_id is None
+                    and not (self._overlay_thread is not None and self._overlay_thread.is_alive())
+                ):
                     self._schedule_overlay_render()
 
                 # Timing info
