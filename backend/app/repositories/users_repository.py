@@ -208,7 +208,14 @@ class UsersRepository(JsonRepository):
                 return self._public_record(item)
         raise ValueError("User not found.")
 
-    def set_role(self, user_id: int, role: str) -> dict[str, Any]:
+    def delete_user(self, user_id: int) -> dict[str, Any]:
+        users = self.load()
+        for index, item in enumerate(users):
+            if int(item["id"]) == int(user_id):
+                removed = users.pop(index)
+                self.save(users)
+                return self._public_record(removed)
+        raise ValueError("User not found.")
         role_enum = UserRole(role)
         users = self.load()
         for item in users:

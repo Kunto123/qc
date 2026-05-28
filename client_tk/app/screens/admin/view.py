@@ -208,6 +208,10 @@ class AdminScreen(ctk.CTkFrame):
 
         self.operator_username_var = tk.StringVar()
         self.operator_rfid_var = tk.StringVar()
+        self.operator_role_var = tk.StringVar(value="operator")
+        self.operator_edit_id: int | None = None
+        self.operator_edit_username_var = tk.StringVar()
+        self.operator_edit_role_var = tk.StringVar(value="operator")
 
         self.training_dataset_var = tk.StringVar()
         self.training_base_model_var = tk.StringVar()
@@ -508,44 +512,89 @@ class AdminScreen(ctk.CTkFrame):
         self.operators_left.grid(row=0, column=0, sticky="nsew")
         self.operators_right.grid(row=0, column=1, sticky="nsew")
 
+        # ---- Left: user list ----
         listing = ctk.CTkFrame(self.operators_left, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
         listing.pack(fill="both", expand=True)
         listing.columnconfigure(0, weight=1)
         listing.rowconfigure(2, weight=1)
-        ctk.CTkLabel(listing, text="Operators", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
-        ctk.CTkLabel(listing, text="RFID login users for production operation.", text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
+        ctk.CTkLabel(listing, text="Users", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(listing, text="Manage operators and admins. Edit role or delete users.", text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
         self.users_table = self._build_table(
             listing,
             [
-                ("id", "ID", 60, "center"),
-                ("username", "Username", 190, "w"),
-                ("role", "Role", 110, "center"),
-                ("status", "Status", 100, "center"),
-                ("rfid", "RFID", 100, "center"),
+                ("id", "ID", 50, "center"),
+                ("username", "Username", 140, "w"),
+                ("role", "Role", 80, "center"),
+                ("status", "Status", 80, "center"),
+                ("rfid", "RFID", 80, "center"),
             ],
             row=2,
             height=18,
         )
+        # Bind double-click to edit
+        self.users_table.bind("<Double-1>", self._on_user_double_click)
         footer = self._build_action_row(listing, [("Refresh", self.refresh_operators, "neutral", "left")])
         footer.grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 10))
 
+        # ---- Right: create/edit form ----
         form = ctk.CTkFrame(self.operators_right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
         form.pack(fill="x")
         form.columnconfigure(1, weight=1)
-        ctk.CTkLabel(form, text="RFID Quick Add", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 0))
-        ctk.CTkLabel(form, text="Create an operator and bind the scanned card in one step.", text_color=TEXT_SECONDARY, wraplength=420, justify="left").grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 10))
+
+        self.operator_form_title = ctk.CTkLabel(form, text="Add User", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY)
+        self.operator_form_title.grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 0))
+
+        self.operator_form_hint = ctk.CTkLabel(form, text="Create a new user and bind RFID card.", text_color=TEXT_SECONDARY, wraplength=420, justify="left")
+        self.operator_form_hint.grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 10))
+
         self._entry(form, 2, 0, "Username", self.operator_username_var, columns=2)
         self._entry(form, 3, 0, "RFID UID", self.operator_rfid_var, columns=2)
-        ctk.CTkButton(
-            form,
-            text="Create Operator",
-            command=self.create_operator_from_rfid,
+
+        # Role dropdown
+        ttk.Label(form, text="Role").grid(row=4, column=0, sticky="w", padx=(12, 8), pady=5)
+        role_combo = ttk.Combobox(form, textvariable=self.operator_role_var, values=("operator", "admin"), state="readonly", width=18)
+        role_combo.grid(row=4, column=1, sticky="ew", padx=(0, 12), pady=5)
+
+        # Action buttons row
+        btn_row = ctk.CTkFrame(form, fg_color="transparent")
+        btn_row.grid(row=5, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 10))
+
+        self.operator_save_btn = ctk.CTkButton(
+            btn_row,
+            text="Create User",
+            command=self._on_save_user,
             fg_color=ACCENT,
             hover_color=ACCENT_HOVER,
             text_color=TEXT_ON_ACCENT,
             height=32,
             corner_radius=6,
-        ).grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 10))
+        )
+        self.operator_save_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        self.operator_cancel_btn = ctk.CTkButton(
+            btn_row,
+            text="Cancel Edit",
+            command=self._on_cancel_edit,
+            fg_color="#475569",
+            hover_color="#64748b",
+            text_color="#f8fafc",
+            height=32,
+            corner_radius=6,
+        )
+        self.operator_cancel_btn.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        # Delete button (separate row, danger color)
+        self.operator_delete_btn = ctk.CTkButton(
+            form,
+            text="Delete User",
+            command=self._on_delete_user,
+            fg_color="#991b1b",
+            hover_color="#7f1d1d",
+            text_color="#fef2f2",
+            height=32,
+            corner_radius=6,
+        )
+        self.operator_delete_btn.grid(row=6, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 10))
 
     def _build_monitor_tab(self) -> None:
         self.monitor_tab.columnconfigure(0, weight=1)
@@ -895,11 +944,11 @@ class AdminScreen(ctk.CTkFrame):
 
     def _render_operators(self) -> None:
         self._clear_tree(self.users_table)
-        operators = [item for item in self._users_cache if str(item.get("role") or "").strip().lower() == "operator"]
-        if not operators:
-            self.users_table.insert("", "end", iid="__empty__", values=("-", "No operators.", "", "", ""))
+        users = list(self._users_cache)
+        if not users:
+            self.users_table.insert("", "end", iid="__empty__", values=("-", "No users.", "", "", ""))
             return
-        for item in operators:
+        for item in users:
             rfid_status = "Bound" if item.get("rfid_bound") else "Unbound"
             if item.get("rfid_uid_last4"):
                 rfid_status = f"*{_safe_text(item.get('rfid_uid_last4'))}"
@@ -915,6 +964,108 @@ class AdminScreen(ctk.CTkFrame):
                     rfid_status,
                 ),
             )
+
+    # ------------------------------------------------------------------
+    # User CRUD handlers
+    # ------------------------------------------------------------------
+
+    def _on_user_double_click(self, event) -> None:
+        """Load selected user into the edit form."""
+        sel = self.users_table.selection()
+        if not sel:
+            return
+        user_id = int(sel[0])
+        users = {int(u.get("id")): u for u in self._users_cache}
+        user = users.get(user_id)
+        if user is None:
+            return
+        self.operator_edit_id = user_id
+        self.operator_edit_username_var.set(user.get("username", ""))
+        self.operator_edit_role_var.set(str(user.get("role") or "operator").strip().lower())
+        self.operator_form_title.configure(text=f"Edit User #{user_id}")
+        self.operator_form_hint.configure(text="Change the role or delete this user.")
+        self.operator_username_var.set(user.get("username", ""))
+        self.operator_role_var.set(str(user.get("role") or "operator").strip().lower())
+        self.operator_save_btn.configure(text="Save Changes")
+        self.operator_cancel_btn.configure(state="normal")
+        self.operator_delete_btn.configure(state="normal")
+
+    def _on_cancel_edit(self) -> None:
+        """Reset the form back to create mode."""
+        self.operator_edit_id = None
+        self.operator_username_var.set("")
+        self.operator_rfid_var.set("")
+        self.operator_role_var.set("operator")
+        self.operator_form_title.configure(text="Add User")
+        self.operator_form_hint.configure(text="Create a new user and bind RFID card.")
+        self.operator_save_btn.configure(text="Create User")
+        self.operator_cancel_btn.configure(state="disabled")
+        self.operator_delete_btn.configure(state="disabled")
+
+    def _on_save_user(self) -> None:
+        """Create new user or update existing user's role."""
+        username = self.operator_username_var.get().strip()
+        if not username:
+            messagebox.showerror("Users", "Username is required.")
+            return
+
+        if self.operator_edit_id is not None:
+            # Edit mode — update role
+            user_id = self.operator_edit_id
+            new_role = self.operator_role_var.get().strip()
+            try:
+                self.api.change_user_role(user_id, new_role)
+            except Exception as exc:
+                messagebox.showerror("Users", str(exc))
+                return
+            self._on_cancel_edit()
+            self.refresh_operators()
+            self._set_status(f"User #{user_id} role changed to {new_role}.")
+        else:
+            # Create mode
+            rfid_uid = self.operator_rfid_var.get().strip()
+            role = self.operator_role_var.get().strip()
+            if not rfid_uid:
+                messagebox.showerror("Users", "Scan RFID card first.")
+                return
+            try:
+                created = self.api.create_user({
+                    "username": username,
+                    "password": _random_password(),
+                    "role": role,
+                })
+                user_id = int(created.get("id") or 0)
+                if user_id <= 0:
+                    raise ValueError("API did not return a valid user id.")
+                self.api.bind_user_rfid(user_id, rfid_uid)
+            except Exception as exc:
+                messagebox.showerror("Users", str(exc))
+                return
+            self.operator_username_var.set("")
+            self.operator_rfid_var.set("")
+            self.operator_role_var.set("operator")
+            self.refresh_operators()
+            self._set_status(f"User {username} ({role}) created and RFID bound.")
+
+    def _on_delete_user(self) -> None:
+        """Delete the selected user after confirmation."""
+        if self.operator_edit_id is None:
+            return
+        user_id = self.operator_edit_id
+        username = self.operator_username_var.get().strip()
+        if not messagebox.askyesno(
+            "Delete User",
+            f"Permanently delete user '{username}' (#{user_id})?\n\nThis action cannot be undone.",
+        ):
+            return
+        try:
+            self.api.delete_user(user_id)
+        except Exception as exc:
+            messagebox.showerror("Users", str(exc))
+            return
+        self._on_cancel_edit()
+        self.refresh_operators()
+        self._set_status(f"User '{username}' (#{user_id}) deleted.")
 
     def _render_monitor_results(self) -> None:
         self._clear_tree(self.results_table)
@@ -1883,9 +2034,9 @@ class AdminScreen(ctk.CTkFrame):
 
     def _update_overview_cards(self) -> None:
         active_presets = sum(1 for item in self._deployments_cache if bool(item.get("is_active", True)))
-        operators = sum(1 for item in self._users_cache if str(item.get("role") or "").lower() == "operator")
+        total_users = len(self._users_cache)
         self.admin_cards["presets"].set_value(active_presets, "active")
-        self.admin_cards["operators"].set_value(operators, "RFID users")
+        self.admin_cards["operators"].set_value(total_users, "total users")
 
     def _on_resize(self, _event=None) -> None:
         self.after_idle(self._apply_responsive_layout)

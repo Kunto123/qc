@@ -476,6 +476,16 @@ class PostgresUsersRepository(PostgresRepositoryBase):
             raise ValueError("User not found.")
         return record
 
+    def delete_user(self, user_id: int) -> dict[str, Any]:
+        record = self.get_by_id(user_id)
+        if record is None:
+            raise ValueError("User not found.")
+        with self._connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(f"DELETE FROM {self.TABLE_NAME} WHERE id = %s", (int(user_id),))
+                conn.commit()
+        return record
+
     def set_password(self, user_id: int, new_password: str) -> dict[str, Any]:
         if self.get_by_id(user_id) is None:
             raise ValueError("User not found.")

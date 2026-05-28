@@ -285,6 +285,9 @@ class ApiClient:
     def revoke_user_sessions(self, user_id: int) -> dict:
         return self._post(f"/auth/users/{user_id}/revoke-sessions", {})
 
+    def delete_user(self, user_id: int) -> dict:
+        return self._delete(f"/auth/users/{user_id}")
+
     def bind_user_rfid(self, user_id: int, rfid_uid: str) -> dict:
         return self._post(f"/auth/users/{user_id}/rfid", {"rfid_uid": rfid_uid})
 

@@ -357,6 +357,28 @@ def revoke_user_sessions(user_id: int):
     return jsonify({"user_id": user_id, "revoked": revoked})
 
 
+@auth_blueprint.delete("/users/<int:user_id>")
+@require_roles(UserRole.ADMIN)
+def delete_user(user_id: int):
+    target = users_repo.get_by_id(user_id)
+    if target is None:
+        return jsonify({"error": "User not found."}), 404
+    # Prevent self-deletion
+    if user_id == g.current_user.id:
+        return jsonify({"error": "Cannot delete your own account."}), 400
+    removed = users_repo.delete_user(user_id)
+    token_store.revoke_user(user_id)
+    _try_audit(
+        "user_deleted",
+        user_id=user_id,
+        username=removed.get("username"),
+        actor_id=g.current_user.id,
+        actor_username=g.current_user.username,
+        ip_address=_client_ip(),
+    )
+    return jsonify({"ok": True, "deleted": removed.get("id"), "username": removed.get("username")})
+
+
 # ---------------------------------------------------------------------------
 # Audit log (admin only)
 # ---------------------------------------------------------------------------
