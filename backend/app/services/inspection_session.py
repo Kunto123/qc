@@ -217,6 +217,11 @@ class InspectionSessionService:
         self._plc_worker = plc_worker
         self._reject_log_repo = reject_log_repo
         self._operator_state_machine = OperatorInspectionStateMachine()
+        self._idle_timeout_s: int = (
+            max(0, int(app_config.session_idle_timeout_s))
+            if app_config is not None
+            else 300
+        )
         # Register PLC state change callback
         if self._plc_worker is not None:
             self._plc_worker.set_on_state_change_callback(self._on_plc_state_change)
@@ -536,6 +541,7 @@ class InspectionSessionService:
 
         state = self._require_session(session_id)
         state.frame_index += 1
+        state.last_activity_at = time.time()
 
         part_ready_started = time.perf_counter()
         part_ready_frame, part_ready_roi_meta = self._crop_stage_roi(
@@ -912,6 +918,18 @@ class InspectionSessionService:
             state = self._sessions.get(session_id)
         if not state:
             raise ValueError("Inspection session not found.")
+        # Idle timeout: auto-end session if no frames received for too long
+        if (hasattr(self, '_idle_timeout_s') and self._idle_timeout_s > 0):
+            last = float(getattr(state, 'last_activity_at', 0.0) or 0.0)
+            if last > 0 and (time.time() - last) > self._idle_timeout_s:
+                logger.info(
+                    "[inspection] session %s idle for %.0fs > timeout %.0fs — auto-ending",
+                    session_id, time.time() - last, self._idle_timeout_s,
+                )
+                state.status = SessionStatus.STOPPED
+                with self._lock:
+                    self._sessions.pop(session_id, None)
+                raise ValueError("Inspection session stopped: idle timeout reached.")
         return state
 
     def _merged_roi_payload(self, base: RoiGeometry, override: dict[str, Any]) -> dict[str, Any]:

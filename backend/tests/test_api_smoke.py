@@ -3040,24 +3040,6 @@ class ApiSmokeTest(unittest.TestCase):
         resp = self.client.get("/inspection/plc/status", headers=_headers(self.operator_token))
         self.assertEqual(resp.status_code, 403, resp.get_json())
 
-    def test_15c_plc_manual_release_disabled_returns_503(self) -> None:
-        """POST /inspection/plc/release returns 503 when PLC worker is disabled."""
-        resp = self.client.post(
-            "/inspection/plc/release",
-            json={"reason": "test"},
-            headers=_headers(self.admin_token),
-        )
-        self.assertEqual(resp.status_code, 503, resp.get_json())
-
-    def test_15d_plc_manual_release_requires_admin(self) -> None:
-        """POST /inspection/plc/release is admin-only."""
-        resp = self.client.post(
-            "/inspection/plc/release",
-            json={},
-            headers=_headers(self.operator_token),
-        )
-        self.assertEqual(resp.status_code, 403, resp.get_json())
-
     def test_15e_plc_worker_enqueue_once_per_commit(self) -> None:
         """A committed inspection must enqueue exactly one PLC command.
 

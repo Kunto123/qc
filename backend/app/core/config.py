@@ -99,7 +99,7 @@ class AppConfig:
     #   inherit QC_SUITE_HOST so the two servers share the same bind address.
     # Inference interval (ms): minimum time between YOLO inference runs.
     # 200 = max ~5 fps inference. 0 = every frame (unlimited).
-    inference_interval_ms: int = max(0, int(os.getenv("QC_SUITE_INFERENCE_INTERVAL_MS", "200")))
+    inference_interval_ms: int = max(0, int(os.getenv("QC_SUITE_INFERENCE_INTERVAL_MS", "0")))
 
     stream_port: int = max(1, int(os.getenv("QC_SUITE_STREAM_PORT", "8101")))
     stream_host: str = os.getenv("QC_SUITE_STREAM_HOST", "").strip()
@@ -160,6 +160,9 @@ class AppConfig:
     plc_clamp_feedback_fallback_delay_ms: int = max(0, int(os.getenv("QC_SUITE_PLC_CLAMP_FEEDBACK_FALLBACK_DELAY_MS", "300")))
     # Accept pulse duration (ms)
     plc_accept_pulse_ms: int = max(100, int(os.getenv("QC_SUITE_PLC_ACCEPT_PULSE_MS", "1000")))
+    # Session idle timeout (seconds): auto-end session after no frames received
+    # for this duration. 0 = disabled (no auto-end). Default 300s (5 minutes).
+    session_idle_timeout_s: int = max(0, int(os.getenv("QC_SUITE_SESSION_IDLE_TIMEOUT_S", "300")))
 
     def _has_sqlserver_credentials(self) -> bool:
         return bool(

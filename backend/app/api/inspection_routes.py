@@ -376,43 +376,6 @@ def export_inspections():
     )
 
 
-@inspection_blueprint.post("/inspection/plc/release")
-@require_roles(UserRole.ADMIN)
-def plc_manual_release():
-    """Admin manual clamp release — enqueues an immediate release command to the PLC worker.
-
-    Returns 503 when PLC is disabled (QC_SUITE_PLC_ENABLED=0).
-    """
-    if plc_worker is None:
-        return jsonify({"error": "PLC worker is disabled (QC_SUITE_PLC_ENABLED=0)"}), 503
-    reason = str((request.get_json(silent=True) or {}).get("reason") or "manual_admin").strip() or "manual_admin"
-    plc_worker.force_release(reason=reason)
-    _try_audit(
-        "plc_manual_release",
-        actor_id=g.current_user.id,
-        actor_username=g.current_user.username,
-        ip_address=_client_ip(),
-        details=json.dumps({"reason": reason}, ensure_ascii=True),
-    )
-    return jsonify({"ok": True, "queued": "clamp_release", "reason": reason})
-
-
-@inspection_blueprint.post("/inspection/plc/sticker-done")
-@require_roles(UserRole.OPERATOR, UserRole.ADMIN)
-def plc_sticker_done():
-    """Operator signals sticker placement is complete — releases the clamp."""
-    if plc_worker is None:
-        return jsonify({"error": "PLC worker is disabled (QC_SUITE_PLC_ENABLED=0)"}), 503
-    plc_worker.force_release(reason="sticker_done")
-    _try_audit(
-        "plc_sticker_done",
-        actor_id=g.current_user.id,
-        actor_username=g.current_user.username,
-        ip_address=_client_ip(),
-        details=json.dumps({"reason": "sticker_done"}, ensure_ascii=True),
-    )
-    return jsonify({"ok": True, "queued": "clamp_release", "reason": "sticker_done"})
-
 
 @inspection_blueprint.get("/inspection/plc/status")
 @require_roles(UserRole.OPERATOR, UserRole.ADMIN)

@@ -68,3 +68,6 @@ class SessionState:
     # Manual release COOLDOWN: timestamp (seconds since epoch) until which
     # re-clamp is blocked after IN1 (manual release). Prevents instant re-clamp.
     manual_release_cooldown_until: float = 0.0
+    # Last activity timestamp (seconds since epoch) — updated on every frame process.
+    # Used for idle timeout auto-end.
+    last_activity_at: float = 0.0

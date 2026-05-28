@@ -207,11 +207,17 @@ class PlcWorker:
                 logger.error("[plc-worker] state change callback error: %s", exc)
 
     def _write_coil(self, addr: int, value: bool) -> None:
-        """Write coil with timeout protection. Raises on error."""
-        try:
-            self._adapter.write_coil(addr, value)
-        except Exception as exc:
-            logger.error("[plc-worker] write_coil addr=%d failed: %s", addr, exc)
+        """Write coil with retry and timeout protection. Raises on persistent error."""
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                self._adapter.write_coil(addr, value)
+                return
+            except Exception as exc:
+                logger.error("[plc-worker] write_coil addr=%d attempt %d failed: %s", addr, attempt, exc)
+                if attempt < max_retries:
+                    time.sleep(0.1 * attempt)
+        raise RuntimeError(f"write_coil addr={addr} failed after {max_retries} attempts")
 
     def _all_off(self, reason: str) -> None:
         try:
@@ -330,7 +336,13 @@ class PlcWorker:
         try:
             inputs = self._adapter.read_inputs(address=0, count=_INPUT_READ_COUNT)
         except Exception as exc:
-            logger.warning("[plc-worker] read_inputs error: %s", exc)
+            logger.warning("[plc-worker] read_inputs error: %s — attempting reconnect", exc)
+            # Try to reconnect — if this fails, we'll retry next poll cycle
+            try:
+                self._adapter.connect()
+                logger.info("[plc-worker] reconnect successful after read error")
+            except Exception as reconnect_exc:
+                logger.error("[plc-worker] reconnect failed: %s", reconnect_exc)
             return
         if not inputs or len(inputs) < 2:
             return

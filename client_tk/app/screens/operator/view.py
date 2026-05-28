@@ -59,7 +59,6 @@ class OperatorScreen(ctk.CTkFrame):
         self._closed = False
         self._machine_id = f"{platform.node() or 'workstation'}-{uuid.getnode():012x}"
         self._settings_window: tk.Toplevel | None = None
-        self._plc_release_window: tk.Toplevel | None = None
         self._template_lookup: dict[str, dict] = {}
         self._template_detail_lookup: dict[int, dict] = {}
         self._template_version_detail_lookup: dict[int, dict] = {}
@@ -249,32 +248,6 @@ class OperatorScreen(ctk.CTkFrame):
         )
         self.decision_subtitle.pack(anchor="w", padx=12, pady=(0, 6))
 
-        self.stiker_terpasang_btn = ctk.CTkButton(
-            self.decision_status_frame,
-            text="✓ Stiker Terpasang",
-            command=self._on_stiker_terpasang,
-            fg_color=SUCCESS,
-            hover_color=SUCCESS_HOVER,
-            text_color=TEXT_ON_ACCENT,
-            font=("Segoe UI", 11, "bold"),
-            corner_radius=10,
-            height=34,
-            state="disabled",
-        )
-        self.stiker_terpasang_btn.pack(fill="x", padx=12, pady=(0, 4))
-
-        self.plc_release_btn = ctk.CTkButton(
-            self.decision_status_frame,
-            text="Release Clamp",
-            command=self._open_plc_release_dialog,
-            fg_color="#7f1d1d",
-            hover_color="#991b1b",
-            text_color="#fef2f2",
-            font=("Segoe UI", 11, "bold"),
-            corner_radius=10,
-            height=34,
-        )
-        self.plc_release_btn.pack(fill="x", padx=12, pady=(0, 4))
         self.plc_status_label = ctk.CTkLabel(
             self.decision_status_frame,
             text="",
@@ -554,7 +527,7 @@ class OperatorScreen(ctk.CTkFrame):
         try:
             items = self.api.list_templates()
         except Exception as exc:  # noqa: BLE001
-            self.info_var.set(f"Failed to load template list: {exc}")
+            self.info_var.set(OperatorScreen._friendly_error(exc, "Gagal memuat template"))
             return
         values: list[str] = []
         self._template_lookup = {}
@@ -1193,7 +1166,7 @@ class OperatorScreen(ctk.CTkFrame):
         try:
             detail = self._fetch_template_detail(template_id)
         except Exception as exc:  # noqa: BLE001
-            self.info_var.set(f"Failed to sync template detail: {exc}")
+            self.info_var.set(OperatorScreen._friendly_error(exc, "Gagal sinkronisasi template"))
             return
         self._apply_template_detail(detail)
         self.info_var.set(f"Template ROI synced: {detail.get('name')} v{detail.get('version_number')}")
@@ -1219,7 +1192,7 @@ class OperatorScreen(ctk.CTkFrame):
             detail = self._fetch_template_detail(int(item["id"]))
         except Exception as exc:  # noqa: BLE001
             self.template_version_value.set(str(item.get("version_id") or ""))
-            self.info_var.set(f"Failed to load template detail: {exc}")
+            self.info_var.set(OperatorScreen._friendly_error(exc, "Gagal memuat detail template"))
         else:
             if session_was_running:
                 self._stop_session()
@@ -1258,159 +1231,42 @@ class OperatorScreen(ctk.CTkFrame):
         bg, fg = BADGE_COLORS.get(tone, BADGE_COLORS["neutral"])
         self.badges[key].configure(text=f"{key}: {value}", fg_color=bg, text_color=fg)
 
-    def _on_stiker_terpasang(self) -> None:
-        self.stiker_terpasang_btn.configure(state="disabled")
-
-        def _work():
-            return self.api.plc_sticker_done()
-
-        def _on_done(result, error):
-            if error:
-                self.plc_status_label.configure(text=f"Gagal release: {error}")
-                self.stiker_terpasang_btn.configure(state="normal")
-            else:
-                self.plc_status_label.configure(text="Stiker terpasang — clamp dilepas.")
-                self._set_badge("PLC", "READY", "success")
-
-        run_async(self, _work, callback=_on_done)
-
-    def _open_plc_release_dialog(self) -> None:
-        if self._plc_release_window and self._plc_release_window.winfo_exists():
-            self._plc_release_window.lift()
-            self._plc_release_window.focus_force()
-            return
-
-        dialog = tk.Toplevel(self)
-        dialog.title("Admin Authorization — Release Clamp")
-        dialog.geometry("400x290")
-        dialog.resizable(False, False)
-        dialog.transient(self.winfo_toplevel())
-        dialog.grab_set()
-        self._plc_release_window = dialog
-        dialog.protocol("WM_DELETE_WINDOW", lambda: self._close_plc_dialog(dialog))
-
-        shell = ttk.Frame(dialog, padding=16)
-        shell.pack(fill="both", expand=True)
-        shell.columnconfigure(1, weight=1)
-
-        ttk.Label(
-            shell,
-            text="Tindakan ini mengirim sinyal release clamp ke PLC.\nHanya admin yang dapat melakukan ini.",
-            foreground="#991b1b",
-            wraplength=340,
-            justify="left",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
-
-        ttk.Label(shell, text="Username Admin:").grid(row=1, column=0, sticky="w", pady=4, padx=(0, 8))
-        username_var = tk.StringVar()
-        ttk.Entry(shell, textvariable=username_var, width=28).grid(row=1, column=1, sticky="ew", pady=4)
-
-        ttk.Label(shell, text="Password Admin:").grid(row=2, column=0, sticky="w", pady=4, padx=(0, 8))
-        password_var = tk.StringVar()
-        ttk.Entry(shell, textvariable=password_var, show="*", width=28).grid(row=2, column=1, sticky="ew", pady=4)
-
-        ttk.Label(shell, text="Alasan:").grid(row=3, column=0, sticky="w", pady=4, padx=(0, 8))
-        reason_var = tk.StringVar(value="manual_admin")
-        ttk.Entry(shell, textvariable=reason_var, width=28).grid(row=3, column=1, sticky="ew", pady=4)
-
-        status_var = tk.StringVar(value="")
-        status_lbl = ttk.Label(shell, textvariable=status_var, foreground="#1d4ed8", wraplength=340, justify="left")
-        status_lbl.grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 4))
-
-        btn_frame = ttk.Frame(shell)
-        btn_frame.grid(row=5, column=0, columnspan=2, sticky="e", pady=(8, 0))
-
-        cancel_btn = ttk.Button(btn_frame, text="Batal", command=lambda: self._close_plc_dialog(dialog))
-        cancel_btn.pack(side="left", padx=(0, 8))
-
-        confirm_btn = ctk.CTkButton(
-            btn_frame,
-            text="Release Clamp ▶",
-            fg_color="#991b1b",
-            hover_color="#7f1d1d",
-            text_color="#fef2f2",
-            font=("Segoe UI", 11, "bold"),
-            command=lambda: self._execute_plc_release(
-                username_var.get().strip(),
-                password_var.get(),
-                reason_var.get().strip() or "manual_admin",
-                status_var,
-                status_lbl,
-                confirm_btn,
-                cancel_btn,
-                dialog,
-            ),
-        )
-        confirm_btn.pack(side="left")
-
-    def _close_plc_dialog(self, dialog: tk.Toplevel) -> None:
-        if dialog.winfo_exists():
-            dialog.destroy()
-        self._plc_release_window = None
-
-    def _execute_plc_release(
-        self,
-        username: str,
-        password: str,
-        reason: str,
-        status_var: tk.StringVar,
-        status_lbl,
-        confirm_btn,
-        cancel_btn,
-        dialog: tk.Toplevel,
-    ) -> None:
-        if not username or not password:
-            status_var.set("Username dan password tidak boleh kosong.")
-            status_lbl.configure(foreground="#991b1b")
-            return
-
-        status_var.set("Mengautentikasi admin...")
-        status_lbl.configure(foreground="#1d4ed8")
-        confirm_btn.configure(state="disabled")
-        cancel_btn.configure(state="disabled")
-
-        def _work():
-            from client_tk.app.api_client import ApiClient
-            temp = ApiClient(self.api.base_url)
-            login_result = temp.login(username, password)
-            token = login_result.get("token")
-            if not token:
-                raise RuntimeError("Login berhasil tapi token tidak ditemukan.")
-            user_info = login_result.get("user") or {}
-            role = str(user_info.get("role") or "").strip().lower()
-            if role != "admin":
-                raise RuntimeError(f"Akun '{username}' bukan admin (role={role or '-'}).")
-            temp.set_token(token)
-            return temp.plc_manual_release(reason)
-
-        def _on_done(result, error):
-            confirm_btn.configure(state="normal")
-            cancel_btn.configure(state="normal")
-            if error:
-                msg = str(error)
-                if "503" in msg or "disabled" in msg.lower():
-                    status_var.set("PLC dinonaktifkan di backend (QC_SUITE_PLC_ENABLED=0).")
-                    self._set_badge("PLC", "DISABLED", "neutral")
-                    self.plc_status_label.configure(text="PLC dinonaktifkan di backend.")
-                elif "403" in msg or "forbidden" in msg.lower():
-                    status_var.set("Akses ditolak. Pastikan akun yang dimasukkan adalah admin.")
-                    self._set_badge("PLC", "DENIED", "danger")
-                elif "401" in msg or "invalid" in msg.lower() or "credentials" in msg.lower():
-                    status_var.set("Login gagal: username atau password salah.")
-                    self._set_badge("PLC", "AUTH ERR", "danger")
-                else:
-                    status_var.set(f"Error: {msg}")
-                    self._set_badge("PLC", "ERROR", "danger")
-                    self.plc_status_label.configure(text=f"PLC error: {msg[:60]}")
-                status_lbl.configure(foreground="#991b1b")
-            else:
-                status_var.set("Clamp berhasil dirilis.")
-                status_lbl.configure(foreground="#166534")
-                self._set_badge("PLC", "RELEASED", "success")
-                self.plc_status_label.configure(text=f"Clamp dirilis oleh admin '{username}'.")
-                dialog.after(1500, lambda: self._close_plc_dialog(dialog))
-
-        run_async(dialog, _work, callback=_on_done)
+    @staticmethod
+    def _friendly_error(exc: Exception, context: str = "") -> str:
+        """Convert raw API/technical errors into user-friendly Indonesian messages."""
+        raw = str(exc)
+        # Strip HTTP status prefixes like "503: ", "401: ", etc.
+        msg = raw
+        for prefix in ("503:", "500:", "404:", "403:", "401:", "400:"):
+            if msg.startswith(prefix):
+                msg = msg[len(prefix):].strip()
+                break
+        # PLC disabled
+        if "PLC worker is disabled" in msg or "QC_SUITE_PLC_ENABLED=0" in msg:
+            return "PLC tidak aktif. Hubungi teknisi untuk mengaktifkan PLC."
+        # PLC reconnect failed
+        if "reconnect failed" in msg or "modbus" in msg.lower():
+            return "Koneksi PLC terputus. Periksa kabel dan pastikan PLC menyala."
+        # Session not found / stopped
+        if "session not found" in msg.lower():
+            return "Sesi inspeksi tidak ditemukan. Mulai sesi baru."
+        if "idle timeout" in msg.lower():
+            return "Sesi dihentikan otomatis karena tidak aktif. Mulai sesi baru."
+        # Camera errors
+        if "camera" in msg.lower() and ("failed" in msg.lower() or "error" in msg.lower()):
+            return "Kamera gagal dibuka. Periksa koneksi kamera."
+        # Auth errors
+        if "unauthorized" in msg.lower() or "401" in raw:
+            return "Sesi login berakhir. Silakan login ulang."
+        if "forbidden" in msg.lower() or "403" in raw:
+            return "Akses ditolak. Anda tidak memiliki izin untuk tindakan ini."
+        # Connection errors
+        if "connection" in msg.lower() or "refused" in msg.lower() or "timeout" in msg.lower():
+            return "Tidak dapat terhubung ke server. Periksa jaringan atau restart aplikasi."
+        # Fallback: truncate long messages
+        if len(msg) > 80:
+            msg = msg[:77] + "..."
+        return f"{context}: {msg}" if context else msg
 
     def _refresh_context_summary(self) -> None:
         username = self.state.user.get("username") if self.state.user else "-"
@@ -1551,7 +1407,7 @@ class OperatorScreen(ctk.CTkFrame):
         except Exception as exc:  # noqa: BLE001
             if show_errors:
                 messagebox.showerror("Camera", str(exc))
-            self.info_var.set(f"Camera failed: {exc}")
+            self.info_var.set(OperatorScreen._friendly_error(exc, "Kamera gagal"))
             self._update_status_badges()
             return False
         actual = self._camera_settings_label()
@@ -1930,7 +1786,7 @@ class OperatorScreen(ctk.CTkFrame):
         with self._lock:
             self._latest_error = message
         self.state.latest_error = message
-        self.info_var.set(f"Inference error: {message}")
+        self.info_var.set(f"Error inspeksi: {message}")
 
     def _schedule_heartbeat(self, *, delay_ms: int | None = None) -> None:
         if self._closed:
@@ -2056,30 +1912,23 @@ class OperatorScreen(ctk.CTkFrame):
     def _update_plc_badge_from_status(self, status: dict) -> None:
         if not status.get("enabled", True):
             self._set_badge("PLC", "DISABLED", "neutral")
-            self.stiker_terpasang_btn.configure(state="disabled")
             return
         if not status.get("running"):
             self._set_badge("PLC", "STOPPED", "danger")
-            self.stiker_terpasang_btn.configure(state="disabled")
             return
         connected = status.get("connected", False)
         clamp_engaged = status.get("clamp_engaged", False)
         plc_state = str(status.get("state") or "").strip().upper()
         if not connected:
             self._set_badge("PLC", "DISCONN", "warning")
-            self.stiker_terpasang_btn.configure(state="disabled")
         elif clamp_engaged or plc_state == "CLAMPED":
             self._set_badge("PLC", "ENGAGED", "warning")
-            self.stiker_terpasang_btn.configure(state="normal")
         elif plc_state == "CLAMPING":
             self._set_badge("PLC", "CLAMPING", "warning")
-            self.stiker_terpasang_btn.configure(state="disabled")
         elif plc_state in {"REJECT_BUZZER", "ACCEPT_PULSE"}:
             self._set_badge("PLC", plc_state[:12], "warning")
-            self.stiker_terpasang_btn.configure(state="normal" if plc_state == "REJECT_BUZZER" else "disabled")
         else:
             self._set_badge("PLC", "READY", "success")
-            self.stiker_terpasang_btn.configure(state="disabled")
 
     def shutdown(self) -> None:
         if self._closed:
@@ -2122,8 +1971,6 @@ class OperatorScreen(ctk.CTkFrame):
             self._overlay_thread.join(timeout=1.0)
         self._overlay_thread = None
         self._close_settings()
-        if self._plc_release_window and self._plc_release_window.winfo_exists():
-            self._plc_release_window.destroy()
         self._stop_session()
         self.capture.stop()
 

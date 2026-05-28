@@ -104,9 +104,19 @@ class ModbusRtuPlcAdapter(PlcAdapter):
         return self._client.connected
 
     def _ensure_connected(self) -> None:
-        if not self._client.connected:
-            if not self._client.connect():
-                raise RuntimeError(f"modbus reconnect failed on {self._port}")
+        if self._client.connected:
+            return
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                if self._client.connect():
+                    logger.info("[plc-modbus-rtu] reconnected to %s (attempt %d)", self._port, attempt)
+                    return
+            except Exception as exc:
+                logger.warning("[plc-modbus-rtu] reconnect attempt %d failed: %s", attempt, exc)
+            if attempt < max_retries:
+                time.sleep(0.5 * attempt)
+        raise RuntimeError(f"modbus reconnect failed on {self._port} after {max_retries} attempts")
 
     def write_coil(self, address: int, value: bool) -> None:
         self._ensure_connected()
@@ -158,9 +168,19 @@ class ModbusTcpPlcAdapter(PlcAdapter):
         return self._client.connected
 
     def _ensure_connected(self) -> None:
-        if not self._client.connected:
-            if not self._client.connect():
-                raise RuntimeError("modbus TCP reconnect failed")
+        if self._client.connected:
+            return
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                if self._client.connect():
+                    logger.info("[plc-modbus-tcp] reconnected (attempt %d)", attempt)
+                    return
+            except Exception as exc:
+                logger.warning("[plc-modbus-tcp] reconnect attempt %d failed: %s", attempt, exc)
+            if attempt < max_retries:
+                time.sleep(0.5 * attempt)
+        raise RuntimeError("modbus TCP reconnect failed after 3 attempts")
 
     def write_coil(self, address: int, value: bool) -> None:
         self._ensure_connected()
