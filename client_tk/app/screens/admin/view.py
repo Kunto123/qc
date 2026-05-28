@@ -370,7 +370,7 @@ class AdminScreen(ctk.CTkFrame):
             [
                 ("Refresh", self.refresh_presets, "neutral", "left"),
                 ("New Preset", self.reset_preset_wizard, "neutral", "right"),
-                ("Deactivate Selected", self.deactivate_selected_preset, "neutral", "right"),
+                ("Delete/Deactivate Selected", self.deactivate_selected_preset, "neutral", "right"),
             ],
         )
         footer.grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 10))
@@ -1493,20 +1493,35 @@ class AdminScreen(ctk.CTkFrame):
         selected_kind, selected_id = self._selected_preset_row()
         if selected_kind is None or selected_id is None:
             return
-        if selected_kind != "deployment":
-            self._set_status("Selected template is not actively deployed.")
-            messagebox.showinfo("Preset", "Pilih row ACTIVE deployment untuk deactivate.")
+        if selected_kind == "deployment":
+            deployment_id = selected_id
+            if not self._confirm_action("Deactivate Preset", f"Deactivate preset deployment #{deployment_id}?"):
+                return
+            try:
+                self.api.deactivate_deployment(deployment_id)
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("Preset", str(exc))
+                return
+            self.reset_preset_wizard()
+            self.refresh_presets()
+            self._set_status(f"Preset deployment #{deployment_id} deactivated.")
             return
-        deployment_id = selected_id
-        if not self._confirm_action("Deactivate Preset", f"Deactivate preset deployment #{deployment_id}?"):
+
+        if selected_kind == "template":
+            template_id = selected_id
+            if not self._confirm_action("Delete Template", f"Delete template #{template_id}?"):
+                return
+            try:
+                self.api.delete_template(template_id)
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("Preset", str(exc))
+                return
+            self.reset_preset_wizard()
+            self.refresh_presets()
+            self._set_status(f"Template #{template_id} deleted.")
             return
-        try:
-            self.api.deactivate_deployment(deployment_id)
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Preset", str(exc))
-            return
-        self.refresh_presets()
-        self._set_status(f"Preset deployment #{deployment_id} deactivated.")
+
+        return
 
     def export_runtime_template(self) -> None:
         version_id = self.current_template_version_id

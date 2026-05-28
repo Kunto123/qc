@@ -187,6 +187,9 @@ class _StubApi:
         result["version_number"] = int(result.get("version_number") or 1) + 1
         return result
 
+    def delete_template(self, template_id: int):
+        return {"deleted": True, "id": template_id}
+
     def deploy_template(self, payload: dict):
         return {"id": 31, "is_active": True, "template_name": "QC Line A", **payload}
 
@@ -601,6 +604,47 @@ class UiSmokeTest(unittest.TestCase):
             self.assertEqual(rows, ("dep:7", "tpl:2"))
             self.assertEqual(screen.preset_table.item("dep:7", "values")[5], "ACTIVE")
             self.assertEqual(screen.preset_table.item("tpl:2", "values")[3], "QC Line B")
+            screen.destroy()
+
+    def test_admin_preset_delete_allows_inactive_template_rows(self) -> None:
+        templates = [
+            {"id": 2, "name": "QC Line B", "version_id": 5, "lifecycle_status": "draft"},
+        ]
+        deleted_ids: list[int] = []
+
+        def delete_template(template_id: int):
+            deleted_ids.append(template_id)
+            return {"deleted": True, "id": template_id}
+
+        with mock.patch.object(self.api, "list_deployments", return_value=[]), mock.patch.object(
+            self.api,
+            "list_templates",
+            return_value=templates,
+        ), mock.patch.object(
+            self.api,
+            "delete_template",
+            side_effect=delete_template,
+        ), mock.patch(
+            "client_tk.app.screens.admin.view.messagebox.askyesno",
+            return_value=True,
+        ):
+            screen = AdminScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+
+            preset_iid = screen.preset_table.get_children()[0]
+            self.assertEqual(preset_iid, "tpl:2")
+            screen.preset_table.selection_set(preset_iid)
+            screen.preset_table.focus(preset_iid)
+            screen.preset_table.event_generate("<<TreeviewSelect>>")
+            self.assertEqual(screen.current_template_id, 2)
+
+            with mock.patch.object(screen, "refresh_presets") as refresh_mock:
+                screen.deactivate_selected_preset()
+
+            self.assertEqual(deleted_ids, [2])
+            refresh_mock.assert_called_once()
+            self.assertEqual(screen.preset_table.selection(), ())
+            self.assertIsNone(screen.current_template_id)
             screen.destroy()
 
     def test_admin_new_preset_clears_selection_and_creates_template(self) -> None:
