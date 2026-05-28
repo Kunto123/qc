@@ -2307,6 +2307,55 @@ class ApiSmokeTest(unittest.TestCase):
         )
         self.assertEqual(inactive_update_response.status_code, 409, inactive_update_response.get_json())
 
+    def test_11d_deployment_allows_multiple_active_records_for_same_slot(self) -> None:
+        first_response = self.client.post(
+            "/deployments",
+            json={
+                "template_id": 1,
+                "template_version_id": 1,
+                "line_id": "LINE-DEP-MULTI",
+                "station_id": "ST-DEP-MULTI",
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(first_response.status_code, 201, first_response.get_json())
+        first_deployment = first_response.get_json()
+
+        second_response = self.client.post(
+            "/deployments",
+            json={
+                "template_id": 1,
+                "template_version_id": 1,
+                "line_id": "LINE-DEP-MULTI",
+                "station_id": "ST-DEP-MULTI",
+            },
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(second_response.status_code, 201, second_response.get_json())
+        second_deployment = second_response.get_json()
+
+        active_response = self.client.get(
+            "/deployments/active?line_id=LINE-DEP-MULTI&station_id=ST-DEP-MULTI",
+            headers=_headers(self.admin_token),
+        )
+        self.assertEqual(active_response.status_code, 200, active_response.get_json())
+        self.assertIsNotNone(active_response.get_json()["deployment"])
+        self.assertEqual(active_response.get_json()["deployment"]["id"], second_deployment["id"])
+
+        list_response = self.client.get("/deployments", headers=_headers(self.admin_token))
+        self.assertEqual(list_response.status_code, 200, list_response.get_json())
+        active_records = [
+            item
+            for item in list_response.get_json()
+            if item.get("line_id") == "LINE-DEP-MULTI"
+            and item.get("station_id") == "ST-DEP-MULTI"
+            and bool(item.get("is_active"))
+        ]
+        self.assertEqual(
+            {int(item["id"]) for item in active_records},
+            {int(first_deployment["id"]), int(second_deployment["id"])},
+        )
+
     # ------------------------------------------------------------------
     # Phase 12 â€” Augment integration eligibility (API-level validation)
     # ------------------------------------------------------------------

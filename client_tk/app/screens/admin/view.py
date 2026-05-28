@@ -350,7 +350,7 @@ class AdminScreen(ctk.CTkFrame):
         listing.columnconfigure(0, weight=1)
         listing.rowconfigure(2, weight=1)
         ctk.CTkLabel(listing, text="Preset Library", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
-        ctk.CTkLabel(listing, text="Shows all templates; only one active deployment per line and station.", text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
+        ctk.CTkLabel(listing, text="Shows templates and active deployments together; ACTIVE marks deployed records.", text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
         self.preset_table = self._build_table(
             listing,
             [

@@ -35,10 +35,6 @@ class DeploymentsRepository(JsonRepository):
         payload = self.load()
         items = payload["deployments"]
         now = datetime.now(UTC).isoformat()
-        for item in items:
-            if item["line_id"] == line_id and item["station_id"] == station_id and item["is_active"]:
-                item["is_active"] = False
-                item["effective_until"] = now
         record = {
             "id": self.next_id(items),
             "template_id": int(template_id),
@@ -122,17 +118,6 @@ class DeploymentsRepository(JsonRepository):
             if not next_line_id or not next_station_id:
                 raise ValueError("line_id and station_id must not be empty")
 
-            for other in items:
-                if int(other.get("id") or 0) == int(deployment_id):
-                    continue
-                if (
-                    bool(other.get("is_active"))
-                    and str(other.get("line_id") or "") == next_line_id
-                    and str(other.get("station_id") or "") == next_station_id
-                ):
-                    other["is_active"] = False
-                    other["effective_until"] = now
-
             item["line_id"] = next_line_id
             item["station_id"] = next_station_id
 
@@ -181,11 +166,8 @@ class DeploymentsRepository(JsonRepository):
         if previous is None:
             raise ValueError("No previous deployment found to roll back to.")
 
-        # Deactivate all active deployments for this line/station
-        for item in items:
-            if item["line_id"] == line_id and item["station_id"] == station_id and item["is_active"]:
-                item["is_active"] = False
-                item["effective_until"] = now
+        target["is_active"] = False
+        target["effective_until"] = now
 
         # Create a new deployment record based on the previous one
         record = {
