@@ -573,6 +573,100 @@ class UiSmokeTest(unittest.TestCase):
             self.assertEqual(screen.preset_conf_threshold_var.get(), "0.25")
             screen.destroy()
 
+    def test_admin_preset_library_shows_inactive_templates(self) -> None:
+        deployments = [
+            {
+                "id": 7,
+                "template_id": 1,
+                "template_name": "QC Line A",
+                "template_version_id": 2,
+                "line_id": "LINE-A",
+                "station_id": "ST-01",
+                "is_active": True,
+            }
+        ]
+        templates = [
+            {"id": 1, "name": "QC Line A", "version_id": 2, "lifecycle_status": "published"},
+            {"id": 2, "name": "QC Line B", "version_id": 5, "lifecycle_status": "published"},
+        ]
+        with mock.patch.object(self.api, "list_deployments", return_value=deployments), mock.patch.object(
+            self.api,
+            "list_templates",
+            return_value=templates,
+        ):
+            screen = AdminScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+
+            rows = screen.preset_table.get_children()
+            self.assertEqual(rows, ("dep:7", "tpl:2"))
+            self.assertEqual(screen.preset_table.item("dep:7", "values")[5], "ACTIVE")
+            self.assertEqual(screen.preset_table.item("tpl:2", "values")[3], "QC Line B")
+            screen.destroy()
+
+    def test_admin_new_preset_clears_selection_and_creates_template(self) -> None:
+        deployments = [
+            {
+                "id": 7,
+                "template_id": 1,
+                "template_name": "QC Line A",
+                "template_version_id": 2,
+                "line_id": "LINE-A",
+                "station_id": "ST-01",
+                "is_active": True,
+            }
+        ]
+        created_payloads: list[dict] = []
+        updated_payloads: list[dict] = []
+
+        def create_template(payload: dict):
+            created_payloads.append(dict(payload))
+            result = dict(payload)
+            result["id"] = 99
+            result["version_id"] = 100
+            return result
+
+        def update_template(template_id: int, payload: dict):
+            updated_payloads.append({"template_id": template_id, **payload})
+            result = dict(payload)
+            result["id"] = template_id
+            result["version_id"] = 101
+            return result
+
+        with mock.patch.object(self.api, "list_deployments", return_value=deployments), mock.patch.object(
+            self.api,
+            "create_template",
+            side_effect=create_template,
+        ), mock.patch.object(
+            self.api,
+            "update_template",
+            side_effect=update_template,
+        ), mock.patch("client_tk.app.screens.admin.view.messagebox.showinfo", return_value=None):
+            screen = AdminScreen(self.root, self.api, self.state)
+            screen.update_idletasks()
+            preset_iid = screen.preset_table.get_children()[0]
+            screen.preset_table.selection_set(preset_iid)
+            screen.preset_table.focus(preset_iid)
+            screen.preset_table.event_generate("<<TreeviewSelect>>")
+            self.assertEqual(screen.current_template_id, 1)
+
+            screen.reset_preset_wizard()
+            self.assertEqual(screen.current_template_id, None)
+            self.assertEqual(screen.preset_table.selection(), ())
+
+            screen.preset_name_var.set("Preset Baru")
+            screen.preset_line_var.set("LINE-A")
+            screen.preset_station_var.set("ST-01")
+            screen.preset_model_path_var.set("data/models/sticker.pt")
+            screen.preset_expected_code_var.set("K0W-HB0")
+            screen.preset_expected_class_var.set("K0W-HB0")
+
+            screen.save_and_deploy_preset()
+
+            self.assertTrue(created_payloads)
+            self.assertFalse(updated_payloads)
+            self.assertEqual(screen.current_template_id, 99)
+            screen.destroy()
+
     def test_template_form_model_path_dropdown_autofills_meta_path(self) -> None:
         form = TemplateEditorForm(self.root)
         form.pack()
@@ -691,14 +785,31 @@ class UiSmokeTest(unittest.TestCase):
         self.assertEqual(screen.sticker_roi_h_var.get(), "0.6")
         screen.destroy()
 
-    def test_operator_in2_cycles_active_deployments(self) -> None:
-        deployments = [
-            {"id": 1, "template_id": 1, "template_name": "QC Line A", "template_version_id": 1, "line_id": "LINE-A", "station_id": "ST-01", "is_active": True},
-            {"id": 2, "template_id": 1, "template_name": "QC Line B", "template_version_id": 2, "line_id": "LINE-B", "station_id": "ST-02", "is_active": True},
+    def test_operator_in2_cycles_template_dropdown(self) -> None:
+        templates = [
+            {"id": 1, "name": "QC Line A", "version_id": 1, "version_number": 1, "lifecycle_status": "published"},
+            {"id": 2, "name": "QC Line B", "version_id": 2, "version_number": 2, "lifecycle_status": "published"},
         ]
-        with mock.patch.object(self.api, "list_deployments", return_value=deployments):
+
+        def get_template(template_id: int):
+            payload = _StubApi.get_template(self.api, template_id)
+            payload["id"] = template_id
+            payload["name"] = f"QC Line {'A' if template_id == 1 else 'B'}"
+            payload["version_id"] = template_id
+            payload["version_number"] = template_id
+            payload["sticker"]["line"] = f"LINE-{'A' if template_id == 1 else 'B'}"
+            payload["sticker"]["station"] = f"ST-0{template_id}"
+            return payload
+
+        with mock.patch.object(self.api, "list_templates", return_value=templates), mock.patch.object(
+            self.api,
+            "get_template",
+            side_effect=get_template,
+        ):
             screen = OperatorScreen(self.root, self.api, self.state)
-            screen.state.active_deployment = deployments[0]
+            first_label = screen.template_selector.cget("values")[0]
+            screen.template_choice.set(first_label)
+            screen.state.active_deployment = None
             screen.template_version_value.set("1")
             screen.line_value.set("LINE-A")
             screen.station_value.set("ST-01")
@@ -710,7 +821,8 @@ class UiSmokeTest(unittest.TestCase):
                 screen._last_plc_template_cycle_event_id = 1
                 screen._handle_plc_template_cycle_event({"template_cycle_event_id": 2})
 
-            self.assertEqual(screen.state.active_deployment["id"], 2)
+            self.assertIsNone(screen.state.active_deployment)
+            self.assertEqual(screen.template_choice.get(), screen.template_selector.cget("values")[1])
             self.assertEqual(screen.template_version_value.get(), "2")
             self.assertEqual(screen.line_value.get(), "LINE-B")
             self.assertEqual(screen.station_value.get(), "ST-02")

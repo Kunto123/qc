@@ -349,8 +349,8 @@ class AdminScreen(ctk.CTkFrame):
         listing.pack(fill="both", expand=True)
         listing.columnconfigure(0, weight=1)
         listing.rowconfigure(2, weight=1)
-        ctk.CTkLabel(listing, text="Active Production Presets", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
-        ctk.CTkLabel(listing, text="One active preset per line and station.", text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
+        ctk.CTkLabel(listing, text="Preset Library", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(listing, text="Shows all templates; only one active deployment per line and station.", text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
         self.preset_table = self._build_table(
             listing,
             [
@@ -659,23 +659,34 @@ class AdminScreen(ctk.CTkFrame):
     def refresh_presets(self) -> None:
         self._set_status("Loading presets...")
 
-        def _done(items, error):
+        def _load():
+            return {
+                "deployments": self.api.list_deployments(),
+                "templates": self.api.list_templates(),
+            }
+
+        def _done(payload, error):
             if error:
                 self._set_status(f"Preset load error: {error}")
                 return
-            self._deployments_cache = list(items or [])
+            data = payload or {}
+            self._deployments_cache = list(data.get("deployments") or [])
+            self._templates_cache = list(data.get("templates") or [])
             self._render_presets()
             self._update_overview_cards()
             self._record_refresh("Presets")
-            self._set_status(f"Loaded {len(self._deployments_cache)} active presets.")
+            active_count = sum(1 for item in self._deployments_cache if bool(item.get("is_active", True)))
+            self._set_status(f"Loaded {len(self._templates_cache)} templates and {active_count} active deployments.")
 
-        run_async(self, self.api.list_deployments, callback=_done)
+        run_async(self, _load, callback=_done)
 
     def refresh_template_options(self) -> None:
         def _done(items, error):
             if error:
                 return
             self._templates_cache = list(items or [])
+            if hasattr(self, "preset_table"):
+                self._render_presets()
 
         run_async(self, self.api.list_templates, callback=_done)
 
@@ -842,21 +853,43 @@ class AdminScreen(ctk.CTkFrame):
     def _render_presets(self) -> None:
         self._clear_tree(self.preset_table)
         active_items = [item for item in self._deployments_cache if bool(item.get("is_active", True))]
-        if not active_items:
-            self.preset_table.insert("", "end", iid="__empty__", values=("-", "No active presets.", "", "", "", ""))
+        active_template_ids = {
+            int(item.get("template_id") or 0)
+            for item in active_items
+            if int(item.get("template_id") or 0) > 0
+        }
+        if not active_items and not self._templates_cache:
+            self.preset_table.insert("", "end", iid="__empty__", values=("-", "No presets.", "", "", "", ""))
             return
         for item in active_items:
             self.preset_table.insert(
                 "",
                 "end",
-                iid=str(item.get("id")),
+                iid=f"dep:{item.get('id')}",
                 values=(
-                    item.get("id"),
+                    f"D{item.get('id')}",
                     _safe_text(item.get("line_id")),
                     _safe_text(item.get("station_id")),
                     _safe_text(item.get("template_name")),
                     _safe_text(item.get("template_version_id")),
-                    _format_status(item.get("is_active", True)),
+                    "ACTIVE",
+                ),
+            )
+        for item in self._templates_cache:
+            template_id = int(item.get("id") or 0)
+            if template_id in active_template_ids:
+                continue
+            self.preset_table.insert(
+                "",
+                "end",
+                iid=f"tpl:{template_id}",
+                values=(
+                    f"T{template_id}",
+                    "-",
+                    "-",
+                    _safe_text(item.get("name")),
+                    _safe_text(item.get("version_id") or item.get("current_version_id")),
+                    _safe_text(item.get("lifecycle_status") or _format_status(item.get("is_active", True))),
                 ),
             )
 
@@ -944,6 +977,10 @@ class AdminScreen(ctk.CTkFrame):
         self.current_template_id = None
         self.current_template_version_id = None
         self._editing_deployment_id = None
+        if hasattr(self, "preset_table"):
+            for item_id in self.preset_table.selection():
+                self.preset_table.selection_remove(item_id)
+            self.preset_table.focus("")
         self.preset_name_var.set("")
         self.preset_description_var.set("")
         self.preset_line_var.set("")
@@ -972,13 +1009,24 @@ class AdminScreen(ctk.CTkFrame):
         self._set_status("Preset wizard reset.")
 
     def _on_preset_selected(self, _event=None) -> None:
-        deployment_id = self._selected_treeview_id(self.preset_table)
-        if deployment_id is None:
+        selected_kind, selected_id = self._selected_preset_row()
+        if selected_kind is None or selected_id is None:
             return
-        deployment = next((item for item in self._deployments_cache if int(item.get("id") or 0) == deployment_id), None)
+        if selected_kind == "template":
+            self._editing_deployment_id = None
+            try:
+                detail = self.api.get_template(selected_id)
+            except Exception as exc:  # noqa: BLE001
+                self._set_status(f"Preset detail load failed: {exc}")
+                return
+            self._apply_preset_detail(detail, deployment=None)
+            self._set_status(f"Loaded template {_safe_text(detail.get('name'))}.")
+            return
+
+        deployment = next((item for item in self._deployments_cache if int(item.get("id") or 0) == selected_id), None)
         if not deployment:
             return
-        self._editing_deployment_id = deployment_id
+        self._editing_deployment_id = selected_id
         self.preset_line_var.set(str(deployment.get("line_id") or ""))
         self.preset_station_var.set(str(deployment.get("station_id") or ""))
 
@@ -1006,10 +1054,13 @@ class AdminScreen(ctk.CTkFrame):
         self.current_template_version_id = int(detail.get("version_id") or (deployment or {}).get("template_version_id") or 0) or None
         self.preset_name_var.set(str(detail.get("name") or (deployment or {}).get("template_name") or ""))
         self.preset_description_var.set(str(detail.get("description") or ""))
+        sticker = detail.get("sticker") or {}
         if deployment:
             self.preset_line_var.set(str(deployment.get("line_id") or ""))
             self.preset_station_var.set(str(deployment.get("station_id") or ""))
-        sticker = detail.get("sticker") or {}
+        else:
+            self.preset_line_var.set(str(sticker.get("line") or ""))
+            self.preset_station_var.set(str(sticker.get("station") or ""))
         self.preset_expected_code_var.set(str(sticker.get("ocr_expected_code") or sticker.get("ocr_expected_text") or ""))
         self.preset_expected_class_var.set(str(sticker.get("expected_class") or ""))
         self.preset_use_ocr_var.set(bool(sticker.get("use_ocr", False)))
@@ -1439,9 +1490,14 @@ class AdminScreen(ctk.CTkFrame):
         }
 
     def deactivate_selected_preset(self) -> None:
-        deployment_id = self._selected_treeview_id(self.preset_table)
-        if deployment_id is None:
+        selected_kind, selected_id = self._selected_preset_row()
+        if selected_kind is None or selected_id is None:
             return
+        if selected_kind != "deployment":
+            self._set_status("Selected template is not actively deployed.")
+            messagebox.showinfo("Preset", "Pilih row ACTIVE deployment untuk deactivate.")
+            return
+        deployment_id = selected_id
         if not self._confirm_action("Deactivate Preset", f"Deactivate preset deployment #{deployment_id}?"):
             return
         try:
@@ -1773,6 +1829,31 @@ class AdminScreen(ctk.CTkFrame):
             return int(raw)
         except ValueError:
             return None
+
+    def _selected_preset_row(self) -> tuple[str | None, int | None]:
+        selection = self.preset_table.selection()
+        if not selection:
+            focus = self.preset_table.focus()
+            selection = (focus,) if focus else ()
+        if not selection:
+            return None, None
+        raw = str(selection[0])
+        if raw.startswith("__"):
+            return None, None
+        if raw.startswith("dep:"):
+            try:
+                return "deployment", int(raw.split(":", 1)[1])
+            except ValueError:
+                return None, None
+        if raw.startswith("tpl:"):
+            try:
+                return "template", int(raw.split(":", 1)[1])
+            except ValueError:
+                return None, None
+        try:
+            return "deployment", int(raw)
+        except ValueError:
+            return None, None
 
     def _confirm_action(self, title: str, message: str) -> bool:
         return bool(messagebox.askyesno(title, message))
