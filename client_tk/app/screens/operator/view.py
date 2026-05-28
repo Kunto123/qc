@@ -15,7 +15,13 @@ from client_tk.app.components.counter_panel import BREAKDOWN_ORDER, CounterPanel
 from client_tk.app.components.live_view import LiveView
 from client_tk.app.components.result_panel import ResultPanel
 from client_tk.app.components.scrollable_frame import ScrollableFrame
-from client_tk.app.config import DEFAULT_UPLOAD_INTERVAL_MS
+from client_tk.app.config import (
+    DEFAULT_CAMERA_FPS,
+    DEFAULT_CAMERA_HEIGHT,
+    DEFAULT_CAMERA_WIDTH,
+    DEFAULT_OPERATOR_PREVIEW_FPS,
+    DEFAULT_UPLOAD_INTERVAL_MS,
+)
 from client_tk.app.services.camera_capture import CameraCaptureService
 from client_tk.app.services.frame_upload import FrameUploadService
 from client_tk.app.theme import APP_BG, ACCENT_SOFT, BORDER, PANEL_ALT_BG, PANEL_BG, SHELL_BG, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, ACCENT_HOVER, TEXT_ON_ACCENT, SUCCESS, SUCCESS_HOVER
@@ -46,6 +52,8 @@ class OperatorScreen(ctk.CTkFrame):
         self._latest_error: str | None = None
         self._lock = threading.Lock()
         self._after_id: str | None = None
+        self._preview_after_id: str | None = None
+        self._preview_interval_ms = max(15, int(round(1000.0 / DEFAULT_OPERATOR_PREVIEW_FPS)))
         self._heartbeat_after_id: str | None = None
         self._plc_poll_after_id: str | None = None
         self._closed = False
@@ -72,6 +80,9 @@ class OperatorScreen(ctk.CTkFrame):
         self._overlay_ready = threading.Event()
         self._skip_overlay_count: int = 0
         self._last_plc_template_cycle_event_id: int | None = None
+        self._latest_plc_status: dict | None = None
+        self._inference_running = False
+        self._inference_thread: threading.Thread | None = None
 
         self.line_value = tk.StringVar()
         self.station_value = tk.StringVar()
@@ -106,7 +117,8 @@ class OperatorScreen(ctk.CTkFrame):
         self._update_status_badges()
         self.bind("<Configure>", self._on_resize)
         self.after_idle(self._apply_responsive_layout)
-        self._schedule_poll()
+        # Preview frames are rendered by a dedicated camera tick; inference
+        # results only update status/overlay payload.
         self._schedule_heartbeat(delay_ms=1_000)
         self._schedule_plc_poll(delay_ms=4_000)
         self.after_idle(self._auto_start_first_template)
@@ -661,6 +673,42 @@ class OperatorScreen(ctk.CTkFrame):
             return fallback
         return max(50, int(round(1000.0 / inference_fps)))
 
+    def _resolve_camera_settings(self) -> dict[str, int | float | None]:
+        detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
+        camera = detail.get("camera") if isinstance(detail, dict) and isinstance(detail.get("camera"), dict) else {}
+
+        def _positive_int(value, fallback: int) -> int | None:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                parsed = int(fallback)
+            return parsed if parsed > 0 else None
+
+        def _positive_float(value, fallback: float) -> float | None:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                parsed = float(fallback)
+            return parsed if parsed > 0 else None
+
+        return {
+            "width": _positive_int(camera.get("width"), DEFAULT_CAMERA_WIDTH),
+            "height": _positive_int(camera.get("height"), DEFAULT_CAMERA_HEIGHT),
+            "fps": _positive_float(camera.get("fps"), DEFAULT_CAMERA_FPS),
+        }
+
+    def _camera_settings_label(self) -> str:
+        actual = self.capture.actual_settings
+        width = int(actual.get("width") or 0)
+        height = int(actual.get("height") or 0)
+        fps = float(actual.get("fps") or 0.0)
+        parts: list[str] = []
+        if width and height:
+            parts.append(f"{width}x{height}")
+        if fps > 0:
+            parts.append(f"{fps:.0f} fps")
+        return " / ".join(parts)
+
     def _read_roi_payload(self, kind: str) -> dict[str, float]:
         variables = self._roi_vars(kind)
         return {
@@ -991,6 +1039,98 @@ class OperatorScreen(ctk.CTkFrame):
             self.main_view.update_bgr(frame)
             self.display_source.set("Right View: Live Camera")
 
+    def _update_local_roi_previews(self, frame) -> None:
+        """Backward-compatible name for ROI-only local preview rendering."""
+        self._update_roi_overlay_preview(frame)
+
+    def _preview_payload_for_frame(self, payload: dict, frame) -> dict:
+        client_timings = dict(payload.get("client_timings") or {})
+        if frame is not None:
+            height, width = frame.shape[:2]
+            client_timings.setdefault("frame_width", width)
+            client_timings.setdefault("frame_height", height)
+        return {**payload, "client_timings": client_timings}
+
+    def _build_preview_frame(self, frame):
+        if frame is None:
+            return None
+        with self._lock:
+            payload = dict(self._latest_payload) if isinstance(self._latest_payload, dict) else None
+        if payload:
+            try:
+                overlay = self._build_local_detection_overlay(
+                    frame,
+                    self._preview_payload_for_frame(payload, frame),
+                )
+                if overlay is not None:
+                    self.display_source.set("Right View: Live Camera + ROIs (overlay)")
+                    return overlay
+            except Exception:
+                pass
+        overlay = self._draw_roi_overlays(frame, self._build_preview_overlay_payload(frame))
+        if overlay is not None:
+            self.display_source.set("Right View: Live Camera + ROIs")
+            return overlay
+        self.display_source.set("Right View: Live Camera")
+        return frame
+
+    def _render_preview_frame(self) -> bool:
+        frame = self.capture.get_latest_frame()
+        if frame is None:
+            return False
+        display_frame = self._build_preview_frame(frame)
+        if display_frame is None:
+            return False
+        self._cached_overlay_frame = display_frame
+        self.main_view.update_bgr(display_frame)
+        return True
+
+    def _schedule_preview_tick(self, *, delay_ms: int | None = None) -> None:
+        if self._closed:
+            return
+        if self._preview_after_id:
+            try:
+                self.after_cancel(self._preview_after_id)
+            except tk.TclError:
+                pass
+            self._preview_after_id = None
+        wait = self._preview_interval_ms if delay_ms is None else max(0, int(delay_ms))
+        self._preview_after_id = self.after(wait, self._preview_tick)
+
+    def _cancel_preview_tick(self) -> None:
+        if self._preview_after_id:
+            try:
+                self.after_cancel(self._preview_after_id)
+            except tk.TclError:
+                pass
+            self._preview_after_id = None
+
+    def _preview_tick(self) -> None:
+        self._preview_after_id = None
+        if self._closed:
+            return
+        try:
+            self._render_preview_frame()
+        except tk.TclError as exc:
+            self.state.latest_error = str(exc)
+            self.info_var.set(f"UI render warning: {exc}")
+        finally:
+            if not self._closed and self.capture.is_running:
+                self._schedule_preview_tick()
+
+    def _poll_ui(self) -> None:
+        """Compatibility shim for older tests; production preview uses _preview_tick."""
+        if self._closed:
+            return
+        try:
+            frame = self.capture.get_latest_frame()
+            if frame is None:
+                frame = self.capture.get_latest_frame()
+            self._update_roi_overlay_preview(frame)
+        except tk.TclError as exc:
+            self.state.latest_error = str(exc)
+            self.info_var.set(f"UI render warning: {exc}")
+
     def _current_template_id(self) -> int | None:
         selected = self._template_lookup.get(self.template_choice.get().strip())
         if selected and selected.get("id"):
@@ -1315,6 +1455,26 @@ class OperatorScreen(ctk.CTkFrame):
         event_tone = "success" if event_state == "DECISION_COMMITTED" else "info" if event_state not in {"IDLE", "COOLDOWN"} else "neutral"
         self._set_badge("EVENT", event_state, event_tone)
 
+        clamp = (payload or {}).get("clamp") or {}
+        clamp_status = str(clamp.get("status") or "").strip().upper()
+        if clamp_status:
+            plc_tone = (
+                "success"
+                if clamp_status in {"CLAMPED", "READY"}
+                else "danger"
+                if "TIMEOUT" in clamp_status or "ERROR" in clamp_status
+                else "warning"
+                if clamp_status in {"WAIT_FEEDBACK", "CLAMPING"}
+                else "info"
+            )
+            self._set_badge("PLC", clamp_status[:12], plc_tone)
+
+        phase = (payload or {}).get("phase") or {}
+        phase_status = str(phase.get("status") or "").strip().upper()
+        if phase_status and phase_status not in {"READY", "WAITING_PART_READY"}:
+            phase_tone = "warning" if "DELAY" in phase_status or "WAIT" in phase_status else "info"
+            self._set_badge("EVENT", phase_status[:12], phase_tone)
+
     def _sync_recent_events(self, payload: dict) -> None:
         items = payload.get("recent_events") or []
         self.recent_list.delete(0, "end")
@@ -1379,19 +1539,30 @@ class OperatorScreen(ctk.CTkFrame):
         self._update_status_badges()
 
     def _start_camera(self, *, show_errors: bool = True) -> bool:
+        settings = self._resolve_camera_settings()
         try:
-            self.capture.start(int(self.camera_value.get() or 0))
+            self._cancel_preview_tick()
+            self.capture.start(
+                int(self.camera_value.get() or 0),
+                width=settings["width"],
+                height=settings["height"],
+                fps=settings["fps"],
+            )
         except Exception as exc:  # noqa: BLE001
             if show_errors:
                 messagebox.showerror("Camera", str(exc))
             self.info_var.set(f"Camera failed: {exc}")
             self._update_status_badges()
             return False
-        self.info_var.set("Camera started. Menunggu frame pertama.")
+        actual = self._camera_settings_label()
+        suffix = f" ({actual})" if actual else ""
+        self.info_var.set(f"Camera started{suffix}. Menunggu frame pertama.")
+        self._schedule_preview_tick(delay_ms=0)
         self._update_status_badges()
         return True
 
     def _stop_camera(self) -> None:
+        self._cancel_preview_tick()
         self.capture.stop()
         self.main_view.reset()
         self.info_var.set("Camera stopped.")
@@ -1459,33 +1630,111 @@ class OperatorScreen(ctk.CTkFrame):
         for _lbl in self.breakdown_labels.values():
             _lbl.configure(text="0")
         self.recent_list.delete(0, "end")
-        # Restore raw preview immediately so camera stays visible during first backend round-trip.
+        # Live view: langsung tampilkan frame dari camera (tanpa upload)
+        # Inference: jalan di background thread setiap 200ms
         _current_frame = self.capture.get_latest_frame()
         if _current_frame is not None:
             self._show_cached_overlay_or_frame(_current_frame)
         else:
             self.main_view.reset()
-        upload_interval_ms = self._resolve_upload_interval_ms()
-        self.uploader.start(
-            interval_ms=upload_interval_ms,
-            get_frame=self.capture.get_latest_frame,
-            send_frame=lambda image_b64: self.api.push_frame(
-                payload["session_id"],
-                image_b64,
-                # "stream" skips backend overlay compose+encode (~10-50ms saved per frame).
-                # Client renders detection boxes locally from bbox data in the payload.
-                response_mode="stream",
-            ),
-            on_result=self._set_result,
-            on_error=self._set_error,
+
+        # Start inference thread (setiap 200ms)
+        self._inference_running = True
+        self._inference_thread = threading.Thread(
+            target=self._inference_loop,
+            args=(payload["session_id"],),
+            name="qc-inference",
+            daemon=True,
         )
+        self._inference_thread.start()
+
+        upload_interval_ms = self._resolve_upload_interval_ms()
         infer_fps_actual = round(1000.0 / upload_interval_ms, 1)
+        preview_fps_actual = round(1000.0 / self._preview_interval_ms, 1)
         self.info_var.set(
             f"Session running: {payload['session_id']} "
-            f"(infer @ {upload_interval_ms} ms / {infer_fps_actual} fps | preview @ 10 fps | JPEG q=75)"
+            f"(inference @ {upload_interval_ms}ms / {infer_fps_actual} fps | preview @ {preview_fps_actual} fps)"
         )
         self._refresh_context_summary()
         self._update_status_badges()
+
+    def _inference_loop(self, session_id: str) -> None:
+        """Background thread: capture frame, upload, infer, then update UI."""
+        import time as _time
+        import cv2 as _cv2
+        import base64 as _base64
+
+        target_interval_s = max(0.05, self._resolve_upload_interval_ms() / 1000.0)
+        while (
+            self._inference_running
+            and (self.state.active_session or {}).get("session_id") == session_id
+        ):
+            try:
+                loop_start = _time.perf_counter()
+
+                # Ambil frame dari camera
+                t0 = _time.perf_counter()
+                frame = self.capture.get_latest_frame()
+                capture_ms = (_time.perf_counter() - t0) * 1000.0
+                if frame is None:
+                    _time.sleep(0.05)
+                    continue
+
+                # Encode frame ke JPEG
+                t0 = _time.perf_counter()
+                ok, buffer = _cv2.imencode(".jpg", frame, [_cv2.IMWRITE_JPEG_QUALITY, 75])
+                encode_ms = (_time.perf_counter() - t0) * 1000.0
+                if not ok:
+                    raise RuntimeError("Failed to encode frame.")
+                t0 = _time.perf_counter()
+                image_b64 = _base64.b64encode(buffer).decode("ascii")
+                b64_ms = (_time.perf_counter() - t0) * 1000.0
+
+                # Upload ke backend
+                active_session = self.state.active_session
+                if active_session and active_session.get("session_id") == session_id:
+                    t0 = _time.perf_counter()
+                    result = self.api.push_frame(
+                        session_id,
+                        image_b64,
+                        response_mode="stream",
+                    )
+                    request_ms = (_time.perf_counter() - t0) * 1000.0
+                    if isinstance(result, dict):
+                        result.setdefault(
+                            "client_timings",
+                            {
+                                "capture_ms": round(capture_ms, 2),
+                                "encode_ms": round(encode_ms, 2),
+                                "b64_ms": round(b64_ms, 2),
+                                "request_ms": round(request_ms, 2),
+                                "frame_width": frame.shape[1],
+                                "frame_height": frame.shape[0],
+                                "jpeg_quality": 75,
+                                "payload_bytes": int(len(buffer)),
+                            },
+                        )
+                    if result and self._inference_running and (self.state.active_session or {}).get("session_id") == session_id:
+                        # Update UI dari main thread
+                        try:
+                            self.after(0, lambda r=result: self._set_result(r))
+                        except tk.TclError:
+                            return
+
+                # Sleep untuk maintain target inference fps
+                elapsed = _time.perf_counter() - loop_start
+                sleep_time = max(0.01, target_interval_s - elapsed)
+                _time.sleep(sleep_time)
+
+            except Exception as exc:
+                if self._inference_running and (self.state.active_session or {}).get("session_id") == session_id:
+                    try:
+                        self.after(0, lambda e=str(exc): self._set_error(e))
+                    except tk.TclError:
+                        return
+                else:
+                    return
+                _time.sleep(0.1)
 
     def _stop_session(self) -> None:
         stop_message = "Session stopped."
@@ -1501,10 +1750,18 @@ class OperatorScreen(ctk.CTkFrame):
                         messagebox.showwarning("Session", "Sesi backend sudah tidak terotorisasi (401). Silakan login ulang.")
                 else:
                     stop_message = f"Session lokal dihentikan. Warning backend: {message}"
+        # Stop inference thread
+        self._inference_running = False
+        if self._inference_thread is not None:
+            self._inference_thread.join(timeout=2.0)
+            self._inference_thread = None
         self.uploader.stop()
         self.state.active_session = None
         self.state.cache["part_ready"] = None
         self.state.cache["sticker_detection"] = None
+        with self._lock:
+            self._latest_payload = None
+            self._latest_error = None
         self.info_var.set(stop_message)
         self._refresh_context_summary()
         self._update_status_badges()
@@ -1527,116 +1784,142 @@ class OperatorScreen(ctk.CTkFrame):
         )
         self.info_var.set("Part-ready ROI dan sticker ROI updated.")
 
+    def _update_result_info(self, payload: dict) -> None:
+        timings = payload.get("timings") or {}
+        total_ms = timings.get("total_ms")
+        inference_ms = timings.get("inference_ms")
+        client_timings = payload.get("client_timings") or {}
+        timing_suffix = ""
+        if isinstance(total_ms, (int, float)):
+            timing_suffix = f" | backend={float(total_ms):.0f}ms"
+        if isinstance(inference_ms, (int, float)):
+            timing_suffix += f" infer={float(inference_ms):.0f}ms"
+        req_ms = client_timings.get("request_ms")
+        if isinstance(req_ms, (int, float)):
+            timing_suffix += f" req={float(req_ms):.0f}ms"
+
+        clamp = payload.get("clamp") or {}
+        clamp_status = str(clamp.get("status") or "").strip()
+        clamp_suffix = f" | clamp={clamp_status}" if clamp_status else ""
+        phase = payload.get("phase") or {}
+        phase_status = str(phase.get("status") or "").strip()
+        phase_remaining = phase.get("remaining_ms")
+        if isinstance(phase_remaining, (int, float)):
+            phase_suffix = f" | phase={phase_status} {float(phase_remaining):.0f}ms"
+        else:
+            phase_suffix = f" | phase={phase_status}" if phase_status else ""
+
+        if payload.get("count_committed"):
+            committed = payload.get("last_committed_result") or {}
+            validation = committed.get("validation") or {}
+            part_ready = committed.get("part_ready") or {}
+            detection = committed.get("sticker_detection") or {}
+            self.info_var.set(
+                f"Committed {validation.get('decision')} | "
+                f"Part gate={'READY' if part_ready.get('part_ready') else 'BLOCK'} | "
+                f"{validation.get('part_name') or '-'} | "
+                f"{validation.get('reject_reason_code') or 'OK'} | "
+                f"backend={detection.get('backend') or '-'} raw={detection.get('raw_detection_count') if detection.get('raw_detection_count') is not None else '-'}"
+                f"{clamp_suffix}{phase_suffix}{timing_suffix}."
+            )
+            return
+
+        live_validation = payload.get("validation") or {}
+        live_part_ready = payload.get("part_ready") or {}
+        live_detection = payload.get("sticker_detection") or {}
+        self.info_var.set(
+            f"Gate={'READY' if live_part_ready.get('part_ready') else 'BLOCK'} "
+            f"(ratio {live_part_ready.get('match_ratio') if live_part_ready.get('match_ratio') is not None else '-'} | "
+            f"pr_status={live_part_ready.get('status') or '-'}) | "
+            f"Live decision: {live_validation.get('decision') or '-'} | "
+            f"Detected: {live_validation.get('detected_class') or '-'} | "
+            f"Reject: {live_validation.get('reject_reason_code') or 'OK'} | "
+            f"backend={live_detection.get('backend') or '-'} reason={live_detection.get('reason') or '-'} raw={live_detection.get('raw_detection_count') if live_detection.get('raw_detection_count') is not None else '-'}"
+            f"{clamp_suffix}{phase_suffix}{timing_suffix}"
+        )
+
     def _set_result(self, payload: dict) -> None:
+        """Handle inference result from backend. Update UI directly."""
         with self._lock:
             self._latest_payload = payload
             self._latest_error = None
         self._auth_error_notified = False
         self._last_payload_seq += 1
-        # Schedule overlay render (debounced).  If a render is already pending,
-        # let it run — the poll will pick up the latest payload seq and re-render
-        # on the next tick.  This prevents CTK image callback crashes from rapid
-        # update_bgr() calls.
-        self._schedule_overlay_render()
 
-    def _schedule_overlay_render(self) -> None:
-        """Schedule a debounced overlay render.  Prevents rapid-fire CTK crashes."""
-        if self._overlay_render_after_id is not None:
-            return  # already scheduled
-        self._overlay_render_after_id = self.after(
-            self._overlay_render_interval_ms,
-            self._do_scheduled_overlay_render,
-        )
+        # Update all UI elements directly (no separate poll needed)
+        try:
+            self.state.latest_result = payload
+            self.state.latest_error = None
+            self.state.cache["part_ready"] = payload.get("part_ready")
+            self.state.cache["sticker_detection"] = payload.get("sticker_detection")
+            self.state.cache["last_committed_result"] = payload.get("last_committed_result")
+            self.result_panel.update_payload(payload)
+            self.counter_panel.update_payload(payload)
 
-    def _do_scheduled_overlay_render(self) -> None:
-        self._overlay_render_after_id = None
-        if self._closed:
-            return
-        # Skip if a previous render is still running — don't queue up
-        if self._overlay_thread is not None and self._overlay_thread.is_alive():
-            self._skip_overlay_count += 1
-            return
+            # Update decision banner
+            _live_val = payload.get("validation") or {}
+            _committed = payload.get("last_committed_result") or {}
+            _committed_val = _committed.get("validation") or {}
+            _disp_val = _committed_val or _live_val
+            _decision = _disp_val.get("decision") or "WAITING"
+            _d_palette = {"ACCEPT": ("#166534", "#f0fdf4"), "REJECT": ("#991b1b", "#fef2f2"), "WAITING": ("#334155", "#f8fafc")}
+            _d_bg, _d_fg = _d_palette.get(_decision, ("#334155", "#f8fafc"))
+            self.decision_banner.configure(fg_color=_d_bg, text_color=_d_fg, text=_decision)
+            self.decision_subtitle.configure(
+                text=(
+                    "Banner menampilkan hasil committed terakhir."
+                    if _committed_val
+                    else "Belum ada event committed. Banner mengikuti hasil live terbaru."
+                )
+            )
+
+            # Update reject breakdown
+            _breakdown = (payload.get("counters") or {}).get("session_reject_breakdown") or {}
+            for _key, _lbl in self.breakdown_labels.items():
+                _lbl.configure(text=str(_breakdown.get(_key, 0)))
+            self._sync_recent_events(payload)
+            self._refresh_context_summary()
+            self._update_status_badges(payload)
+            self._update_result_info(payload)
+
+        except tk.TclError:
+            pass
+
+    def _render_overlay_direct(self, payload: dict) -> None:
+        """Render full overlay (ROI boxes + detections + decision) on live frame.
+
+        Uses _build_local_detection_overlay which correctly handles:
+        - Part-ready and sticker ROI boxes with proper scaling
+        - Detection bbox coordinates (normalized to sticker ROI, scaled to display)
+        - Decision crosshair, status text, and color coding
+        """
         try:
             frame = self.capture.get_latest_frame()
-            with self._lock:
-                payload = self._latest_payload
-            if not payload:
+            if frame is None:
                 return
-            current_seq = self._last_payload_seq
-            if current_seq == self._last_rendered_payload_seq:
-                return
-            self._last_rendered_payload_seq = current_seq
-            display_frame = frame if frame is not None else self.capture.get_latest_frame()
-            if display_frame is None:
-                return
-            # Offload heavy overlay composition to a background thread
-            self._overlay_pending_frame = display_frame
-            self._overlay_pending_payload = dict(payload)
-            self._overlay_ready.clear()
-            self._overlay_thread = threading.Thread(
-                target=self._overlay_render_worker, daemon=True
-            )
-            self._overlay_thread.start()
-            # Schedule the UI update (lightweight) on the main thread
-            self.after(50, self._overlay_render_ui_update)
-        except tk.TclError:
-            pass
 
-    def _overlay_render_worker(self) -> None:
-        """Background thread: compose the overlay image."""
-        try:
-            overlay = self._build_local_detection_overlay(
-                self._overlay_pending_frame, self._overlay_pending_payload
-            )
+            # Enrich payload with client-side frame dimensions for scaling.
+            # Backend frame may differ from live display frame (downscaled upload).
+            client_timings = payload.get("client_timings") or {}
+            client_timings["frame_width"] = frame.shape[1]
+            client_timings["frame_height"] = frame.shape[0]
+            enriched = {**payload, "client_timings": client_timings}
+
+            overlay = self._build_local_detection_overlay(frame, enriched)
             if overlay is not None:
-                self._cached_overlay_frame = overlay.copy()
+                self._cached_overlay_frame = overlay
+                self.main_view.update_bgr(overlay)
+                self.display_source.set("Right View: Live Camera + ROIs (local)")
+
         except Exception:
             pass
-        finally:
-            self._overlay_ready.set()
-
-    def _overlay_render_ui_update(self) -> None:
-        """Main thread: update the display after background render finishes."""
-        if self._closed:
-            return
-        if not self._overlay_ready.is_set():
-            # Render not done yet — check again shortly
-            self.after(30, self._overlay_render_ui_update)
-            return
-        try:
-            if self._cached_overlay_frame is not None:
-                self.main_view.update_bgr(self._cached_overlay_frame)
-                self.display_source.set("Right View: Live Camera + ROIs (local)")
-        except tk.TclError:
-            pass
-
-    def _render_roi_overlay_frame(self, frame, payload: dict) -> None:
-        """Render detection overlay on frame and cache the result."""
-        overlay = self._build_local_detection_overlay(frame, payload)
-        if overlay is not None:
-            self._cached_overlay_frame = overlay.copy()
-            self.main_view.update_bgr(overlay)
-            self.display_source.set("Right View: Live Camera + ROIs (local)")
-        elif frame is not None:
-            # No detections but still show live frame (don't show stale overlay).
-            self._cached_overlay_frame = frame.copy()
-            self.main_view.update_bgr(frame)
-            self.display_source.set("Right View: Live Camera")
 
     def _show_cached_overlay_or_frame(self, frame) -> None:
-        """Show cached overlay if available, otherwise show raw frame.
-
-        This prevents the live view from going blank between backend responses.
-        Does NOT call update_bgr() to avoid freezing the UI — overlay updates
-        are handled by _overlay_render_ui_update() only.
-        """
-        # Don't call update_bgr here — it's heavy and called every 100ms poll.
-        # Just update the display source text so user knows the state.
+        """Show cached overlay if available, otherwise show raw frame."""
         if self._cached_overlay_frame is not None:
             self.display_source.set("Right View: Live Camera + ROIs (cached)")
         elif frame is not None:
             self.display_source.set("Right View: Live Camera")
-        # else: keep whatever is currently displayed (don't reset)
 
     @staticmethod
     def _is_auth_error(message: str | None) -> bool:
@@ -1646,11 +1929,8 @@ class OperatorScreen(ctk.CTkFrame):
     def _set_error(self, message: str) -> None:
         with self._lock:
             self._latest_error = message
-
-    def _schedule_poll(self) -> None:
-        if self._closed:
-            return
-        self._after_id = self.after(100, self._poll_ui)
+        self.state.latest_error = message
+        self.info_var.set(f"Inference error: {message}")
 
     def _schedule_heartbeat(self, *, delay_ms: int | None = None) -> None:
         if self._closed:
@@ -1784,188 +2064,22 @@ class OperatorScreen(ctk.CTkFrame):
             return
         connected = status.get("connected", False)
         clamp_engaged = status.get("clamp_engaged", False)
+        plc_state = str(status.get("state") or "").strip().upper()
         if not connected:
             self._set_badge("PLC", "DISCONN", "warning")
             self.stiker_terpasang_btn.configure(state="disabled")
-        elif clamp_engaged:
+        elif clamp_engaged or plc_state == "CLAMPED":
             self._set_badge("PLC", "ENGAGED", "warning")
             self.stiker_terpasang_btn.configure(state="normal")
+        elif plc_state == "CLAMPING":
+            self._set_badge("PLC", "CLAMPING", "warning")
+            self.stiker_terpasang_btn.configure(state="disabled")
+        elif plc_state in {"REJECT_BUZZER", "ACCEPT_PULSE"}:
+            self._set_badge("PLC", plc_state[:12], "warning")
+            self.stiker_terpasang_btn.configure(state="normal" if plc_state == "REJECT_BUZZER" else "disabled")
         else:
             self._set_badge("PLC", "READY", "success")
             self.stiker_terpasang_btn.configure(state="disabled")
-
-    def _poll_ui(self) -> None:
-        if self._closed:
-            return
-        try:
-            frame = self.capture.get_latest_frame()
-
-            with self._lock:
-                payload = self._latest_payload
-                error = self._latest_error
-
-            if payload:
-                self.state.latest_result = payload
-                self.state.latest_error = None
-                self.state.cache["part_ready"] = payload.get("part_ready")
-                self.state.cache["sticker_detection"] = payload.get("sticker_detection")
-                self.state.cache["last_committed_result"] = payload.get("last_committed_result")
-                self.result_panel.update_payload(payload)
-                self.counter_panel.update_payload(payload)
-                # Update decision banner (fixed area below counter)
-                _live_val = payload.get("validation") or {}
-                _committed = payload.get("last_committed_result") or {}
-                _committed_val = _committed.get("validation") or {}
-                _disp_val = _committed_val or _live_val
-                _decision = _disp_val.get("decision") or "WAITING"
-                _d_palette = {"ACCEPT": ("#166534", "#f0fdf4"), "REJECT": ("#991b1b", "#fef2f2"), "WAITING": ("#334155", "#f8fafc")}
-                _d_bg, _d_fg = _d_palette.get(_decision, ("#334155", "#f8fafc"))
-                self.decision_banner.configure(fg_color=_d_bg, text_color=_d_fg, text=_decision)
-                self.decision_subtitle.configure(
-                    text=(
-                        "Banner menampilkan hasil committed terakhir."
-                        if _committed_val
-                        else "Belum ada event committed. Banner mengikuti hasil live terbaru."
-                    )
-                )
-                # Update reject breakdown (scrollable area)
-                _breakdown = (payload.get("counters") or {}).get("session_reject_breakdown") or {}
-                for _key, _lbl in self.breakdown_labels.items():
-                    _lbl.configure(text=str(_breakdown.get(_key, 0)))
-                self._sync_recent_events(payload)
-                self._refresh_context_summary()
-                self._update_status_badges(payload)
-
-                # ---- Overlay rendering (throttled) ----
-                # Only schedule render if:
-                # 1. Payload seq is genuinely new
-                # 2. No render is already scheduled
-                # 3. Last render completed at least 300ms ago
-                current_seq = self._last_payload_seq
-                if (
-                    current_seq != self._last_rendered_payload_seq
-                    and self._overlay_render_after_id is None
-                    and not (self._overlay_thread is not None and self._overlay_thread.is_alive())
-                ):
-                    self._schedule_overlay_render()
-
-                # Timing info
-                timings = payload.get("timings") or {}
-                total_ms = timings.get("total_ms")
-                inference_ms = timings.get("inference_ms")
-                client_timings = payload.get("client_timings") or {}
-                timing_suffix = ""
-                if isinstance(total_ms, (int, float)):
-                    timing_suffix = f" | backend={float(total_ms):.0f}ms"
-                    if isinstance(inference_ms, (int, float)):
-                        timing_suffix += f" infer={float(inference_ms):.0f}ms"
-                enc_ms = client_timings.get("encode_ms")
-                req_ms = client_timings.get("request_ms")
-                if isinstance(enc_ms, (int, float)):
-                    timing_suffix += f" enc={float(enc_ms):.0f}ms"
-                if isinstance(req_ms, (int, float)):
-                    timing_suffix += f" req={float(req_ms):.0f}ms"
-
-                if payload.get("count_committed"):
-                    committed = payload.get("last_committed_result") or {}
-                    validation = committed.get("validation") or {}
-                    part_ready = committed.get("part_ready") or {}
-                    detection = committed.get("sticker_detection") or {}
-                    self.info_var.set(
-                        f"Committed {validation.get('decision')} | "
-                        f"Part gate={'READY' if part_ready.get('part_ready') else 'BLOCK'} | "
-                        f"{validation.get('part_name') or '-'} | "
-                        f"{validation.get('reject_reason_code') or 'OK'} | "
-                        f"backend={detection.get('backend') or '-'} raw={detection.get('raw_detection_count') if detection.get('raw_detection_count') is not None else '-'}"
-                        f"{timing_suffix}."
-                    )
-                else:
-                    live_validation = payload.get("validation") or {}
-                    live_part_ready = payload.get("part_ready") or {}
-                    live_detection = payload.get("sticker_detection") or {}
-                    self.info_var.set(
-                        f"Gate={'READY' if live_part_ready.get('part_ready') else 'BLOCK'} "
-                        f"(ratio {live_part_ready.get('match_ratio') if live_part_ready.get('match_ratio') is not None else '-'} | pr_status={live_part_ready.get('status') or '-'}) | "
-                        f"Live decision: {live_validation.get('decision') or '-'} | "
-                        f"Detected: {live_validation.get('detected_class') or '-'} | "
-                        f"Reject: {live_validation.get('reject_reason_code') or 'OK'} | "
-                        f"backend={live_detection.get('backend') or '-'} reason={live_detection.get('reason') or '-'} raw={live_detection.get('raw_detection_count') if live_detection.get('raw_detection_count') is not None else '-'}"
-                        f"{timing_suffix}"
-                    )
-
-            elif error:
-                self.state.latest_error = error
-                if self._is_auth_error(error):
-                    self.uploader.stop()
-                    self.state.active_session = None
-                    self.state.cache["part_ready"] = None
-                    self.state.cache["sticker_detection"] = None
-                    self._refresh_context_summary()
-                    if not self._auth_error_notified:
-                        self._auth_error_notified = True
-                        messagebox.showwarning("Session", "Akses sesi ditolak (401). Silakan login ulang.")
-                    self.info_var.set("Session dihentikan karena otorisasi gagal (401). Silakan login ulang.")
-                    with self._lock:
-                        self._latest_error = None
-                self._update_status_badges()
-                if not self._is_auth_error(error):
-                    self.info_var.set(f"Frame pump error: {error}")
-                # On error, show cached overlay (don't blank the view).
-                self._show_cached_overlay_or_frame(frame)
-
-            else:
-                # No payload yet and no error — keep showing cached overlay or live frame.
-                self._update_status_badges()
-                self._show_cached_overlay_or_frame(frame)
-                if frame is not None:
-                    self.display_source.set("Right View: Live Camera")
-                elif self.state.active_session:
-                    self.info_var.set("Session aktif — menunggu frame kamera.")
-
-        except tk.TclError as exc:
-            self.state.latest_error = str(exc)
-            self.info_var.set(f"UI render warning: {exc}")
-            self._update_status_badges()
-        finally:
-            self._schedule_poll()
-
-    def _render_payload_overlay(self, frame, payload: dict) -> None:
-        """Build and display the full detection overlay from a backend payload.
-
-        Called only when the payload sequence changes (newresult from backend),
-        NOT on every poll cycle.  This avoids unnecessary rebuilds and prevents
-        ROI jitter from scaling against varying frame sizes.
-        """
-        if frame is None:
-            return
-
-        # Try backend overlay first (most accurate — coordinates in backend frame space).
-        if payload.get("overlay_image_b64"):
-            backend_overlay = self._decode_image_b64(payload.get("overlay_image_b64"))
-            if backend_overlay is not None:
-                preview_payload = self._build_preview_overlay_payload(frame)
-                overlay = self._draw_roi_overlays(backend_overlay, preview_payload)
-                if overlay is not None:
-                    self._cached_overlay_frame = overlay.copy()
-                    self.main_view.update_bgr(overlay)
-                    self.display_source.set("Right View: ROI / ML Overlay (backend + ROI)")
-                else:
-                    self._cached_overlay_frame = backend_overlay.copy()
-                    self.main_view.update_bgr(backend_overlay)
-                    self.display_source.set("Right View: ROI / ML Overlay (backend)")
-                return
-
-        # Fallback: client-side composed overlay.
-        self._render_roi_overlay_frame(frame, payload)
-
-    def _refresh_live_camera(self, frame, payload: dict) -> None:
-        """Between backend responses, optionally refresh the live camera underlay.
-
-        To avoid ROI jitter we do NOT rebuild the overlay — we only update the
-        display if there is no cached overlay at all.
-        """
-        if self._cached_overlay_frame is None and frame is not None:
-            self._show_cached_overlay_or_frame(frame)
 
     def shutdown(self) -> None:
         if self._closed:
@@ -1977,6 +2091,7 @@ class OperatorScreen(ctk.CTkFrame):
             except tk.TclError:
                 pass
             self._after_id = None
+        self._cancel_preview_tick()
         if self._heartbeat_after_id:
             try:
                 self.after_cancel(self._heartbeat_after_id)

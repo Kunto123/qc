@@ -46,6 +46,12 @@ class SessionState:
     # PLC constant-output mode: True once enqueue_part_ready() has been called for
     # the current ready-run, preventing duplicate triggers.  Reset when part leaves.
     plc_part_ready_triggered: bool = False
+    plc_clamp_requested_at: float = 0.0
+    plc_clamp_ready_at: float = 0.0
+    plc_clamp_timeout: bool = False
+    plc_clamp_event_id: str | None = None
+    operator_sticker_delay_started_at: float = 0.0
+    operator_sticker_ready_at: float = 0.0
     operator_state: str = "IDLE"
     inspection_has_run_for_current_part: bool = False
     inspection_result_cache: dict[str, Any] | None = None
@@ -58,7 +64,7 @@ class SessionState:
     last_inference_ms: int = 0
     # Inference interval (ms): minimum time between inference runs.
     # 0 = unlimited (every frame), 200 = max ~5 fps inference.
-    inference_interval_ms: int = 200
+    inference_interval_ms: int = 0
     # Manual release COOLDOWN: timestamp (seconds since epoch) until which
     # re-clamp is blocked after IN1 (manual release). Prevents instant re-clamp.
     manual_release_cooldown_until: float = 0.0

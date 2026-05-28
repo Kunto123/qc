@@ -6,7 +6,7 @@ import tkinter as tk
 import customtkinter as ctk
 import cv2
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image
 
 from client_tk.app.theme import BORDER, PANEL_BG, TEXT_PRIMARY, TEXT_SECONDARY
 
@@ -64,15 +64,24 @@ class LiveView(ctk.CTkFrame):
             return
         if not self.winfo_exists() or not self._label.winfo_exists():
             return
-        rgb = cv2.cvtColor(self._source_frame, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(rgb)
         target_width = self._label.winfo_width()
         target_height = self._label.winfo_height()
         if target_width <= 8:
             target_width = self._size[0]
         if target_height <= 8:
             target_height = self._size[1]
-        image = ImageOps.contain(image, (target_width, target_height))
+        src_h, src_w = self._source_frame.shape[:2]
+        scale = min(target_width / max(1, src_w), target_height / max(1, src_h))
+        if scale <= 0:
+            return
+        render_w = max(1, int(round(src_w * scale)))
+        render_h = max(1, int(round(src_h * scale)))
+        render_frame = self._source_frame
+        if render_w != src_w or render_h != src_h:
+            interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+            render_frame = cv2.resize(render_frame, (render_w, render_h), interpolation=interpolation)
+        rgb = cv2.cvtColor(render_frame, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(rgb)
         self._photo = ctk.CTkImage(light_image=image, dark_image=image, size=image.size)
         try:
             # Clear stale tk image handle first so text update does not fail on orphan pyimage refs.

@@ -75,6 +75,12 @@ class AppConfig:
     # Templates that explicitly set part_ready_settle_ms (including 0 to bypass) ignore it.
     # Default 0 = no settle (backward compatible).
     part_ready_settle_ms_default: int = max(0, int(os.getenv("QC_SUITE_PART_READY_SETTLE_MS", "0")))
+    # Operator phase pacing. These are non-blocking gates; preview stays live.
+    # STICKER_INSTALL delays sticker inference after clamp is ready, giving the
+    # operator time to attach the sticker.
+    # NEXT_PART keeps the system from immediately re-clamping after release.
+    phase_sticker_install_delay_ms: int = max(0, int(os.getenv("QC_SUITE_PHASE_STICKER_INSTALL_DELAY_MS", "0")))
+    phase_next_part_delay_ms: int = max(0, int(os.getenv("QC_SUITE_PHASE_NEXT_PART_DELAY_MS", "2000")))
     # Training weights resolution policy.
     # When 1 (default): the worker will attempt to auto-download from Ultralytics Hub if the
     # weights file is not found locally. Suitable for dev environments with internet access.
@@ -145,9 +151,13 @@ class AppConfig:
     plc_relay_buzzer_green_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_BUZZER_GREEN_ADDRESS", "1")))
     plc_relay_red_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_RED_ADDRESS", "2")))
     plc_relay_buzzer_reject_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_BUZZER_REJECT_ADDRESS", "3")))
-    # Input addresses (FC02) — 2 digital inputs
+    # Input addresses (FC02) — release, template cycle, optional clamp feedback
     plc_input_release_address: int = max(0, int(os.getenv("QC_SUITE_PLC_INPUT_RELEASE_ADDRESS", "0")))
     plc_input_template_address: int = max(0, int(os.getenv("QC_SUITE_PLC_INPUT_TEMPLATE_ADDRESS", "1")))
+    plc_clamp_feedback_enabled: bool = os.getenv("QC_SUITE_PLC_CLAMP_FEEDBACK_ENABLED", "0").strip() == "1"
+    plc_input_clamp_engaged_address: int = max(0, int(os.getenv("QC_SUITE_PLC_INPUT_CLAMP_ENGAGED_ADDRESS", "2")))
+    plc_clamp_feedback_timeout_ms: int = max(0, int(os.getenv("QC_SUITE_PLC_CLAMP_FEEDBACK_TIMEOUT_MS", "1500")))
+    plc_clamp_feedback_fallback_delay_ms: int = max(0, int(os.getenv("QC_SUITE_PLC_CLAMP_FEEDBACK_FALLBACK_DELAY_MS", "300")))
     # Accept pulse duration (ms)
     plc_accept_pulse_ms: int = max(100, int(os.getenv("QC_SUITE_PLC_ACCEPT_PULSE_MS", "1000")))
 

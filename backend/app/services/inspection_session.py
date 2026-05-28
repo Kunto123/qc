@@ -189,14 +189,34 @@ class InspectionSessionService:
             if app_config is not None
             else 0.70
         )
+        self._plc_clamp_feedback_enabled = (
+            bool(getattr(app_config, "plc_clamp_feedback_enabled", False))
+            if app_config is not None
+            else False
+        )
+        self._plc_clamp_feedback_timeout_ms = (
+            max(0, int(getattr(app_config, "plc_clamp_feedback_timeout_ms", 1500)))
+            if app_config is not None
+            else 1500
+        )
+        self._plc_clamp_feedback_fallback_delay_ms = (
+            max(0, int(getattr(app_config, "plc_clamp_feedback_fallback_delay_ms", 300)))
+            if app_config is not None
+            else 300
+        )
+        self._phase_sticker_install_delay_ms = (
+            max(0, int(getattr(app_config, "phase_sticker_install_delay_ms", 0)))
+            if app_config is not None
+            else 0
+        )
+        self._phase_next_part_delay_ms = (
+            max(0, int(getattr(app_config, "phase_next_part_delay_ms", 2000)))
+            if app_config is not None
+            else 2000
+        )
         self._plc_worker = plc_worker
         self._reject_log_repo = reject_log_repo
         self._operator_state_machine = OperatorInspectionStateMachine()
-        self._default_inference_interval_ms = (
-            max(0, int(getattr(app_config, "inference_interval_ms", 200)))
-            if app_config is not None
-            else 200
-        )
         # Register PLC state change callback
         if self._plc_worker is not None:
             self._plc_worker.set_on_state_change_callback(self._on_plc_state_change)
@@ -204,17 +224,188 @@ class InspectionSessionService:
     def _on_plc_state_change(self, old_state: str, new_state: str) -> None:
         """Callback dari PLC worker saat state berubah.
         Reset plc_part_ready_triggered saat PLC kembali ke IDLE (manual release).
+        Thread-safe: called from PLC worker thread, acquires session lock.
         """
         if new_state == "IDLE" and old_state != "IDLE":
-            cooldown_until = time.time() + 2.0  # 2 detik cooldown
-            for state in self._sessions.values():
-                state.plc_part_ready_triggered = False
-                state.inspection_result_cache = None
-                state.operator_state = "IDLE"
-                state.settle_frame_count = 0
-                state.last_inference_ms = 0
-                state.manual_release_cooldown_until = cooldown_until
-            logger.info("[inspection] PLC manual release — 2s cooldown started")
+            cooldown_until = time.time() + (self._phase_next_part_delay_ms / 1000.0)
+            with self._lock:
+                for state in self._sessions.values():
+                    state.plc_part_ready_triggered = False
+                    state.inspection_result_cache = None
+                    state.operator_state = "IDLE"
+                    state.settle_frame_count = 0
+                    state.last_inference_ms = 0
+                    state.manual_release_cooldown_until = cooldown_until
+                    state.plc_clamp_requested_at = 0.0
+                    state.plc_clamp_ready_at = 0.0
+                    state.plc_clamp_timeout = False
+                    state.plc_clamp_event_id = None
+                    state.operator_sticker_delay_started_at = 0.0
+                    state.operator_sticker_ready_at = 0.0
+            logger.info(
+                "[inspection] PLC returned IDLE - next-part delay %dms started",
+                self._phase_next_part_delay_ms,
+            )
+
+    def _reset_clamp_gate(self, state: SessionState) -> None:
+        state.plc_part_ready_triggered = False
+        state.plc_clamp_requested_at = 0.0
+        state.plc_clamp_ready_at = 0.0
+        state.plc_clamp_timeout = False
+        state.plc_clamp_event_id = None
+        state.operator_sticker_delay_started_at = 0.0
+        state.operator_sticker_ready_at = 0.0
+
+    def _clamp_gate_status(self, state: SessionState, *, part_ready_settled: bool, now_s: float) -> tuple[bool, dict[str, Any]]:
+        if self._plc_worker is None:
+            return True, {
+                "enabled": False,
+                "feedback_enabled": False,
+                "status": "disabled",
+                "ready": True,
+            }
+        if not part_ready_settled:
+            return False, {
+                "enabled": True,
+                "feedback_enabled": self._plc_clamp_feedback_enabled,
+                "status": "waiting_part_ready",
+                "ready": False,
+            }
+
+        cooldown_until = float(getattr(state, "manual_release_cooldown_until", 0.0) or 0.0)
+        if cooldown_until > now_s:
+            return False, {
+                "enabled": True,
+                "feedback_enabled": self._plc_clamp_feedback_enabled,
+                "status": "next_part_delay",
+                "ready": False,
+                "remaining_ms": round((cooldown_until - now_s) * 1000.0, 1),
+                "delay_ms": self._phase_next_part_delay_ms,
+            }
+
+        requested_at = float(getattr(state, "plc_clamp_requested_at", 0.0) or 0.0)
+        elapsed_ms = max(0.0, (now_s - requested_at) * 1000.0) if requested_at > 0 else 0.0
+        feedback_ready = False
+        try:
+            feedback_ready = bool(self._plc_worker.clamp_engaged())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[inspection] clamp feedback read failed: %s", exc)
+
+        if self._plc_clamp_feedback_enabled:
+            if feedback_ready:
+                if not state.plc_clamp_ready_at:
+                    state.plc_clamp_ready_at = now_s
+                return True, {
+                    "enabled": True,
+                    "feedback_enabled": True,
+                    "status": "clamped",
+                    "ready": True,
+                    "elapsed_ms": round(elapsed_ms, 1),
+                    "feedback": True,
+                }
+            timeout_ms = float(self._plc_clamp_feedback_timeout_ms)
+            if timeout_ms > 0 and elapsed_ms >= timeout_ms:
+                state.plc_clamp_timeout = True
+                return False, {
+                    "enabled": True,
+                    "feedback_enabled": True,
+                    "status": "feedback_timeout",
+                    "ready": False,
+                    "elapsed_ms": round(elapsed_ms, 1),
+                    "timeout_ms": self._plc_clamp_feedback_timeout_ms,
+                    "feedback": False,
+                }
+            return False, {
+                "enabled": True,
+                "feedback_enabled": True,
+                "status": "wait_feedback",
+                "ready": False,
+                "elapsed_ms": round(elapsed_ms, 1),
+                "timeout_ms": self._plc_clamp_feedback_timeout_ms,
+                "feedback": False,
+            }
+
+        delay_ms = float(self._plc_clamp_feedback_fallback_delay_ms)
+        if requested_at <= 0 or elapsed_ms < delay_ms:
+            return False, {
+                "enabled": True,
+                "feedback_enabled": False,
+                "status": "clamping",
+                "ready": False,
+                "elapsed_ms": round(elapsed_ms, 1),
+                "fallback_delay_ms": self._plc_clamp_feedback_fallback_delay_ms,
+            }
+        if not state.plc_clamp_ready_at:
+            state.plc_clamp_ready_at = now_s
+        return True, {
+            "enabled": True,
+            "feedback_enabled": False,
+            "status": "clamped",
+            "ready": True,
+            "elapsed_ms": round(elapsed_ms, 1),
+            "fallback_delay_ms": self._plc_clamp_feedback_fallback_delay_ms,
+        }
+
+    def _operator_phase_status(
+        self,
+        state: SessionState,
+        *,
+        raw_part_ready: bool,
+        part_ready_settled: bool,
+        clamp_ready: bool,
+        now_s: float,
+    ) -> tuple[bool, dict[str, Any]]:
+        base_payload = {
+            "sticker_install_delay_ms": self._phase_sticker_install_delay_ms,
+            "next_part_delay_ms": self._phase_next_part_delay_ms,
+        }
+        if not raw_part_ready:
+            state.operator_sticker_delay_started_at = 0.0
+            state.operator_sticker_ready_at = 0.0
+            return False, {**base_payload, "status": "waiting_part_ready", "ready": False}
+        if not part_ready_settled:
+            state.operator_sticker_delay_started_at = 0.0
+            state.operator_sticker_ready_at = 0.0
+            return False, {**base_payload, "status": "part_ready_settling", "ready": False}
+        if not clamp_ready:
+            state.operator_sticker_delay_started_at = 0.0
+            state.operator_sticker_ready_at = 0.0
+            return False, {**base_payload, "status": "waiting_clamp", "ready": False}
+
+        delay_ms = float(self._phase_sticker_install_delay_ms)
+        if delay_ms <= 0:
+            if not state.operator_sticker_ready_at:
+                state.operator_sticker_ready_at = now_s
+            return True, {
+                **base_payload,
+                "status": "ready",
+                "ready": True,
+                "elapsed_ms": 0.0,
+            }
+
+        started_at = float(getattr(state, "operator_sticker_delay_started_at", 0.0) or 0.0)
+        if started_at <= 0:
+            started_at = now_s
+            state.operator_sticker_delay_started_at = started_at
+            state.operator_sticker_ready_at = 0.0
+        elapsed_ms = max(0.0, (now_s - started_at) * 1000.0)
+        if elapsed_ms < delay_ms:
+            return False, {
+                **base_payload,
+                "status": "sticker_install_delay",
+                "ready": False,
+                "elapsed_ms": round(elapsed_ms, 1),
+                "remaining_ms": round(delay_ms - elapsed_ms, 1),
+            }
+
+        if not state.operator_sticker_ready_at:
+            state.operator_sticker_ready_at = now_s
+        return True, {
+            **base_payload,
+            "status": "ready",
+            "ready": True,
+            "elapsed_ms": round(elapsed_ms, 1),
+        }
 
     def start_session(
         self,
@@ -236,7 +427,7 @@ class InspectionSessionService:
             line_id=line_id,
             station_id=station_id,
             session_reject_breakdown=_empty_reject_breakdown(),
-            inference_interval_ms=self._default_inference_interval_ms,
+            inference_interval_ms=0,
         )
         with self._lock:
             self._sessions[session_id] = state
@@ -394,19 +585,39 @@ class InspectionSessionService:
             state.part_ready_settle_started_at = None
             part_ready_settled = False
             settle_remaining_ms = 0.0
-            state.plc_part_ready_triggered = False
+            self._reset_clamp_gate(state)
 
         # Trigger PLC clamp hold on the first frame where part is settled.
-        # But check manual release cooldown (2s delay after IN1 release).
+        # But check release/next-part cooldown before re-clamping.
         _cooldown_until = float(getattr(state, "manual_release_cooldown_until", 0.0))
+        _now_s = time.time()
         if part_ready_settled and not state.plc_part_ready_triggered:
-            if _cooldown_until > 0 and time.time() < _cooldown_until:
-                # Still in cooldown — skip clamp trigger
+            if _cooldown_until > 0 and _now_s < _cooldown_until:
+                # Still in cooldown - skip clamp trigger
                 logger.debug("[inspection] cooldown active, skip clamp re-trigger")
             else:
                 state.plc_part_ready_triggered = True
+                state.plc_clamp_requested_at = _now_s
+                state.plc_clamp_ready_at = 0.0
+                state.plc_clamp_timeout = False
+                state.plc_clamp_event_id = state.current_event_id
                 if self._plc_worker is not None:
-                    self._plc_worker.enqueue_part_ready(event_id=state.current_event_id)
+                    try:
+                        self._plc_worker.enqueue_part_ready(event_id=state.current_event_id)
+                    except Exception as exc:
+                        logger.warning("[inspection] enqueue_part_ready failed: %s", exc)
+        clamp_ready_for_inference, clamp_payload = self._clamp_gate_status(
+            state,
+            part_ready_settled=bool(part_ready_settled),
+            now_s=_now_s,
+        )
+        phase_ready_for_inference, phase_payload = self._operator_phase_status(
+            state,
+            raw_part_ready=bool(_raw_part_ready),
+            part_ready_settled=bool(part_ready_settled),
+            clamp_ready=bool(clamp_ready_for_inference),
+            now_s=_now_s,
+        )
 
         # Augment part_ready dict in-place with settle observability fields.
         part_ready["part_ready_settled"] = part_ready_settled
@@ -424,6 +635,20 @@ class InspectionSessionService:
                 "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
                 "status": "settling",
             }
+        elif _raw_part_ready and part_ready_settled and not clamp_ready_for_inference:
+            effective_part_ready = {
+                **part_ready,
+                "part_ready": False,
+                "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
+                "status": str(clamp_payload.get("status") or "clamping"),
+            }
+        elif _raw_part_ready and part_ready_settled and clamp_ready_for_inference and not phase_ready_for_inference:
+            effective_part_ready = {
+                **part_ready,
+                "part_ready": False,
+                "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
+                "status": str(phase_payload.get("status") or "operator_phase_delay"),
+            }
         else:
             effective_part_ready = part_ready
 
@@ -431,7 +656,7 @@ class InspectionSessionService:
             state,
             part_ready=bool(_raw_part_ready),
             present=bool(presence.get("present", False)),
-            settled=bool(part_ready_settled),
+            settled=bool(part_ready_settled and clamp_ready_for_inference and phase_ready_for_inference),
         )
         if operator_state_decision.use_cached_result and state.inspection_result_cache:
             cached_payload = dict(state.inspection_result_cache)
@@ -452,6 +677,8 @@ class InspectionSessionService:
                     "part_ready": part_ready,
                     "event_state": InspectionEventState.COOLDOWN.value,
                     "operator_state": operator_state_decision.state.value,
+                    "clamp": clamp_payload,
+                    "phase": phase_payload,
                     "count_committed": False,
                     "count_source": None,
                     "counters": self._counter_payload(state),
@@ -521,6 +748,10 @@ class InspectionSessionService:
             _skip_reason = (
                 "part_ready_settling"
                 if _raw_part_ready and not part_ready_settled
+                else str(clamp_payload.get("status") or "clamping")
+                if _raw_part_ready and part_ready_settled and not clamp_ready_for_inference
+                else str(phase_payload.get("status") or "operator_phase_delay")
+                if _raw_part_ready and part_ready_settled and clamp_ready_for_inference and not phase_ready_for_inference
                 else (part_ready.get("reject_reason_code") or "part_not_ready")
             )
             sticker_detection = self._build_sticker_detection_payload(
@@ -566,6 +797,11 @@ class InspectionSessionService:
         persistence_started = time.perf_counter()
         db_write = {"written": False, "reason": "not_committed"}
         if count_committed:
+            if self._phase_next_part_delay_ms > 0:
+                state.manual_release_cooldown_until = max(
+                    float(getattr(state, "manual_release_cooldown_until", 0.0) or 0.0),
+                    time.time() + (self._phase_next_part_delay_ms / 1000.0),
+                )
             # Notify PLC worker of inspection decision
             decision = validation.get("decision", "")
             if self._plc_worker is not None and decision in ("ACCEPT", "REJECT"):
@@ -648,6 +884,8 @@ class InspectionSessionService:
             "validation": validation,
             "event_state": event_state,
             "operator_state": state.operator_state,
+            "clamp": clamp_payload,
+            "phase": phase_payload,
             "event_id": event_id,
             "count_committed": count_committed,
             "count_source": "session" if count_committed else None,
@@ -1049,11 +1287,9 @@ class InspectionSessionService:
         elif not bool(ocr.get("match_expected")):
             reject_reason = RejectReasonCode.WRONG_TEXT.value
         elif offset_x is None or offset_y is None:
-            reject_reason = RejectReasonCode.ANCHOR_MISMATCH.value
-        elif offset_limit_x is not None and abs(offset_x) > float(offset_limit_x):
-            reject_reason = RejectReasonCode.OUT_OF_POSITION.value
-        elif offset_limit_y is not None and abs(offset_y) > float(offset_limit_y):
-            reject_reason = RejectReasonCode.OUT_OF_POSITION.value
+            # Dot tidak terdeteksi — skip OUT_OF_POSITION (tidak ada dot)
+            # Langsung cek OUT_OF_ANGLE jika enabled
+            pass  # lanjut ke cek angle di bawah
         elif (
             thresholds["tilt_gate_enabled"]
             and max_tilt_degrees_value is not None
@@ -1226,10 +1462,6 @@ class InspectionSessionService:
             reject_reason = RejectReasonCode.LOW_CLASS_CONF.value
         elif thresholds["tilt_gate_enabled"] and max_tilt_degrees_value is not None and normalized_deviation is not None and normalized_deviation > max_tilt_degrees_value:
             reject_reason = RejectReasonCode.OUT_OF_ANGLE.value
-        elif offset_limit_x is not None and abs(offset_x) > float(offset_limit_x):
-            reject_reason = RejectReasonCode.OUT_OF_POSITION.value
-        elif offset_limit_y is not None and abs(offset_y) > float(offset_limit_y):
-            reject_reason = RejectReasonCode.OUT_OF_POSITION.value
         elif use_ocr and str(ocr_payload.get("status") or "") != "ok":
             reject_reason = RejectReasonCode.LOW_OCR_CONF.value
         elif use_ocr and ocr_payload.get("confidence") is not None and float(ocr_payload.get("confidence") or 0.0) < ocr_min_confidence:

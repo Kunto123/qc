@@ -14,8 +14,16 @@ class CameraCaptureService:
         self._lock = threading.Lock()
         self._frame = None
         self._camera_index = 0
+        self._actual_settings: dict[str, float] = {}
 
-    def start(self, camera_index: int) -> None:
+    def start(
+        self,
+        camera_index: int,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+        fps: float | None = None,
+    ) -> None:
         self.stop()
         self._camera_index = int(camera_index)
         self._capture = None
@@ -35,18 +43,29 @@ class CameraCaptureService:
 
         if self._capture is None or not self._capture.isOpened():
             raise RuntimeError(f"Cannot open camera index {camera_index}")
-        self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        self._capture.set(cv2.CAP_PROP_FPS, 30)
+        if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
+            self._capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if width is not None and int(width) > 0:
+            self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
+        if height is not None and int(height) > 0:
+            self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
+        if fps is not None and float(fps) > 0:
+            self._capture.set(cv2.CAP_PROP_FPS, float(fps))
+        self._actual_settings = {
+            "width": float(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0.0),
+            "height": float(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0.0),
+            "fps": float(self._capture.get(cv2.CAP_PROP_FPS) or 0.0),
+        }
         self._running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="camera-capture")
         self._thread.start()
 
     def _loop(self) -> None:
         # read() on most backends blocks until a frame is available; the sleep
         # only paces the loop when read() returns immediately (e.g. DSHOW non-block).
-        while self._running and self._capture is not None:
-            ok, frame = self._capture.read()
+        capture = self._capture
+        while self._running and capture is not None:
+            ok, frame = capture.read()
             if ok and frame is not None:
                 with self._lock:
                     self._frame = frame
@@ -57,11 +76,23 @@ class CameraCaptureService:
         with self._lock:
             return None if self._frame is None else self._frame.copy()
 
+    @property
+    def actual_settings(self) -> dict[str, float]:
+        return dict(self._actual_settings)
+
+    @property
+    def is_running(self) -> bool:
+        return bool(self._running and self._capture is not None)
+
     def stop(self) -> None:
         self._running = False
+        thread = self._thread
         if self._capture is not None:
             self._capture.release()
             self._capture = None
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=0.5)
         self._thread = None
+        self._actual_settings = {}
         with self._lock:
             self._frame = None

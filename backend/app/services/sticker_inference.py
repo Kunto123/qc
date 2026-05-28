@@ -10,6 +10,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 from backend.app.core.config import AppConfig
 from backend.app.core.device_runtime import DeviceResolution, DeviceRuntimeResolver
 from backend.app.repositories.models_repository import ModelsRepository
@@ -230,6 +232,9 @@ class StickerInferenceService:
 
     def _predict_tflite(self, image, vision: VisionConfig, expected_class: str | None = None) -> dict[str, Any]:
         """Run inference via TFLite interpreter (CPU-friendly)."""
+        import time as _time
+        t0 = _time.perf_counter()
+
         model_path = self._resolve_model_path(vision)
         if not model_path:
             raise FileNotFoundError("Sticker model path is not configured.")
@@ -237,15 +242,16 @@ class StickerInferenceService:
         if not resolved_model_path.exists():
             raise FileNotFoundError(f"TFLite model not found: {resolved_model_path}")
 
+        logger.info("[tflite] loading model: %s", resolved_model_path)
         interpreter = self._load_tflite_interpreter(str(resolved_model_path))
         input_details = interpreter.get_input_details()
         output_details = interpreter.get_output_details()
 
-        # Get input shape and dtype
-        input_shape = input_details[0]["shape"]  # e.g. [1, 640, 640, 3]
+        input_shape = input_details[0]["shape"]
         input_dtype = input_details[0]["dtype"]
+        logger.info("[tflite] input_shape=%s dtype=%s", input_shape, input_dtype)
 
-        # Preprocess: resize to model input size, normalize to [0,1]
+        # Preprocess
         h_in, w_in = int(input_shape[1]), int(input_shape[2])
         img_resized = cv2.resize(image, (w_in, h_in))
         img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
@@ -253,37 +259,32 @@ class StickerInferenceService:
         if input_dtype == np.float32:
             img_normalized = img_normalized / 255.0
         input_data = np.expand_dims(img_normalized, axis=0)
+        t1 = _time.perf_counter()
+        logger.info("[tflite] preprocess=%.1fms", (t1 - t0) * 1000)
 
         # Run inference
         interpreter.set_tensor(input_details[0]["index"], input_data)
         interpreter.invoke()
         output_data = interpreter.get_tensor(output_details[0]["index"])
+        t2 = _time.perf_counter()
+        logger.info("[tflite] invoke=%.1fms", (t2 - t1) * 1000)
 
-        # Parse output: TFLite YOLO output shape is typically [1, num_detections, 6+]
-        # where each detection is [x_center, y_center, w, h, conf, class_id, ...]
-        # or [1, 6+ , num_detections] depending on export format
+        # Parse output
         raw_box_count = 0
         detections = []
-
         if output_data is not None and output_data.size > 0:
-            # Handle different output formats
-            out = output_data[0]  # remove batch dim
-            # If shape is [num_detections, 6+], iterate rows
-            # If shape is [6+, num_detections], transpose
+            out = output_data[0]
+            logger.info("[tflite] output_shape=%s", out.shape)
             if out.ndim == 2:
                 if out.shape[0] < out.shape[1]:
-                    # Shape is [6+, num_detections] → transpose
                     out = out.T
-                # Now out is [num_detections, 6+]
                 raw_box_count = int(out.shape[0])
                 for row in out:
                     conf = float(row[4]) if len(row) > 4 else 0.0
                     if conf < float(vision.conf_threshold):
                         continue
                     class_id = int(row[5]) if len(row) > 5 else 0
-                    # Build detection dict
                     xc, yc, w_b, h_b = float(row[0]), float(row[1]), float(row[2]), float(row[3])
-                    # Convert from center format to xyxy (normalized 0-1)
                     x1 = max(0.0, xc - w_b / 2)
                     y1 = max(0.0, yc - h_b / 2)
                     x2 = min(1.0, xc + w_b / 2)
@@ -297,12 +298,15 @@ class StickerInferenceService:
                         "bbox": [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)],
                     })
 
-        # Load class names from meta
+        t3 = _time.perf_counter()
+        logger.info("[tflite] total=%.1fms parse=%.1fms raw=%d filtered=%d",
+                     (t3 - t0) * 1000, (t3 - t2) * 1000, raw_box_count, len(detections))
+
+        # Load class names and filter
         meta = self._load_meta(self._resolve_meta_path(vision))
         class_names = meta.get("class_names", [])
         names_map = {i: name for i, name in enumerate(class_names)}
 
-        # Apply allowed labels filter
         allowed_label_values = [str(label) for label in (vision.classes or []) if str(label).strip()]
         if expected_class and str(expected_class).strip():
             allowed_label_values.append(str(expected_class).strip())
@@ -312,7 +316,6 @@ class StickerInferenceService:
                     allowed_label_values.append(str(label))
         allowed_labels = {label.strip().lower() for label in allowed_label_values} or None
 
-        # Filter detections by allowed labels
         filtered = []
         for det in detections:
             label = names_map.get(det["class_id"], str(det["class_id"]))
@@ -410,23 +413,41 @@ class StickerInferenceService:
         }
 
     def _crop_text_anchor(self, image, text_bbox: dict[str, Any] | None, vision: VisionConfig):
-        if image is None or getattr(image, "size", 0) == 0 or not text_bbox:
+        """Crop text area dari image. Perbesar area untuk improve OCR."""
+        if image is None or getattr(image, "size", 0) == 0:
             return None
         height, width = image.shape[:2]
+
+        # Kalau text_bbox tidak ada, gunakan seluruh image (fallback)
+        if not text_bbox:
+            return image
+
         x1 = float(text_bbox.get("x1", 0.0))
         y1 = float(text_bbox.get("y1", 0.0))
         x2 = float(text_bbox.get("x2", 0.0))
         y2 = float(text_bbox.get("y2", 0.0))
-        pad_ratio = max(0.0, float(getattr(vision, "anchor_crop_padding_ratio", 0.08) or 0.0))
+
+        # Perbesar padding untuk capture lebih banyak konteks
+        pad_ratio = max(0.0, float(getattr(vision, "anchor_crop_padding_ratio", 0.15) or 0.15))
         pad_x = (x2 - x1) * pad_ratio
         pad_y = (y2 - y1) * pad_ratio
+
+        # Tambah padding minimum 10 pixel
+        pad_x = max(pad_x, 10)
+        pad_y = max(pad_y, 10)
+
         ix1 = max(0, int(round(x1 - pad_x)))
         iy1 = max(0, int(round(y1 - pad_y)))
         ix2 = min(width, int(round(x2 + pad_x)))
         iy2 = min(height, int(round(y2 + pad_y)))
+
         if ix2 <= ix1 or iy2 <= iy1:
             return None
-        return image[iy1:iy2, ix1:ix2]
+
+        cropped = image[iy1:iy2, ix1:ix2]
+        logger.info("[ocr] crop: bbox=%.0fx%.0f pad=%.0fpx → crop=%dx%d",
+                     x2-x1, y2-y1, pad_x, cropped.shape[1], cropped.shape[0])
+        return cropped
 
     def _preprocess_ocr_crop(self, crop, vision: VisionConfig):
         if crop is None or getattr(crop, "size", 0) == 0:
@@ -463,7 +484,7 @@ class StickerInferenceService:
                 "error": str(exc),
             }
 
-        config_parts = [f"--psm {int(getattr(vision, 'ocr_psm', 7) or 7)}"]
+        config_parts = [f"--psm {int(getattr(vision, 'ocr_psm', 6) or 6)}"]
         allowlist = str(getattr(vision, "ocr_allowlist", "") or "").strip()
         if allowlist:
             config_parts.append(f"-c tessedit_char_whitelist={allowlist}")
@@ -503,6 +524,7 @@ class StickerInferenceService:
 
         raw_text = " ".join(words).strip()
         confidence = round(sum(confidences) / len(confidences), 4) if confidences else 0.0
+        logger.info("[ocr] raw='%s' conf=%.2f words=%d", raw_text, confidence * 100, len(words))
         canonical_text = self.normalize_ocr_text(
             raw_text,
             expected_text=expected_text,
@@ -579,13 +601,34 @@ class StickerInferenceService:
 
     @staticmethod
     def parse_unique_code(ocr_text: str, separator: str = "-") -> str:
+        """Parse kode dari hasil OCR. Handle multi-line.
+
+        Untuk sticker dengan 2 baris, OCR bisa menghasilkan:
+        "K0W-HB0\\nK1Z-FA0" atau "K0W-HB0 K1Z-FA0"
+
+        Strategy:
+        1. Split by newline
+        2. Untuk setiap baris, cari bagian terakhir setelah separator
+        3. Return baris yang paling cocok (punya separator)
+        """
         text = str(ocr_text or "").strip()
         if not text:
             return ""
-        parts = text.split(separator)
-        if len(parts) < 2:
-            return text
-        return parts[-1].strip()
+
+        # Handle multi-line: split by newline, proses setiap baris
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        if not lines:
+            return ""
+
+        # Untuk setiap baris, cari kode setelah separator
+        for line in lines:
+            parts = line.split(separator)
+            if len(parts) >= 2:
+                # Ambil bagian terakhir (setelah separator terakhir)
+                return parts[-1].strip()
+
+        # Fallback: kalau tidak ada separator, return baris pertama
+        return lines[0].strip()
 
     def _ocr_passthrough(
         self,
@@ -711,10 +754,12 @@ class StickerInferenceService:
     ) -> dict[str, Any]:
         dot_position = anchor.get("dot_position")
         text_position = anchor.get("text_position")
+        sticker_center = None
         if image is None or getattr(image, "size", 0) == 0:
             roi_w = roi_h = 0
         else:
             roi_h, roi_w = image.shape[:2]
+            sticker_center = {"x": round(roi_w / 2.0, 2), "y": round(roi_h / 2.0, 2)}
 
         expected_dot_x_ratio = getattr(sticker_rule, "expected_dot_x", None) if sticker_rule is not None else None
         expected_dot_y_ratio = getattr(sticker_rule, "expected_dot_y", None) if sticker_rule is not None else None
@@ -738,12 +783,15 @@ class StickerInferenceService:
             }
         pose_angle = None
         pose_deviation = None
-        if dot_position is not None and text_position is not None:
-            dx = float(dot_position["x"]) - float(text_position["x"])
-            dy = float(dot_position["y"]) - float(text_position["y"])
-            pose_angle = round(float(np.degrees(np.arctan2(dy, dx))), 2)
-            expected_tilt = float(getattr(sticker_rule, "expected_tilt_degrees", 0.0) or 0.0) if sticker_rule is not None else 0.0
-            pose_deviation = round(self._angle_delta_degrees(float(pose_angle), expected_tilt), 2)
+        if text_position is not None:
+            # Gunakan dot_position jika ada, fallback ke sticker bbox center
+            ref_position = dot_position if dot_position is not None else sticker_center
+            if ref_position is not None:
+                dx = float(ref_position["x"]) - float(text_position["x"])
+                dy = float(ref_position["y"]) - float(text_position["y"])
+                pose_angle = round(float(np.degrees(np.arctan2(dy, dx))), 2)
+                expected_tilt = float(getattr(sticker_rule, "expected_tilt_degrees", 0.0) or 0.0) if sticker_rule is not None else 0.0
+                pose_deviation = round(self._angle_delta_degrees(float(pose_angle), expected_tilt), 2)
         return {
             "status": "ok" if dot_position is not None and text_position is not None else "missing_anchor",
             "text_position": text_position,
@@ -830,7 +878,11 @@ class StickerInferenceService:
             }
 
         expected_tilt = float(getattr(sticker_rule, "expected_tilt_degrees", 0.0) or 0.0) if sticker_rule is not None else 0.0
-        tilt_info = estimate_white_text_tilt(image, expected_tilt, sticker_rule)
+
+        # Skip tilt calculation kalau text_anchor tidak ada (hemat CPU)
+        tilt_info = {"status": "skipped", "angle_degrees": None, "deviation_degrees": None}
+        if text_anchor is not None:
+            tilt_info = estimate_white_text_tilt(image, expected_tilt, sticker_rule)
         geometry = {
             "status": "ok" if text_anchor is not None else "missing_anchor",
             "text_position": text_position,

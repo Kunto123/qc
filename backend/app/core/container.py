@@ -80,6 +80,10 @@ plc_worker: PlcWorker | None = (
         _plc_adapter,
         accept_pulse_ms=app_config.plc_accept_pulse_ms,
         num_channels=4,
+        input_release_address=app_config.plc_input_release_address,
+        input_template_address=app_config.plc_input_template_address,
+        input_clamp_engaged_address=app_config.plc_input_clamp_engaged_address,
+        clamp_feedback_enabled=app_config.plc_clamp_feedback_enabled,
     )
     if app_config.plc_enabled
     else None
