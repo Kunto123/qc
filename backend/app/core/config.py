@@ -75,6 +75,35 @@ class AppConfig:
     # Templates that explicitly set part_ready_settle_ms (including 0 to bypass) ignore it.
     # Default 0 = no settle (backward compatible).
     part_ready_settle_ms_default: int = max(0, int(os.getenv("QC_SUITE_PART_READY_SETTLE_MS", "0")))
+    # Consecutive reject threshold — number of consecutive reject decisions required
+    # before a reject is actually committed (PLC reject). 0 = immediate (no delay).
+    # Set to 2-3 to allow operator to reposition sticker before final reject.
+    max_consecutive_rejects: int = max(0, int(os.getenv("QC_SUITE_MAX_CONSECUTIVE_REJECTS", "0")))
+    # Part-ready latch release debounce (ms).
+    # When raw part_ready drops (e.g. shadow), the latch stays active for this duration
+    # so sticker inference is not cancelled by brief noise.
+    # 0 = legacy behavior (latch resets immediately when raw drops).
+    part_ready_release_ms_default: int = max(0, int(os.getenv("QC_SUITE_PART_READY_RELEASE_MS", "300")))
+    # ── Inspection Policy ──
+    # Hard reject reasons: only these trigger PLC buzzer/reject.
+    # Non-hard reject reasons (NOT_FOUND, WRONG_TYPE, etc.) become pending/adjust
+    # without PLC commit. Comma-separated list of RejectReasonCode values.
+    inspect_hard_reject_reasons: str = os.getenv(
+        "QC_SUITE_INSPECT_HARD_REJECT_REASONS", "OUT_OF_ANGLE"
+    ).strip()
+    # Commit grace period (ms): minimum time after inference starts before any
+    # commit (accept or hard reject) is allowed. This gives operator time to
+    # adjust sticker before final decision. Default 1500ms.
+    commit_grace_ms: int = max(0, int(os.getenv("QC_SUITE_STICKER_COMMIT_GRACE_MS", "1500")))
+    # Stability thresholds for commit:
+    # accept: minimal consecutive stable frames before commit (default 2).
+    accept_stable_frames: int = max(1, int(os.getenv("QC_SUITE_ACCEPT_STABLE_FRAMES", "2")))
+    # accept: minimal stable elapsed ms before commit (default 200).
+    accept_stable_ms: int = max(0, int(os.getenv("QC_SUITE_ACCEPT_STABLE_MS", "200")))
+    # hard_reject: minimal consecutive stable frames before commit (default 3).
+    hard_reject_stable_frames: int = max(1, int(os.getenv("QC_SUITE_HARD_REJECT_STABLE_FRAMES", "3")))
+    # hard_reject: minimal stable elapsed ms before commit (default 500).
+    hard_reject_stable_ms: int = max(0, int(os.getenv("QC_SUITE_HARD_REJECT_STABLE_MS", "500")))
     # Operator phase pacing. These are non-blocking gates; preview stays live.
     # STICKER_INSTALL delays sticker inference after clamp is ready, giving the
     # operator time to attach the sticker.

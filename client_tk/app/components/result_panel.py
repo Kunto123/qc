@@ -34,6 +34,8 @@ class ResultPanel(ctk.CTkFrame):
         self.live_decision_var = self._build_field(self.live_frame, 1, "Live Decision")
         self.live_reason_var = self._build_field(self.live_frame, 2, "Live Reason")
         self.live_template_version_var = self._build_field(self.live_frame, 3, "Template Version")
+        self.live_inference_gate_var = self._build_field(self.live_frame, 4, "Inference Gate")
+        self.live_latch_var = self._build_field(self.live_frame, 5, "Part Latch")
 
         self.part_ready_frame = self._build_section("Part Ready Gate")
         self.part_ready_status_var = self._build_field(self.part_ready_frame, 0, "Status")
@@ -113,6 +115,7 @@ class ResultPanel(ctk.CTkFrame):
         live_session = payload.get("session") or {}
         live_details = live_validation.get("validation_details") or {}
         live_candidate = live_details.get("selected_candidate") or {}
+        live_inference_gate = payload.get("inference_gate") or {}
 
         committed = payload.get("last_committed_result") or {}
         committed_validation = committed.get("validation") or {}
@@ -137,12 +140,44 @@ class ResultPanel(ctk.CTkFrame):
         self.live_decision_var.configure(text=str(live_validation.get("decision") or "-"))
         self.live_reason_var.configure(text=str(live_reason))
         self.live_template_version_var.configure(text=str(live_session.get("template_version_id") or "-"))
+        # Inference gate display
+        _gate = live_inference_gate
+        if _gate:
+            _can_infer = _gate.get("can_infer", False)
+            _block_reason = _gate.get("block_reason") or "-"
+            _latch = _gate.get("part_ready_latched", False)
+            _gate_text = f"{'CAN INFER' if _can_infer else f'BLOCKED: {_block_reason}'} | latched={_latch}"
+        else:
+            _gate_text = "-"
+        self.live_inference_gate_var.configure(text=_gate_text)
+        # Part latch display
+        _latch_status = live_part_ready.get("latch_status") or "inactive"
+        _effective_pr = live_part_ready.get("effective_part_ready", False)
+        self.live_latch_var.configure(text=f"{_latch_status} | effective={'READY' if _effective_pr else 'BLOCK'}")
+        # Inspection policy display
+        _policy = payload.get("inspection_policy") or {}
+        if _policy:
+            _action = _policy.get("action", "-")
+            _pending_r = _policy.get("pending_reason", "")
+            _policy_text = f"{_action}"
+            if _pending_r and _action == "pending":
+                _policy_text = f"WAITING: {_pending_r}"
+        else:
+            _policy_text = "-"
+        # Add policy display to live_state_var (append)
+        self.live_state_var.configure(text=f"{str(payload.get('event_state') or '-').upper()} | {_policy_text}")
 
         part_ready_status = display_part_ready.get("status") or ("ready" if display_part_ready.get("part_ready") else "not_ready")
+        effective_ready = display_part_ready.get("effective_part_ready")
+        if effective_ready is not None:
+            _gate_label = "READY" if effective_ready else "BLOCK"
+        else:
+            _gate_label = "READY" if display_part_ready.get("part_ready") else "BLOCK"
         if not display_part_ready.get("enabled", True):
             part_ready_status = part_ready_status or "skipped"
+        latch_text = f" | latch={display_part_ready.get('latch_status', 'inactive')}"
         self.part_ready_status_var.configure(
-            text=f"{str(part_ready_status).upper()} | gate={'READY' if display_part_ready.get('part_ready') else 'BLOCK'}"
+            text=f"{str(part_ready_status).upper()} | gate={_gate_label}{latch_text}"
         )
         self.part_ready_ratio_var.configure(text=_format_metric(display_part_ready.get("match_ratio")))
         self.part_ready_raw_ratio_var.configure(text=_format_metric(display_part_ready.get("raw_match_ratio")))

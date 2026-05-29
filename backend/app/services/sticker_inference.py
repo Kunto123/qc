@@ -128,7 +128,7 @@ class StickerInferenceService:
             if model is not None:
                 return model
             YOLO = self._load_yolo_class()
-            model = YOLO(resolved)
+            model = YOLO(resolved, task="detect")
             self._loaded_models[resolved] = model
             return model
 

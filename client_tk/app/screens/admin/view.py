@@ -217,6 +217,7 @@ class AdminScreen(ctk.CTkFrame):
         self.training_base_model_var = tk.StringVar()
         self.training_device_var = tk.StringVar(value="auto")
         self.training_epochs_var = tk.StringVar(value="200")
+        self._admin_train_mode_var = tk.StringVar(value="real")
         self.augment_dataset_var = tk.StringVar()
         self.model_import_path_var = tk.StringVar()
 
@@ -840,9 +841,12 @@ class AdminScreen(ctk.CTkFrame):
                 continue
             base_model_values.append(label)
             self._base_model_lookup[label] = dict(item)
-        if hasattr(self, "training_base_model_selector"):
-            self.training_base_model_selector.configure(values=base_model_values)
-            if base_model_values and self.training_base_model_var.get().strip() not in base_model_values:
+        if hasattr(self, "_admin_train_base_model_combo"):
+            self._admin_train_base_model_combo.configure(values=base_model_values)
+            if base_model_values and self._admin_train_base_model_var.get().strip() not in base_model_values:
+                self._admin_train_base_model_var.set(base_model_values[0])
+        if hasattr(self, "training_base_model_var") and base_model_values:
+            if self.training_base_model_var.get().strip() not in base_model_values:
                 self.training_base_model_var.set(base_model_values[0])
         if hasattr(self, "training_jobs_table"):
             self._clear_tree(self.training_jobs_table)
@@ -2531,7 +2535,13 @@ class AdminScreen(ctk.CTkFrame):
         form = ttk.Frame(train_panel)
         form.pack(fill="x")
         form.columnconfigure(1, weight=1)
+        # Training mode indicator
+        mode_frame = ttk.Frame(form)
+        mode_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        ttk.Label(mode_frame, text="Mode:", font=("Segoe UI", 8), foreground="#64748b").pack(side="left")
+        ttk.Label(mode_frame, textvariable=self._admin_train_mode_var, font=("Segoe UI", 8, "bold"), foreground="#166534").pack(side="left", padx=(4, 0))
         self._admin_train_dataset_var = tk.StringVar()
+        self._admin_train_dataset_version_var = tk.StringVar()
         self._admin_train_base_model_var = tk.StringVar()
         self._admin_train_device_var = tk.StringVar(value="auto")
         self._admin_train_epochs_var = tk.StringVar(value="1")
@@ -2541,17 +2551,22 @@ class AdminScreen(ctk.CTkFrame):
         self._admin_train_workers_var = tk.StringVar(value="0")
         self._admin_train_cache_var = tk.BooleanVar(value=False)
 
-        ttk.Label(form, text="Dataset").grid(row=0, column=0, sticky="w")
+        ttk.Label(form, text="Dataset").grid(row=1, column=0, sticky="w")
         self._admin_train_dataset_combo = ttk.Combobox(form, textvariable=self._admin_train_dataset_var, state="readonly")
-        self._admin_train_dataset_combo.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self._admin_train_dataset_combo.grid(row=1, column=1, sticky="ew", padx=(4, 0))
         self._admin_train_dataset_combo.bind("<<ComboboxSelected>>", self._on_admin_train_dataset_selected)
 
-        ttk.Label(form, text="Base Model").grid(row=1, column=0, sticky="w")
-        self._admin_train_base_model_combo = ttk.Combobox(form, textvariable=self._admin_train_base_model_var, state="readonly")
-        self._admin_train_base_model_combo.grid(row=1, column=1, sticky="ew", padx=(4, 0))
+        ttk.Label(form, text="Version").grid(row=2, column=0, sticky="w")
+        self._admin_train_dataset_version_combo = ttk.Combobox(form, textvariable=self._admin_train_dataset_version_var, state="readonly")
+        self._admin_train_dataset_version_combo.grid(row=2, column=1, sticky="ew", padx=(4, 0))
+        self._admin_train_dataset_version_combo.bind("<<ComboboxSelected>>", self._on_admin_train_dataset_selected)
 
-        ttk.Label(form, text="Device").grid(row=2, column=0, sticky="w")
-        ttk.Combobox(form, textvariable=self._admin_train_device_var, values=["auto", "gpu", "cpu"], state="readonly").grid(row=2, column=1, sticky="ew", padx=(4, 0))
+        ttk.Label(form, text="Base Model").grid(row=3, column=0, sticky="w")
+        self._admin_train_base_model_combo = ttk.Combobox(form, textvariable=self._admin_train_base_model_var, state="readonly")
+        self._admin_train_base_model_combo.grid(row=3, column=1, sticky="ew", padx=(4, 0))
+
+        ttk.Label(form, text="Device").grid(row=4, column=0, sticky="w")
+        ttk.Combobox(form, textvariable=self._admin_train_device_var, values=["auto", "gpu", "cpu"], state="readonly").grid(row=4, column=1, sticky="ew", padx=(4, 0))
 
         self._admin_train_readiness_var = tk.StringVar(value="Select dataset to check readiness.")
         ttk.Label(train_panel, textvariable=self._admin_train_readiness_var, foreground="#475569", wraplength=400, justify="left").pack(anchor="w", pady=(2, 0))
@@ -2606,7 +2621,8 @@ class AdminScreen(ctk.CTkFrame):
             name = str(item.get("name") or "")
             images = int(item.get("image_count") or 0)
             ann = int(item.get("annotated_image_count") or 0)
-            display = f"{name} | {ds_id} | {images}img {ann}ann"
+            aug = int(item.get("augmented_count") or 0)
+            display = f"{name} | {ds_id} | {images}img {ann}ann +{aug}aug"
             values.append(display)
             display_to_id[display] = ds_id
             id_to_display[ds_id] = display
@@ -2614,6 +2630,38 @@ class AdminScreen(ctk.CTkFrame):
         self._admin_train_id_to_display = id_to_display
         self._admin_train_dataset_combo["values"] = values
         self._admin_aug_dataset_combo["values"] = values
+        self._admin_train_version_display_to_id: dict[str, str] = {}
+
+    def _sync_admin_dataset_versions(self, ds_id: str, images: int, ann: int) -> None:
+        """Load dataset versions and populate the version dropdown."""
+        if images == 0 or ann == 0:
+            self._admin_train_readiness_var.set(f"NOT READY - {images} images, {ann} annotations. Complete upload + annotation first.")
+            self._admin_train_dataset_version_combo["values"] = []
+            self._admin_train_version_display_to_id = {}
+            self._admin_train_dataset_version_var.set("")
+            return
+        # Fetch versions for this dataset
+        try:
+            versions = self.api.list_dataset_versions(ds_id)
+        except Exception:
+            versions = []
+        ver_values: list[str] = []
+        ver_display_to_id: dict[str, str] = {}
+        for v in versions:
+            v_id = str(v.get("id") or "").strip()
+            v_num = str(v.get("version_number") or "?").strip()
+            v_status = str(v.get("status") or "unknown").strip()
+            v_label = f"v{v_num} ({v_status})"
+            ver_values.append(v_label)
+            ver_display_to_id[v_label] = v_id
+        self._admin_train_version_display_to_id = ver_display_to_id
+        self._admin_train_dataset_version_combo["values"] = ver_values
+        if ver_values:
+            self._admin_train_dataset_version_var.set(ver_values[0])
+            self._admin_train_readiness_var.set(f"READY - {images} images, {ann} annotations, {len(ver_values)} version(s)")
+        else:
+            self._admin_train_dataset_version_var.set("")
+            self._admin_train_readiness_var.set(f"READY - {images} images, {ann} annotations. NO VERSION — create one in Data tab first.")
 
     def _on_admin_train_dataset_selected(self, _event=None) -> None:
         display = self._admin_train_dataset_var.get().strip()
@@ -2626,11 +2674,8 @@ class AdminScreen(ctk.CTkFrame):
             return
         images = int(ds.get("image_count") or 0)
         ann = int(ds.get("annotated_image_count") or 0)
-        if images == 0 or ann == 0:
-            self._admin_train_readiness_var.set(f"NOT READY - {images} images, {ann} annotations. Complete upload + annotation in Data tab first.")
-        else:
-            coverage = ds.get("annotation_coverage", 0)
-            self._admin_train_readiness_var.set(f"READY - {images} images, {ann} annotations, coverage {coverage:.0%}")
+        # Sync dataset version dropdown
+        self._sync_admin_dataset_versions(ds_id, images, ann)
         self._admin_aug_dataset_var.set(display)
         self._admin_update_augment_estimator()
         self._admin_update_flow_steps()
@@ -2640,6 +2685,8 @@ class AdminScreen(ctk.CTkFrame):
             return
         ds = self._admin_train_dataset_var.get().strip()
         self._flow_step_vars[0].set("\u2713" if ds else "\u25cb")
+        ver = self._admin_train_dataset_version_var.get().strip()
+        self._flow_step_vars[1].set("\u2713" if ver else "\u25cb")
         bm = self._admin_train_base_model_var.get().strip()
         self._flow_step_vars[2].set("\u2713" if bm else "\u25cb")
         ep = self._admin_train_epochs_var.get().strip()
@@ -2695,10 +2742,19 @@ class AdminScreen(ctk.CTkFrame):
             if images == 0 or ann == 0:
                 messagebox.showwarning("Training", f"Dataset not ready. Images: {images}, Annotations: {ann}")
                 return
-        bm = self._admin_train_base_model_var.get().strip()
-        if not bm:
+        # Check dataset version selection
+        version_display = self._admin_train_dataset_version_var.get().strip()
+        ds_version_id = self._admin_train_version_display_to_id.get(version_display, version_display) if version_display else None
+        bm_label = self._admin_train_base_model_var.get().strip()
+        if not bm_label:
             messagebox.showwarning("Training", "Select base model first.")
             return
+        if not ds_version_id:
+            messagebox.showwarning("Training", "Select a dataset version. Go to Data tab → create a version first.")
+            return
+        # Resolve base model: combo has display labels, worker needs the catalog id
+        bm_spec = self._base_model_lookup.get(bm_label)
+        bm_id = bm_spec["id"] if bm_spec else bm_label
         try:
             epochs = int(self._admin_train_epochs_var.get())
             imgsz = int(self._admin_train_imgsz_var.get())
@@ -2710,7 +2766,8 @@ class AdminScreen(ctk.CTkFrame):
             return
         payload = {
             "dataset_id": ds_id,
-            "base_model": bm,
+            "dataset_version_id": ds_version_id,
+            "base_model": bm_id,
             "device_mode": self._admin_train_device_var.get().strip() or "auto",
             "epochs": epochs, "imgsz": imgsz, "batch": batch,
             "patience": patience, "workers": workers,

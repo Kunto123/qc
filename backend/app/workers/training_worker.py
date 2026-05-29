@@ -512,7 +512,7 @@ class TrainingWorker:
             resolved_weights_source=weights_resolution.weights_source,
             resolution_attempts=weights_resolution.resolution_attempts,
         )
-        model = YOLO(weights_resolution.resolved_path)
+        model = YOLO(weights_resolution.resolved_path, task="detect")
 
         # Log hparams before training starts so log reflects what was actually requested.
         self._repo.update_job(

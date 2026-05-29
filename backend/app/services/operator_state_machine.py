@@ -46,6 +46,7 @@ class OperatorInspectionStateMachine:
             session_state.part_removed_seen_at = datetime.now(UTC)
             session_state.settle_frame_count = 0
             session_state.last_inference_ms = 0
+            session_state.consecutive_reject_count = 0
             return OperatorStateDecision(
                 state=OperatorRuntimeState.IDLE,
                 run_inspection=False,

@@ -71,3 +71,25 @@ class SessionState:
     # Last activity timestamp (seconds since epoch) — updated on every frame process.
     # Used for idle timeout auto-end.
     last_activity_at: float = 0.0
+    # Consecutive reject counter — incremented on each committed reject decision.
+    # Reset to 0 on accept. Used to require N consecutive rejects before final reject.
+    consecutive_reject_count: int = 0
+    # Max consecutive rejects allowed before auto-commit reject (0 = immediate, no delay).
+    max_consecutive_rejects: int = 0
+    # ── Part-Ready Latch State ──
+    # Once raw_part_ready is settled and clamp is requested, we latch so brief
+    # drops in raw_part_ready (shadow, vibration) do not cancel the cycle.
+    part_ready_latched: bool = False
+    part_ready_latched_at: datetime | None = None
+    # Timestamp when raw_part_ready last dropped while latched.
+    # Used to debounce latch release via release_ms.
+    part_ready_unsettled_at: datetime | None = None
+    # ── Inspection Policy Stability Tracking ──
+    # Policy key = hash of (decision, reject_reason_code, detected_class, expected_class)
+    # Used to track consecutive stable frames before commit.
+    last_policy_key: str = ""
+    policy_stable_started_at: datetime | None = None
+    policy_stable_frames: int = 0
+    # After ACCEPT commit, wait for part to actually leave before allowing next cycle.
+    awaiting_part_removal_after_commit: bool = False
+    part_absent_started_at: datetime | None = None

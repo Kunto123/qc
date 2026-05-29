@@ -190,16 +190,30 @@ class DatasetVersionRepository(JsonRepository):
 
         source_stats = self._snapshot_source(dataset_id, source_images, source_images_dir, source_labels_dir)
 
-        # Integrate augmented images into the snapshot.
-        # When geometric_augment_enabled=True, the label geometry engine transforms annotations
-        # for geometric transforms. Otherwise annotations are copied verbatim (photometric-safe).
+        # Collect augmented images separately (NOT merged into source).
+        # Augmented images will only be added to the TRAIN split, never to val/test.
+        # This ensures evaluation is done on original (unaugmented) images only.
+        augmented_files: list[Path] = []
+        augmented_annotations: dict[str, dict] = {}
         augmented_image_count = 0
         selected_augment_job_ids: list[str] = []
         if augment_jobs:
-            aug_stats = self._snapshot_augmented(dataset_id, augment_jobs, source_images_dir, source_labels_dir)
-            augmented_image_count = aug_stats["augmented_image_count"]
+            # Resolve global augment flag for geometric transforms
+            geo_aug_enabled = getattr(self, "_geometric_augment_enabled", False)
+            geo_flag_source = getattr(augment_jobs[0] if augment_jobs else {}, "_geometric_augment_enabled", None)
+            if geo_aug_enabled is False and geo_flag_source is not None:
+                geo_aug_enabled = bool(geo_flag_source)
+            augmented_files, augmented_annotations, augmented_image_count = (
+                self._collect_augmented_only(
+                    dataset_id=dataset_id,
+                    augment_jobs=augment_jobs,
+                    version_root=version_root,
+                    geometric_augment_enabled=geo_aug_enabled,
+                )
+            )
             selected_augment_job_ids = [str(j.get("id") or "") for j in augment_jobs]
 
+        # Split and export: source images only go to train/val/test
         export_stats = self._build_export_from_snapshot(
             source_images_dir=source_images_dir,
             source_labels_dir=source_labels_dir,
@@ -207,6 +221,19 @@ class DatasetVersionRepository(JsonRepository):
             split_ratios=split_ratios,
             seed=f"{dataset_id}:{version_number}:{version_id}",
         )
+
+        # Append augmented images to TRAIN split only
+        if augmented_files:
+            export_train_images = export_root / "images" / "train"
+            export_train_labels = export_root / "labels" / "train"
+            for aug_img_path in augmented_files:
+                shutil.copy2(aug_img_path, export_train_images / aug_img_path.name)
+                # Write annotation for augmented image
+                aug_ann = augmented_annotations.get(aug_img_path.name, {})
+                if aug_ann:
+                    label_dest = export_train_labels / f"{aug_img_path.stem}.json"
+                    label_dest.parent.mkdir(parents=True, exist_ok=True)
+                    label_dest.write_text(json.dumps(aug_ann, ensure_ascii=True, indent=2), encoding="utf-8")
 
         snapshot_stats = self._snapshot_annotation_stats(
             source_images_dir=source_images_dir,
@@ -224,7 +251,8 @@ class DatasetVersionRepository(JsonRepository):
             "status": "ready" if export_stats["class_names"] else "draft",
             "ready_for_training": bool(export_stats["class_names"]),
             "split_ratios": split_ratios,
-            "image_count": snapshot_stats["image_count"],
+            "image_count": snapshot_stats["image_count"] + augmented_image_count,
+            "source_image_count": snapshot_stats["image_count"],
             "label_count": snapshot_stats["label_count"],
             "annotated_image_count": snapshot_stats["annotated_image_count"],
             "annotation_coverage": snapshot_stats["annotation_coverage"],
@@ -426,6 +454,84 @@ class DatasetVersionRepository(JsonRepository):
                 augmented_count += 1
 
         return {"augmented_image_count": augmented_count}
+
+    def _collect_augmented_only(
+        self,
+        *,
+        dataset_id: str,
+        augment_jobs: list[dict],
+        version_root: Path,
+        geometric_augment_enabled: bool = False,
+    ) -> tuple[list[Path], dict[str, dict], int]:
+        """Collect augmented images WITHOUT merging them into the source snapshot.
+
+        Augmented images are copied to a separate ``augmented/`` folder inside the
+        version root.  Later, ``create_version`` appends them to the TRAIN split only
+        so that val/test contain exclusively original (unaugmented) images.
+
+        Returns ``(augmented_files, augmented_annotations, count)``.
+        """
+        from backend.app.core.label_geometry import transform_labels  # lazy import
+
+        aug_dir = version_root / "augmented" / "images"
+        aug_dir.mkdir(parents=True, exist_ok=True)
+
+        augmented_files: list[Path] = []
+        augmented_annotations: dict[str, dict] = {}
+        augmented_count = 0
+
+        for job in augment_jobs:
+            output_dir_str = str(job.get("output_dataset_id") or "")
+            if not output_dir_str:
+                continue
+            output_dir = Path(output_dir_str)
+            if not output_dir.exists() or not output_dir.is_dir():
+                continue
+
+            for aug_file in sorted(output_dir.iterdir()):
+                if not aug_file.is_file() or aug_file.suffix.lower() not in _IMAGE_EXTS:
+                    continue
+
+                # Copy augmented image to the separate augmented folder
+                dest = aug_dir / aug_file.name
+                shutil.copy2(aug_file, dest)
+                augmented_files.append(dest)
+
+                # Build annotation for this augmented image
+                orig_stem = _original_stem(aug_file.stem)
+                annotation: dict = {}
+                if orig_stem:
+                    for ext in (aug_file.suffix.lower(), ".jpg", ".jpeg", ".png", ".bmp", ".webp"):
+                        candidate_name = f"{orig_stem}{ext}"
+                        ann = self._datasets_repo.get_annotation(dataset_id, candidate_name)
+                        if isinstance(ann, dict) and ann.get("labels"):
+                            annotation = ann
+                            break
+                    # Look for a .trace.json sidecar to transform labels
+                    trace_path = aug_file.parent / f"{aug_file.stem}.trace.json"
+                    if trace_path.exists() and annotation:
+                        try:
+                            trace = json.loads(trace_path.read_text(encoding="utf-8"))
+                        except (json.JSONDecodeError, OSError):
+                            trace = {}
+                        if geometric_augment_enabled and trace.get("transforms"):
+                            annotation = transform_labels(annotation, trace["transforms"])
+                        elif not geometric_augment_enabled:
+                            # Photometric only: copy annotation verbatim
+                            pass
+                    # Write augmented annotation alongside the image
+                    if annotation:
+                        aug_ann_dest = version_root / "augmented" / "labels" / f"{aug_file.stem}.json"
+                        aug_ann_dest.parent.mkdir(parents=True, exist_ok=True)
+                        aug_ann_dest.write_text(
+                            json.dumps(annotation, ensure_ascii=True, indent=2),
+                            encoding="utf-8",
+                        )
+                        augmented_annotations[aug_file.name] = annotation
+
+                augmented_count += 1
+
+        return augmented_files, augmented_annotations, augmented_count
 
     def _snapshot_annotation_stats(self, *, source_images_dir: Path, source_labels_dir: Path) -> dict[str, Any]:
         source_images = [

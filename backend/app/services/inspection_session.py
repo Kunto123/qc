@@ -217,10 +217,46 @@ class InspectionSessionService:
         self._plc_worker = plc_worker
         self._reject_log_repo = reject_log_repo
         self._operator_state_machine = OperatorInspectionStateMachine()
+        self._max_consecutive_rejects: int = (
+            max(0, int(app_config.max_consecutive_rejects))
+            if app_config is not None
+            else 0
+        )
         self._idle_timeout_s: int = (
             max(0, int(app_config.session_idle_timeout_s))
             if app_config is not None
             else 300
+        )
+        self._part_ready_release_ms: int = (
+            max(0, int(app_config.part_ready_release_ms_default))
+            if app_config is not None
+            else 300
+        )
+        # Inspection policy settings
+        self._hard_reject_reasons: set[str] = set(
+            r.strip().upper()
+            for r in app_config.inspect_hard_reject_reasons.split(",")
+            if r.strip()
+        ) if app_config is not None and app_config.inspect_hard_reject_reasons else {"OUT_OF_ANGLE"}
+        self._commit_grace_ms: int = (
+            max(0, int(app_config.commit_grace_ms))
+            if app_config is not None else 1500
+        )
+        self._accept_stable_frames: int = (
+            max(1, int(app_config.accept_stable_frames))
+            if app_config is not None else 2
+        )
+        self._accept_stable_ms: int = (
+            max(0, int(app_config.accept_stable_ms))
+            if app_config is not None else 200
+        )
+        self._hard_reject_stable_frames: int = (
+            max(1, int(app_config.hard_reject_stable_frames))
+            if app_config is not None else 3
+        )
+        self._hard_reject_stable_ms: int = (
+            max(0, int(app_config.hard_reject_stable_ms))
+            if app_config is not None else 500
         )
         # Register PLC state change callback
         if self._plc_worker is not None:
@@ -228,17 +264,24 @@ class InspectionSessionService:
 
     def _on_plc_state_change(self, old_state: str, new_state: str) -> None:
         """Callback dari PLC worker saat state berubah.
-        Reset plc_part_ready_triggered saat PLC kembali ke IDLE (manual release).
+        Reset clamp gate saat PLC kembali ke IDLE (manual release).
+        NOTE: settle_frame_count dan consecutive_reject_count TIDAK di-reset di sini
+        supaya part berikutnya bisa langsung infer tanpa settling ulang.
+        Hanya di-reset ketika part benar-benar leave (process_frame frame-by-frame).
         Thread-safe: called from PLC worker thread, acquires session lock.
         """
         if new_state == "IDLE" and old_state != "IDLE":
             cooldown_until = time.time() + (self._phase_next_part_delay_ms / 1000.0)
             with self._lock:
                 for state in self._sessions.values():
+                    # Reset clamp gate only — keep settle/reject state intact
                     state.plc_part_ready_triggered = False
                     state.inspection_result_cache = None
                     state.operator_state = "IDLE"
-                    state.settle_frame_count = 0
+                    # Release part-ready latch so next part starts fresh
+                    state.part_ready_latched = False
+                    state.part_ready_latched_at = None
+                    state.part_ready_unsettled_at = None
                     state.last_inference_ms = 0
                     state.manual_release_cooldown_until = cooldown_until
                     state.plc_clamp_requested_at = 0.0
@@ -593,13 +636,60 @@ class InspectionSessionService:
             settle_remaining_ms = 0.0
             self._reset_clamp_gate(state)
 
+        # ------------------------------------------------------------------
+        # Part-Ready Latch Logic
+        # Once raw_part_ready is settled and clamp is requested, we latch so
+        # brief drops in raw_part_ready (shadow, vibration) do not cancel the
+        # sticker inference cycle. Latch resets only when:
+        #   - PLC returns to IDLE (part removed / manual release)
+        #   - Session stop / ROI override changed
+        #   - Presence stays False longer than release_ms
+        # ------------------------------------------------------------------
+        _release_ms = self._part_ready_release_ms
+        _now_dt = _settle_now  # datetime already computed above
+
+        if part_ready_settled and not state.part_ready_latched:
+            # First frame where settle is satisfied → latch on
+            state.part_ready_latched = True
+            state.part_ready_latched_at = _now_dt
+            state.part_ready_unsettled_at = None
+        elif not _raw_part_ready and state.part_ready_latched:
+            # Raw dropped while latched — start debounce timer
+            if state.part_ready_unsettled_at is None:
+                state.part_ready_unsettled_at = _now_dt
+            # Check if raw has been down longer than release_ms
+            _unsettled_elapsed_ms = (
+                (_now_dt - state.part_ready_unsettled_at).total_seconds() * 1000.0
+            )
+            if _release_ms > 0 and _unsettled_elapsed_ms < _release_ms:
+                # Within debounce window — keep latch, treat as settled
+                part_ready_settled = True
+                settle_remaining_ms = 0.0
+            else:
+                # Exceeded debounce — release latch
+                state.part_ready_latched = False
+                state.part_ready_latched_at = None
+                state.part_ready_unsettled_at = None
+                part_ready_settled = False
+                settle_remaining_ms = 0.0
+                self._reset_clamp_gate(state)
+        elif _raw_part_ready and state.part_ready_latched:
+            # Raw is back up while latched — clear unsettled timer
+            state.part_ready_unsettled_at = None
+
+        # Release latch when presence is gone (part truly left)
+        if not presence.get("present", False) and state.part_ready_latched:
+            state.part_ready_latched = False
+            state.part_ready_latched_at = None
+            state.part_ready_unsettled_at = None
+            self._reset_clamp_gate(state)
+
         # Trigger PLC clamp hold on the first frame where part is settled.
         # But check release/next-part cooldown before re-clamping.
         _cooldown_until = float(getattr(state, "manual_release_cooldown_until", 0.0))
         _now_s = time.time()
         if part_ready_settled and not state.plc_part_ready_triggered:
             if _cooldown_until > 0 and _now_s < _cooldown_until:
-                # Still in cooldown - skip clamp trigger
                 logger.debug("[inspection] cooldown active, skip clamp re-trigger")
             else:
                 state.plc_part_ready_triggered = True
@@ -625,38 +715,72 @@ class InspectionSessionService:
             now_s=_now_s,
         )
 
-        # Augment part_ready dict in-place with settle observability fields.
-        part_ready["part_ready_settled"] = part_ready_settled
-        part_ready["part_ready_settle_ms"] = settle_ms
-        part_ready["part_ready_settle_remaining_ms"] = round(settle_remaining_ms, 1)
-
-        # effective_part_ready is used for all downstream logic (validation,
-        # event state).  During settle it looks like part_not_ready to avoid
-        # premature commits, while the original part_ready dict is reported.
-        _effective_pr_ready = _raw_part_ready and part_ready_settled
-        if _raw_part_ready and not part_ready_settled:
-            effective_part_ready: dict[str, Any] = {
-                **part_ready,
-                "part_ready": False,
-                "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
-                "status": "settling",
-            }
-        elif _raw_part_ready and part_ready_settled and not clamp_ready_for_inference:
-            effective_part_ready = {
-                **part_ready,
-                "part_ready": False,
-                "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
-                "status": str(clamp_payload.get("status") or "clamping"),
-            }
-        elif _raw_part_ready and part_ready_settled and clamp_ready_for_inference and not phase_ready_for_inference:
-            effective_part_ready = {
-                **part_ready,
-                "part_ready": False,
-                "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
-                "status": str(phase_payload.get("status") or "operator_phase_delay"),
-            }
+        # effective_part_ready gate for downstream logic / UI.
+        # When latch is active, we report effective_part_ready=True even if raw
+        # briefly dropped, so sticker inference is not blocked by noise.
+        _latch_ready = state.part_ready_latched and part_ready_settled
+        if _raw_part_ready and part_ready_settled:
+            effective_part_ready_val = True
+            _effective_block_reason = None
+        elif _latch_ready:
+            # Latched + settled but raw briefly down — still allow inference
+            effective_part_ready_val = True
+            _effective_block_reason = None
+        elif _raw_part_ready and not part_ready_settled:
+            effective_part_ready_val = False
+            _effective_block_reason = "settling"
+        elif not _raw_part_ready and presence.get("present", False):
+            effective_part_ready_val = False
+            _effective_block_reason = "part_not_ready"
         else:
+            effective_part_ready_val = False
+            _effective_block_reason = "no_part"
+
+        # Build effective_part_ready dict for backward compatibility
+        if effective_part_ready_val:
             effective_part_ready = part_ready
+        else:
+            effective_part_ready = {
+                **part_ready,
+                "part_ready": False,
+                "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
+                "status": _effective_block_reason or "part_not_ready",
+            }
+
+        # ── Build inference_gate top-level response ──
+        _can_infer = (
+            effective_part_ready_val
+            and clamp_ready_for_inference
+            and phase_ready_for_inference
+        )
+        _gate_block_reason = None
+        if not effective_part_ready_val:
+            _gate_block_reason = _effective_block_reason or "part_not_ready"
+        elif not clamp_ready_for_inference:
+            _gate_block_reason = str(clamp_payload.get("status") or "clamping")
+        elif not phase_ready_for_inference:
+            _gate_block_reason = str(phase_payload.get("status") or "operator_phase_delay")
+
+        inference_gate = {
+            "raw_part_ready": _raw_part_ready,
+            "raw_status": str(part_ready.get("status") or "unknown"),
+            "raw_match_ratio": part_ready.get("match_ratio"),
+            "part_ready_latched": state.part_ready_latched,
+            "effective_part_ready": effective_part_ready_val,
+            "clamp_ready": clamp_ready_for_inference,
+            "phase_ready": phase_ready_for_inference,
+            "can_infer": _can_infer,
+            "block_reason": _gate_block_reason,
+        }
+
+        # Augment part_ready dict with latch + gate info for UI
+        part_ready["effective_part_ready"] = effective_part_ready_val
+        part_ready["part_ready_latched"] = state.part_ready_latched
+        part_ready["latch_status"] = (
+            "latched" if state.part_ready_latched
+            else "released" if not state.part_ready_latched and state.part_ready_latched_at is not None
+            else "inactive"
+        )
 
         operator_state_decision = self._operator_state_machine.update(
             state,
@@ -790,14 +914,151 @@ class InspectionSessionService:
             sticker_detection["matching_candidate_count"] = validation_details.get("matching_candidate_count")
 
         event_state_started = time.perf_counter()
+
+        # ── Inspection Policy Commit Gate ──
+        # Determine whether this frame's validation result is allowed to commit.
+        # - ACCEPT: commit only after stability threshold (consecutive frames + elapsed ms).
+        # - REJECT with hard reason (OUT_OF_ANGLE): commit only after stability threshold.
+        # - REJECT with non-hard reason (NOT_FOUND, WRONG_TYPE, etc.): never auto-commit.
+        #   These stay as pending/adjust, allowing operator to fix sticker.
+        _now_policy = datetime.now(UTC)
+        _decision = str(validation.get("decision") or "").strip().upper()
+        _reason = str(validation.get("reject_reason_code") or "").strip()
+        _detected = str(validation.get("detected_class") or "").strip()
+        _expected = str(validation.get("expected_class") or "").strip()
+        _policy_key = f"{_decision}|{_reason}|{_detected}|{_expected}"
+
+        _hard_reject_reasons = self._hard_reject_reasons  # set from config
+        _is_accept = _decision == DecisionCode.ACCEPT.value
+        _is_hard_reject = (
+            _decision == DecisionCode.REJECT.value
+            and _reason in _hard_reject_reasons
+        )
+        _is_non_hard_reject = (
+            _decision == DecisionCode.REJECT.value
+            and _reason not in _hard_reject_reasons
+        )
+
+        # Track stability
+        if _policy_key == state.last_policy_key:
+            state.policy_stable_frames += 1
+        else:
+            state.last_policy_key = _policy_key
+            state.policy_stable_frames = 1
+            state.policy_stable_started_at = _now_policy
+
+        _stable_elapsed_ms = 0.0
+        if state.policy_stable_started_at is not None:
+            _stable_elapsed_ms = (
+                (_now_policy - state.policy_stable_started_at).total_seconds() * 1000.0
+            )
+
+        # Determine commit_allowed with grace period + stability
+        _commit_allowed = False
+        _policy_action = "pending"
+        _pending_reason = ""
+
+        if state.awaiting_part_removal_after_commit:
+            # After ACCEPT, wait for part to leave before allowing next cycle
+            if not presence.get("present", False):
+                if state.part_absent_started_at is None:
+                    state.part_absent_started_at = _now_policy
+                _absent_elapsed_ms = (
+                    (_now_policy - state.part_absent_started_at).total_seconds() * 1000.0
+                )
+                if _absent_elapsed_ms >= self._part_ready_release_ms:
+                    # Part gone long enough — reset for next cycle
+                    state.awaiting_part_removal_after_commit = False
+                    state.part_absent_started_at = None
+                    self._reset_clamp_gate(state)
+                    state.part_ready_latched = False
+                    state.part_ready_latched_at = None
+                else:
+                    _pending_reason = "waiting_part_removed"
+            else:
+                # Part still present — reset absent timer
+                state.part_absent_started_at = None
+                _pending_reason = "waiting_part_removed"
+
+            _policy_action = "pending"
+            if not _pending_reason:
+                _pending_reason = "waiting_part_removed"
+
+        elif _is_accept:
+            # Accept: commit only after grace period + stability
+            _grace_ok = _stable_elapsed_ms >= self._commit_grace_ms
+            _frames_ok = state.policy_stable_frames >= self._accept_stable_frames
+            _ms_ok = _stable_elapsed_ms >= self._accept_stable_ms
+            if _grace_ok and _frames_ok and _ms_ok:
+                _commit_allowed = True
+                _policy_action = "accept_commit"
+                state.awaiting_part_removal_after_commit = True
+                state.part_absent_started_at = None
+            else:
+                _policy_action = "pending"
+                _parts = []
+                if not _grace_ok:
+                    _parts.append(f"grace({_stable_elapsed_ms:.0f}/{self._commit_grace_ms}ms)")
+                if not _frames_ok:
+                    _parts.append(f"stable_frames({state.policy_stable_frames}/{self._accept_stable_frames})")
+                if not _ms_ok:
+                    _parts.append(f"stable_ms({_stable_elapsed_ms:.0f}/{self._accept_stable_ms}ms)")
+                _pending_reason = f"accept_stabilizing({', '.join(_parts)})"
+
+        elif _is_hard_reject:
+            # Hard reject (OUT_OF_ANGLE): commit only after grace + higher stability
+            _grace_ok = _stable_elapsed_ms >= self._commit_grace_ms
+            _frames_ok = state.policy_stable_frames >= self._hard_reject_stable_frames
+            _ms_ok = _stable_elapsed_ms >= self._hard_reject_stable_ms
+            if _grace_ok and _frames_ok and _ms_ok:
+                _commit_allowed = True
+                _policy_action = "hard_reject_commit"
+            else:
+                _policy_action = "pending"
+                _parts = []
+                if not _grace_ok:
+                    _parts.append(f"grace({_stable_elapsed_ms:.0f}/{self._commit_grace_ms}ms)")
+                if not _frames_ok:
+                    _parts.append(f"stable_frames({state.policy_stable_frames}/{self._hard_reject_stable_frames})")
+                if not _ms_ok:
+                    _parts.append(f"stable_ms({_stable_elapsed_ms:.0f}/{self._hard_reject_stable_ms}ms)")
+                _pending_reason = f"hard_reject_stabilizing({', '.join(_parts)})"
+
+        else:
+            # Non-hard reject (NOT_FOUND, WRONG_TYPE, etc.) — never auto-commit
+            _policy_action = "pending"
+            _pending_reason = f"non_hard_reject:{_reason}"
+
+        # Build inspection_policy response
+        inspection_policy = {
+            "action": _policy_action,
+            "commit_allowed": _commit_allowed,
+            "hard_reject": _is_hard_reject,
+            "pending_reason": _pending_reason,
+            "stable_elapsed_ms": round(_stable_elapsed_ms, 1),
+            "stable_frames": state.policy_stable_frames,
+        }
+
+        # Reset stability counters on commit
+        if _commit_allowed:
+            state.policy_stable_frames = 0
+            state.last_policy_key = ""
+            state.policy_stable_started_at = None
+
+        # Event state advance — always use original validation for event tracking.
+        # Policy commit gate overrides count_committed afterwards.
         event_state, event_id, count_committed = self._advance_event_state(
             state=state,
             validation=validation,
             part_ready_payload=effective_part_ready,
             presence=presence,
-            now=datetime.now(UTC),
+            now=_now_policy,
             settle_ms=settle_ms,
         )
+
+        # Policy commit gate overrides count_committed
+        count_committed = _commit_allowed
+
         timings["event_state_ms"] = _elapsed_ms(event_state_started)
 
         persistence_started = time.perf_counter()
@@ -809,8 +1070,13 @@ class InspectionSessionService:
                     time.time() + (self._phase_next_part_delay_ms / 1000.0),
                 )
             # Notify PLC worker of inspection decision
+            # Only commit to PLC for accept or hard reject (not non-hard reject)
             decision = validation.get("decision", "")
-            if self._plc_worker is not None and decision in ("ACCEPT", "REJECT"):
+            if (
+                self._plc_worker is not None
+                and decision in ("ACCEPT", "REJECT")
+                and _commit_allowed
+            ):
                 try:
                     self._plc_worker.notify_decision(decision, event_id=event_id)
                 except Exception as exc:  # noqa: BLE001
@@ -905,6 +1171,8 @@ class InspectionSessionService:
             "preview_image_b64": preview_image_b64,
             "part_ready_preview_image_b64": part_ready_preview_image_b64,
             "sticker_preview_image_b64": sticker_preview_image_b64,
+            "inference_gate": inference_gate,
+            "inspection_policy": inspection_policy,
         }
         if count_committed:
             payload["operator_state"] = "RESULT"
@@ -1963,6 +2231,25 @@ class InspectionSessionService:
             commit_ready = True
 
         if commit_ready:
+            # Check consecutive reject threshold
+            decision = str(validation.get("decision") or "").strip().upper()
+            if decision == DecisionCode.REJECT.value and self._max_consecutive_rejects > 0:
+                # Increment consecutive reject counter
+                state.consecutive_reject_count = int(getattr(state, "consecutive_reject_count", 0)) + 1
+                if state.consecutive_reject_count < self._max_consecutive_rejects:
+                    # Not enough consecutive rejects yet — don't commit, keep inferring
+                    logger.info(
+                        "[inspection] reject count %d/%d — delaying commit",
+                        state.consecutive_reject_count, self._max_consecutive_rejects,
+                    )
+                    return InspectionEventState.DECISION_PENDING.value, state.current_event_id, False
+                else:
+                    # Reached threshold — commit reject and reset counter
+                    state.consecutive_reject_count = 0
+            elif decision == DecisionCode.ACCEPT.value:
+                # Accept always commits immediately, reset reject counter
+                state.consecutive_reject_count = 0
+
             state.current_event_committed = True
             state.cooldown_until = now + timedelta(milliseconds=COMMIT_COOLDOWN_MS)
             return InspectionEventState.DECISION_COMMITTED.value, state.current_event_id, True
