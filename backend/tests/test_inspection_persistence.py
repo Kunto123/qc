@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.app.repositories.hybrid_inspection_results_repository import HybridInspectionResultsRepository
 from backend.app.repositories.inspection_results_repository import InspectionResultsRepository
+from backend.app.repositories.postgres.inspection_mirror_repository import PostgresInspectionMirrorRepository
 from backend.app.repositories.sqlserver.inspection_mirror_repository import SqlServerInspectionMirrorRepository
 
 
@@ -173,7 +174,7 @@ class HybridInspectionPersistenceTest(unittest.TestCase):
         self.assertEqual(
             payload,
             {
-                "PartName": "Part-A",
+                "PartName": "K0W-HB0",
                 "DateCheckMC": "2026-04-07T00:00:00+00:00",
                 "MPCheck": "operator",
                 "Data1": 0.93,   # part_ready_match_ratio
@@ -200,6 +201,20 @@ class HybridInspectionPersistenceTest(unittest.TestCase):
 
         self.assertEqual(payload["Data1"], 0.77, "Data1 must be part_ready_match_ratio")
         self.assertEqual(payload["Data2"], 0.55, "Data2 must be sticker_confidence")
+
+    def test_sql_payload_partname_prefers_expected_class_with_part_name_fallback(self) -> None:
+        local = dict(_sample_payload())
+
+        sqlserver_payload = SqlServerInspectionMirrorRepository.build_sql_payload(local)
+        postgres_payload = PostgresInspectionMirrorRepository.build_sql_payload(local)
+
+        self.assertEqual(sqlserver_payload["PartName"], "K0W-HB0")
+        self.assertEqual(postgres_payload["PartName"], "K0W-HB0")
+
+        local["expected_class"] = ""
+        fallback_payload = SqlServerInspectionMirrorRepository.build_sql_payload(local)
+
+        self.assertEqual(fallback_payload["PartName"], "Part-A")
 
     def test_local_record_data1_data2_align_with_sql_contract(self) -> None:
         """Local data1/data2 must mirror the SQL contract so they are consistent.

@@ -39,7 +39,7 @@ class PostgresInspectionMirrorRepository(PostgresRepositoryBase):
     @staticmethod
     def build_sql_payload(payload: dict[str, Any]) -> dict[str, Any]:
         return {
-            "PartName": payload.get("part_name"),
+            "PartName": payload.get("expected_class") or payload.get("part_name"),
             "DateCheckMC": payload.get("inspected_at") or _utcnow(),
             "MPCheck": payload.get("mp_check"),
             "Data1": payload.get("part_ready_match_ratio"),

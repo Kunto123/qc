@@ -73,7 +73,7 @@ class SqlServerInspectionMirrorRepository:
         """Map a local inspection result to the agreed SQL Server push contract.
 
         Contract (fixed — do not change without downstream coordination):
-            PartName    <- part_name
+            PartName    <- expected_class (fallback: part_name)
             DateCheckMC <- inspected_at
             MPCheck     <- mp_check  (operator username)
             Data1       <- part_ready_match_ratio  (confidence part ready)
@@ -83,7 +83,7 @@ class SqlServerInspectionMirrorRepository:
         All other fields are stored locally only.
         """
         return {
-            "PartName": payload.get("part_name"),
+            "PartName": payload.get("expected_class") or payload.get("part_name"),
             "DateCheckMC": payload.get("inspected_at") or _utcnow_iso(),
             "MPCheck": payload.get("mp_check"),
             "Data1": payload.get("part_ready_match_ratio"),   # confidence part ready
