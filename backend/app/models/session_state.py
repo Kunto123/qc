@@ -55,6 +55,12 @@ class SessionState:
     operator_state: str = "IDLE"
     inspection_has_run_for_current_part: bool = False
     inspection_result_cache: dict[str, Any] | None = None
+    # Async inference state
+    inference_result_cache: dict[str, Any] | None = None
+    inference_result_ts: float = 0.0
+    inference_frame_counter: int = 0
+    inference_thread_busy: bool = False
+    _inference_executor = None  # ThreadPoolExecutor, lazy-init per session
     part_removed_seen_at: datetime | None = None
     # Hysteresis counter: number of consecutive settled frames.
     # Reset to 0 when part_ready/presence is lost.

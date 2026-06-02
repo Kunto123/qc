@@ -86,6 +86,7 @@ class OperatorScreen(ctk.CTkFrame):
         self.line_value = tk.StringVar()
         self.station_value = tk.StringVar()
         self.camera_value = tk.StringVar(value="0")
+        self.camera_rotation_value = tk.StringVar(value="0")
         self.template_version_value = tk.StringVar()
         self.part_ready_roi_x_value = tk.StringVar(value="0.2")
         self.part_ready_roi_y_value = tk.StringVar(value="0.2")
@@ -257,6 +258,17 @@ class OperatorScreen(ctk.CTkFrame):
             justify="left",
         )
         self.plc_status_label.pack(anchor="w", padx=12, pady=(0, 10))
+
+        # Camera status label
+        self.camera_status_label = ctk.CTkLabel(
+            self.decision_status_frame,
+            text="● Kamera",
+            font=("Segoe UI", 9),
+            text_color=TEXT_SECONDARY,
+            wraplength=320,
+            justify="left",
+        )
+        self.camera_status_label.pack(anchor="w", padx=12, pady=(0, 10))
 
         self.sidebar_scroller = ScrollableFrame(self.sidebar_container)
         self.sidebar_scroller.grid(row=2, column=0, columnspan=2, sticky="nsew")
@@ -460,7 +472,12 @@ class OperatorScreen(ctk.CTkFrame):
         self._settings_entry(general, 0, 0, "Line", self.line_value)
         self._settings_entry(general, 0, 2, "Station", self.station_value)
         self._settings_entry(general, 1, 0, "Camera", self.camera_value)
-        self._settings_entry(general, 1, 2, "Template Ver", self.template_version_value)
+        # Rotation field inline sebelah Camera Index
+        ttk.Label(general, text="Rotation°").grid(row=1, column=2, sticky="w", padx=(12, 4), pady=5)
+        rot_entry = ttk.Entry(general, textvariable=self.camera_rotation_value, width=6)
+        rot_entry.grid(row=1, column=3, sticky="w", padx=(0, 12), pady=5)
+        ttk.Label(general, text="0/90/180/270", foreground="gray").grid(row=2, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(0, 4))
+        self._settings_entry(general, 3, 0, "Template Ver", self.template_version_value)
 
         part_ready_roi = ttk.LabelFrame(body, text="Part Ready ROI", padding=10)
         part_ready_roi.grid(row=1, column=0, sticky="nsew", pady=(12, 0), padx=(0, 6))
@@ -1024,9 +1041,31 @@ class OperatorScreen(ctk.CTkFrame):
             client_timings.setdefault("frame_height", height)
         return {**payload, "client_timings": client_timings}
 
+    def _rotate_frame_for_display(self, frame):
+        """Apply camera rotation to frame for display. Same formula as backend."""
+        _rot = float(self.camera_rotation_value.get() or 0)
+        if _rot == 0.0:
+            return frame
+        try:
+            import cv2
+            h, w = frame.shape[:2]
+            center = (w // 2, h // 2)
+            M = cv2.getRotationMatrix2D(center, -_rot, 1.0)
+            cos_a = abs(M[0, 0])
+            sin_a = abs(M[0, 1])
+            new_w = int(h * sin_a + w * cos_a)
+            new_h = int(h * cos_a + w * sin_a)
+            M[0, 2] += (new_w - w) / 2
+            M[1, 2] += (new_h - h) / 2
+            return cv2.warpAffine(frame, M, (new_w, new_h), borderMode=cv2.BORDER_REPLICATE)
+        except Exception:
+            return frame
+
     def _build_preview_frame(self, frame):
         if frame is None:
             return None
+        # Apply camera rotation BEFORE drawing overlay
+        frame = self._rotate_frame_for_display(frame)
         with self._lock:
             payload = dict(self._latest_payload) if isinstance(self._latest_payload, dict) else None
         if payload:
@@ -1088,7 +1127,8 @@ class OperatorScreen(ctk.CTkFrame):
             self.state.latest_error = str(exc)
             self.info_var.set(f"UI render warning: {exc}")
         finally:
-            if not self._closed and self.capture.is_running:
+            # Keep preview alive as long as capture is active (even during reconnect)
+            if not self._closed and self.capture.is_active:
                 self._schedule_preview_tick()
 
     def _poll_ui(self) -> None:
@@ -1149,6 +1189,9 @@ class OperatorScreen(ctk.CTkFrame):
         camera_config = detail.get("camera") or {}
         if camera_config.get("camera_index") is not None:
             self.camera_value.set(str(camera_config["camera_index"]))
+        # Sync camera rotation from template config
+        _rot = camera_config.get("rotation_degrees")
+        self.camera_rotation_value.set(str(_rot if _rot is not None else "0"))
         sticker_config = detail.get("sticker") or {}
         if not keep_line_station:
             if sticker_config.get("line"):
@@ -1230,6 +1273,15 @@ class OperatorScreen(ctk.CTkFrame):
     def _set_badge(self, key: str, value: str, tone: str = "neutral") -> None:
         bg, fg = BADGE_COLORS.get(tone, BADGE_COLORS["neutral"])
         self.badges[key].configure(text=f"{key}: {value}", fg_color=bg, text_color=fg)
+
+    def _on_camera_status(self, status: str) -> None:
+        """Handle camera status updates: 'connected', 'reconnecting', 'error'."""
+        if status == "connected":
+            self.camera_status_label.configure(text="● Kamera Terhubung", text_color="green")
+        elif status == "reconnecting":
+            self.camera_status_label.configure(text="● Menghubungkan kembali...", text_color="orange")
+        elif status == "error":
+            self.camera_status_label.configure(text="● Kamera Terputus", text_color="red")
 
     @staticmethod
     def _friendly_error(exc: Exception, context: str = "") -> str:
@@ -1454,10 +1506,13 @@ class OperatorScreen(ctk.CTkFrame):
         except ValueError as exc:
             messagebox.showerror("Session", str(exc))
             return
+        # Use camera_rotation_value which is synced from template detail
+        _rot = float(self.camera_rotation_value.get() or 0)
         payload = self.api.create_session(
             {
                 "client_id": str(self.state.user.get("id") if self.state.user else "client"),
                 "camera_index": int(self.camera_value.get() or 0),
+                "camera_rotation_degrees": _rot,
                 "template_version_id": template_version_id,
                 "line_id": self.line_value.get().strip(),
                 "station_id": self.station_value.get().strip(),
@@ -1475,6 +1530,8 @@ class OperatorScreen(ctk.CTkFrame):
         self.state.cache["sticker_detection"] = None
         self.state.cache["last_committed_result"] = None
         self._auth_error_notified = False
+        # Set camera status callback for auto-reconnect display
+        self.capture.set_status_callback(self._on_camera_status)
         with self._lock:
             self._latest_payload = None
             self._latest_error = None
@@ -1533,6 +1590,11 @@ class OperatorScreen(ctk.CTkFrame):
                 frame = self.capture.get_latest_frame()
                 capture_ms = (_time.perf_counter() - t0) * 1000.0
                 if frame is None:
+                    _time.sleep(0.05)
+                    continue
+
+                # Skip inference saat camera reconnecting
+                if self.capture.is_reconnecting:
                     _time.sleep(0.05)
                     continue
 
@@ -1742,20 +1804,30 @@ class OperatorScreen(ctk.CTkFrame):
             pass
 
     def _render_overlay_direct(self, payload: dict) -> None:
-        """Render full overlay (ROI boxes + detections + decision) on live frame.
-
-        Uses _build_local_detection_overlay which correctly handles:
-        - Part-ready and sticker ROI boxes with proper scaling
-        - Detection bbox coordinates (normalized to sticker ROI, scaled to display)
-        - Decision crosshair, status text, and color coding
-        """
+        """Render full overlay (ROI boxes + detections + decision) on live frame."""
         try:
             frame = self.capture.get_latest_frame()
             if frame is None:
                 return
+            # Apply camera rotation to frame before drawing overlay
+            _rot = float(self.camera_rotation_value.get() or 0)
+            if _rot != 0.0:
+                try:
+                    import cv2
+                    h, w = frame.shape[:2]
+                    center = (w // 2, h // 2)
+                    M = cv2.getRotationMatrix2D(center, -_rot, 1.0)
+                    cos_a = abs(M[0, 0])
+                    sin_a = abs(M[0, 1])
+                    new_w = int(h * sin_a + w * cos_a)
+                    new_h = int(h * cos_a + w * sin_a)
+                    M[0, 2] += (new_w - w) / 2
+                    M[1, 2] += (new_h - h) / 2
+                    frame = cv2.warpAffine(frame, M, (new_w, new_h), borderMode=cv2.BORDER_REPLICATE)
+                except Exception:
+                    pass  # rotation failed, use original frame
 
             # Enrich payload with client-side frame dimensions for scaling.
-            # Backend frame may differ from live display frame (downscaled upload).
             client_timings = payload.get("client_timings") or {}
             client_timings["frame_width"] = frame.shape[1]
             client_timings["frame_height"] = frame.shape[0]

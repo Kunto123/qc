@@ -10,6 +10,7 @@ class CameraDefaults:
     width: int | None = None
     height: int | None = None
     fps: float | None = None
+    rotation_degrees: float = 0.0  # Free rotation: 0, 90, 180, 270, or any angle
 
 
 @dataclass(slots=True)
@@ -48,7 +49,15 @@ class VisionConfig:
 @dataclass(slots=True)
 class PartReadyConfig:
     enabled: bool = True
-    method: str = "color_profile_match"
+    # Method: "gap_template_match" (new default) or "color_profile_match" (legacy)
+    method: str = "gap_template_match"
+    # Gap detection via template matching
+    gap_match_threshold: float = 0.85  # min cv2.matchTemplate score for part_ready=True
+    gap_ref_path: str | None = None    # relative path to reference PNG on disk
+    gap_hsv_lower: list[int] = field(default_factory=lambda: [90, 50, 50])  # blue clamp HSV lower
+    gap_hsv_upper: list[int] = field(default_factory=lambda: [130, 255, 255])  # blue clamp HSV upper
+    gap_padding_px: int = 20  # px padding around clamp mask to extract gap patch
+    # Legacy color profile fields (kept for backward compatibility)
     color_profile_id: int | None = None
     colorspace: str = "LAB"
     distance_threshold: float | None = None
@@ -93,6 +102,12 @@ class StickerRule:
     # raised — tilt telemetry is still calculated and forwarded as observability data.
     # Set True to make max_tilt_degrees an active reject gate.
     tilt_gate_enabled: bool = False
+    # Edge/text-band analysis config for OUT_OF_ANGLE gate
+    edge_roi_tolerance_px: int = 10  # px tolerance for text-band edge sticking out of ROI
+    edge_search_padding_ratio: float = 0.10  # expand sticker ROI by this ratio for edge search
+    morph_kernel_width: int = 40  # horizontal kernel width for morphological closing
+    morph_kernel_height: int = 5  # horizontal kernel height for morphological closing
+    min_text_aspect_ratio: float = 3.0  # min aspect ratio to filter text bands vs logos
     # Legacy field — kept for backward compatibility with older templates and API
     # payloads only. Runtime commit timing is now controlled exclusively by
     # part_ready_settle_ms and no longer depends on this field.

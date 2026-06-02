@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
+import copy
+import cv2
 import logging
 import os
 import threading
 import time
+from time import monotonic
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import cv2
 import numpy as np
 
 from backend.app.core.config import AppConfig
+from backend.app.core.json_safety import to_jsonable
 from backend.app.models.session_state import SessionState
 from backend.app.repositories.inspection_results_repository import InspectionResultsRepository
 from backend.app.repositories.profiles_repository import ProfilesRepository
@@ -77,6 +81,30 @@ def _encode_image(image) -> str:
     return base64.b64encode(encoded.tobytes()).decode("ascii")
 
 
+def _apply_rotation(frame: np.ndarray, rotation_degrees: float) -> np.ndarray:
+    """Apply free rotation to frame. Supports any angle."""
+    if not frame.size:
+        return frame
+    rotation_degrees = float(rotation_degrees) % 360.0
+    if rotation_degrees == 0.0:
+        return frame
+    h, w = frame.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, -rotation_degrees, 1.0)
+    cos_a = abs(M[0, 0])
+    sin_a = abs(M[0, 1])
+    new_w = int(h * sin_a + w * cos_a)
+    new_h = int(h * cos_a + w * sin_a)
+    M[0, 2] += (new_w - w) / 2
+    M[1, 2] += (new_h - h) / 2
+    return cv2.warpAffine(frame, M, (new_w, new_h), borderMode=cv2.BORDER_REPLICATE)
+
+
+def _rotate_frame(frame: np.ndarray, rotation_degrees: float) -> np.ndarray:
+    """Alias for _apply_rotation (backward compat)."""
+    return _apply_rotation(frame, rotation_degrees)
+
+
 def _empty_reject_breakdown() -> dict[str, int]:
     return {code: 0 for code in KNOWN_REJECT_CODES}
 
@@ -93,67 +121,11 @@ def _round_bbox(position: dict[str, Any] | None) -> dict[str, float] | None:
 
 
 def _estimate_tilt_from_roi(roi_frame, expected_tilt_degrees: float, config: Any | None = None) -> dict[str, Any]:
-    if config is not None:
-        return estimate_white_text_tilt(roi_frame, expected_tilt_degrees, config)
-    if roi_frame is None or getattr(roi_frame, "size", 0) == 0:
-        return {
-            "status": "unavailable",
-            "angle_degrees": None,
-            "expected_tilt_degrees": round(float(expected_tilt_degrees), 2),
-            "deviation_degrees": None,
-            "contour_area": None,
-            "threshold_mode": None,
-        }
-
-    gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    """Estimate sticker rotation using edge detection pipeline.
+    Always delegates to estimate_sticker_rotation (alias: estimate_white_text_tilt).
+    """
+    return estimate_white_text_tilt(roi_frame, expected_tilt_degrees, config)
     candidates: list[dict[str, Any]] = []
-    for threshold_mode in (cv2.THRESH_BINARY + cv2.THRESH_OTSU, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU):
-        try:
-            _, thresh = cv2.threshold(gray, 0, 255, threshold_mode)
-        except Exception:  # noqa: BLE001
-            continue
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            continue
-        contour = max(contours, key=cv2.contourArea)
-        contour_area = float(cv2.contourArea(contour))
-        if contour_area <= 0:
-            continue
-        rect = cv2.minAreaRect(contour)
-        rect_w, rect_h = rect[1]
-        angle_degrees = float(rect[2])
-        if rect_w < rect_h:
-            angle_degrees = 90.0 + angle_degrees
-        candidates.append(
-            {
-                "angle_degrees": angle_degrees,
-                "contour_area": contour_area,
-                "threshold_mode": "binary_inv" if threshold_mode == cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU else "binary",
-            }
-        )
-
-    if not candidates:
-        return {
-            "status": "unavailable",
-            "angle_degrees": None,
-            "expected_tilt_degrees": round(float(expected_tilt_degrees), 2),
-            "deviation_degrees": None,
-            "contour_area": None,
-            "threshold_mode": None,
-        }
-
-    best = max(candidates, key=lambda item: float(item.get("contour_area") or 0.0))
-    angle_degrees = float(best["angle_degrees"])
-    deviation_degrees = abs(angle_degrees - float(expected_tilt_degrees))
-    return {
-        "status": "ok",
-        "angle_degrees": round(angle_degrees, 2),
-        "expected_tilt_degrees": round(float(expected_tilt_degrees), 2),
-        "deviation_degrees": round(deviation_degrees, 2),
-        "contour_area": round(float(best["contour_area"]), 2),
-        "threshold_mode": best["threshold_mode"],
-    }
 
 
 class InspectionSessionService:
@@ -258,6 +230,10 @@ class InspectionSessionService:
             max(0, int(app_config.hard_reject_stable_ms))
             if app_config is not None else 500
         )
+        self._camera_rotation_degrees: float = (
+            float(app_config.camera_default_rotation_degrees)
+            if app_config is not None else 0.0
+        )
         # Register PLC state change callback
         if self._plc_worker is not None:
             self._plc_worker.set_on_state_change_callback(self._on_plc_state_change)
@@ -281,8 +257,13 @@ class InspectionSessionService:
                     # Release part-ready latch so next part starts fresh
                     state.part_ready_latched = False
                     state.part_ready_latched_at = None
+                    if self._plc_worker is not None:
+                        self._plc_worker.unlock_cycle(reason="part_removed_stable")
                     state.part_ready_unsettled_at = None
                     state.last_inference_ms = 0
+                    # Unlock PLC cycle
+                    if self._plc_worker is not None:
+                        self._plc_worker.unlock_cycle(reason=f"plc_idle_after_{old_state}")
                     state.manual_release_cooldown_until = cooldown_until
                     state.plc_clamp_requested_at = 0.0
                     state.plc_clamp_ready_at = 0.0
@@ -460,11 +441,17 @@ class InspectionSessionService:
         *,
         client_id: str,
         camera_index: int,
+        camera_rotation_degrees: float = 0.0,
         template_version_id: int,
         line_id: str | None = None,
         station_id: str | None = None,
     ) -> dict[str, Any]:
         template = self._template_runtime.resolve_template_by_version(template_version_id)
+        # Apply camera rotation override from session creation payload
+        _cam_rotation = float(camera_rotation_degrees or 0)
+        if _cam_rotation != 0.0:
+            template = copy.deepcopy(template)
+            template.camera.rotation_degrees = _cam_rotation
         session_id = uuid.uuid4().hex
         state = SessionState(
             session_id=session_id,
@@ -585,6 +572,12 @@ class InspectionSessionService:
         state = self._require_session(session_id)
         state.frame_index += 1
         state.last_activity_at = time.time()
+
+        # Apply camera rotation from template config
+        _rotation = float(getattr(state.template.camera, "rotation_degrees", None)
+                          or self._camera_rotation_degrees)
+        if _rotation != 0.0:
+            frame = _apply_rotation(frame, _rotation)
 
         part_ready_started = time.perf_counter()
         part_ready_frame, part_ready_roi_meta = self._crop_stage_roi(
@@ -817,7 +810,7 @@ class InspectionSessionService:
                     "timings": cached_timings,
                 }
             )
-            state.latest_result = cached_payload
+            state.latest_result = to_jsonable(cached_payload)
             return cached_payload
 
         _effective_pr_ready = bool(operator_state_decision.run_inspection)
@@ -1178,7 +1171,7 @@ class InspectionSessionService:
             payload["operator_state"] = "RESULT"
             self._operator_state_machine.mark_result(state, payload)
             payload["operator_state"] = state.operator_state
-        state.latest_result = payload
+        state.latest_result = to_jsonable(payload)
         return payload
 
     def _require_session(self, session_id: str) -> SessionState:
@@ -1346,31 +1339,79 @@ class InspectionSessionService:
                 "match_ratio": None,
                 "mean_distance": None,
                 "color_profile_id": None,
+                "gap_score": None,
             }
+        method = str(getattr(config, "method", "gap_template_match") or "gap_template_match").strip().lower()
+        if method == "gap_template_match":
+            return self._evaluate_part_ready_gap(frame, state, config)
+        if method == "color_profile_match":
+            return self._evaluate_part_ready_color(frame, state, config)
+        if method == "hsv_black_ratio":
+            return self._evaluate_part_ready_hsv(frame, state, config)
+        # Default: gap template match
+        return self._evaluate_part_ready_gap(frame, state, config)
+
+    def _evaluate_part_ready_gap(self, frame, state: SessionState, config) -> dict[str, Any]:
+        """Gap detection via template matching against reference patch."""
+        from backend.app.services.gap_detector import load_ref_patch, match_gap, get_ref_path
+
+        ref_path = getattr(config, "gap_ref_path", None)
+        threshold = float(getattr(config, "gap_match_threshold", 0.85) or 0.85)
+
+        # Load reference patch (cached in state if available)
+        cache_key = f"_gap_ref_{state.template.id}_{ref_path}"
+        ref_patch = getattr(state, cache_key, None)
+        if ref_patch is None:
+            template_id = state.template.id
+            ref_patch = load_ref_patch(ref_path, template_id)
+            if ref_patch is not None:
+                setattr(state, cache_key, ref_patch)
+
+        if ref_patch is None:
+            return {
+                "enabled": True,
+                "part_ready": False,
+                "part_ready_confidence": 0.0,
+                "decision": DecisionCode.REJECT.value,
+                "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
+                "status": "no_reference",
+                "match_ratio": 0.0,
+                "mean_distance": None,
+                "color_profile_id": None,
+                "gap_score": 0.0,
+                "gap_method": "template_match",
+            }
+
+        # Build ROI dict for gap detector
+        roi = {
+            "x": state.template.part_ready_roi.x,
+            "y": state.template.part_ready_roi.y,
+            "w": state.template.part_ready_roi.w,
+            "h": state.template.part_ready_roi.h,
+        }
+
+        result = match_gap(frame, roi, ref_patch, threshold)
+        score = result["score"]
+        ready = result["match"]
+
+        return {
+            "enabled": True,
+            "part_ready": ready,
+            "part_ready_confidence": score,
+            "decision": DecisionCode.ACCEPT.value if ready else DecisionCode.REJECT.value,
+            "reject_reason_code": None if ready else RejectReasonCode.PART_NOT_READY.value,
+            "status": "ready" if ready else "not_ready",
+            "match_ratio": score,
+            "mean_distance": None,
+            "color_profile_id": None,
+            "gap_score": score,
+            "gap_method": "template_match",
+            "gap_location": result.get("location", (0, 0)),
+        }
+
+    def _evaluate_part_ready_color(self, frame, state: SessionState, config) -> dict[str, Any]:
+        """Legacy color profile match."""
         if not config.color_profile_id:
-            if str(getattr(config, "method", "") or "").strip().lower() == "hsv_black_ratio":
-                evaluation = evaluate_hsv_black_ratio(frame, config)
-                raw_ratio = float(evaluation["match_ratio"])
-                _PART_READY_WINDOW = 5
-                history = state.part_ready_ratio_history
-                history.append(raw_ratio)
-                if len(history) > _PART_READY_WINDOW:
-                    del history[0]
-                smoothed_ratio = round(sum(history) / len(history), 6)
-                resolved_min = float(evaluation["min_match_ratio"])
-                ready = smoothed_ratio >= resolved_min
-                evaluation.update(
-                    {
-                        "part_ready": ready,
-                        "part_ready_confidence": smoothed_ratio,
-                        "decision": DecisionCode.ACCEPT.value if ready else DecisionCode.REJECT.value,
-                        "reject_reason_code": None if ready else RejectReasonCode.PART_NOT_READY.value,
-                        "status": "ready" if ready else "not_ready",
-                        "match_ratio": smoothed_ratio,
-                        "raw_match_ratio": raw_ratio,
-                    }
-                )
-                return evaluation
             return {
                 "enabled": False,
                 "part_ready": True,
@@ -1381,13 +1422,10 @@ class InspectionSessionService:
                 "match_ratio": None,
                 "mean_distance": None,
                 "color_profile_id": None,
+                "gap_score": None,
             }
         record = self._profiles_repo.get(config.color_profile_id)
         if not record:
-            logger.warning(
-                "[part_ready] color_profile_id=%s not found — bypassing gate",
-                config.color_profile_id,
-            )
             return {
                 "enabled": True,
                 "part_ready": True,
@@ -1398,18 +1436,16 @@ class InspectionSessionService:
                 "match_ratio": 1.0,
                 "mean_distance": None,
                 "color_profile_id": config.color_profile_id,
+                "gap_score": None,
             }
         evaluation = evaluate_color_profile_match(frame, config=config, profile=record["profile"])
         raw_ratio = float(evaluation["match_ratio"])
-
-        # Rolling mean over last 5 frames to absorb transient occlusion / auto-exposure flicker.
         _PART_READY_WINDOW = 5
         history = state.part_ready_ratio_history
         history.append(raw_ratio)
         if len(history) > _PART_READY_WINDOW:
             del history[0]
         smoothed_ratio = round(sum(history) / len(history), 6)
-
         resolved_min = float(evaluation["min_match_ratio"])
         ready = smoothed_ratio >= resolved_min
         return {
@@ -1422,7 +1458,31 @@ class InspectionSessionService:
             "match_ratio": smoothed_ratio,
             "raw_match_ratio": raw_ratio,
             "min_match_ratio": resolved_min,
+            "gap_score": None,
         }
+
+    def _evaluate_part_ready_hsv(self, frame, state: SessionState, config) -> dict[str, Any]:
+        """Legacy HSV black ratio."""
+        evaluation = evaluate_hsv_black_ratio(frame, config)
+        raw_ratio = float(evaluation["match_ratio"])
+        _PART_READY_WINDOW = 5
+        history = state.part_ready_ratio_history
+        history.append(raw_ratio)
+        if len(history) > _PART_READY_WINDOW:
+            del history[0]
+        smoothed_ratio = round(sum(history) / len(history), 6)
+        resolved_min = float(evaluation["min_match_ratio"])
+        ready = smoothed_ratio >= resolved_min
+        evaluation.update({
+            "part_ready": ready,
+            "part_ready_confidence": smoothed_ratio,
+            "decision": DecisionCode.ACCEPT.value if ready else DecisionCode.REJECT.value,
+            "reject_reason_code": None if ready else RejectReasonCode.PART_NOT_READY.value,
+            "status": "ready" if ready else "not_ready",
+            "match_ratio": smoothed_ratio,
+            "raw_match_ratio": raw_ratio,
+        })
+        return evaluation
 
     def _normalize_label(self, value: Any) -> str:
         return str(value or "").strip().lower()
@@ -2112,6 +2172,11 @@ class InspectionSessionService:
             reject_reason = RejectReasonCode.LOW_CLASS_CONF.value
         elif tilt_gate_enabled and max_tilt_degrees_value is not None and tilt_info.get("angle_degrees") is not None and float(tilt_info.get("deviation_degrees") or 0.0) > max_tilt_degrees_value:
             reject_reason = RejectReasonCode.OUT_OF_ANGLE.value
+        elif tilt_gate_enabled and max_tilt_degrees_value is not None:
+            # Also check if text-band edge sticks out of ROI (even if angle is OK)
+            roi_check = (tilt_info or {}).get("text_band_roi_check") or {}
+            if roi_check and not roi_check.get("is_inside", True):
+                reject_reason = RejectReasonCode.OUT_OF_ANGLE.value
         elif position_gate_enabled and thresholds["max_offset_x"] is not None and abs(offset_x) > float(thresholds["max_offset_x"]):
             reject_reason = RejectReasonCode.OUT_OF_POSITION.value
         elif position_gate_enabled and thresholds["max_offset_y"] is not None and abs(offset_y) > float(thresholds["max_offset_y"]):

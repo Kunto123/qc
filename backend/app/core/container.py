@@ -84,10 +84,19 @@ plc_worker: PlcWorker | None = (
         input_template_address=app_config.plc_input_template_address,
         input_clamp_engaged_address=app_config.plc_input_clamp_engaged_address,
         clamp_feedback_enabled=app_config.plc_clamp_feedback_enabled,
+        relay_clamp_address=app_config.plc_relay_clamp_address,
+        relay_ok_light_buzzer_address=app_config.plc_relay_ok_light_buzzer_address,
+        relay_enji_buzzer_address=app_config.plc_relay_enji_buzzer_address,
     )
     if app_config.plc_enabled
     else None
 )
+if plc_worker is not None:
+    plc_worker.configure_guards(
+        min_reclamp_interval_ms=app_config.plc_min_reclamp_interval_ms,
+        release_input_debounce_ms=app_config.plc_release_input_debounce_ms,
+        dry_run=app_config.plc_dry_run,
+    )
 
 inspection_session_service = InspectionSessionService(
     template_runtime_service,

@@ -6,8 +6,35 @@ from tkinter import messagebox, ttk
 
 import customtkinter as ctk
 from dotenv import load_dotenv
+from PIL import Image, ImageTk
+import io
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+LOGO_PATH = ASSETS_DIR / "aski_logo.svg"
+_logo_image_ref = None
+
+
+def _get_logo_image(width: int = 120):
+    """Load and cache logo image (PNG preferred, SVG fallback via cairosvg)."""
+    global _logo_image_ref
+    try:
+        # Try PNG first (most reliable in production)
+        logo_png = ASSETS_DIR / "aski_logo.png"
+        if logo_png.exists():
+            img = Image.open(str(logo_png))
+        else:
+            # Fallback: SVG via cairosvg
+            import cairosvg
+            png_data = cairosvg.svg2png(url=str(LOGO_PATH), output_width=width)
+            img = Image.open(io.BytesIO(png_data))
+        ratio = width / img.width
+        new_h = int(img.height * ratio)
+        img = img.resize((width, new_h), Image.LANCZOS)
+        _logo_image_ref = ImageTk.PhotoImage(img)
+        return _logo_image_ref
+    except Exception:
+        return None
 load_dotenv(PROJECT_ROOT / ".env")
 
 from client_tk.app.api_client import ApiClient
@@ -50,12 +77,13 @@ class LoginFrame(ctk.CTkFrame):
         card.grid_columnconfigure(0, weight=0)
         card.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(
-            card,
-            text="QC Suite Python",
-            font=("Segoe UI", 22, "bold"),
-            text_color=TEXT_PRIMARY,
-        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=24, pady=(24, 4))
+        # Logo only — no text title
+        logo_img = _get_logo_image(width=64)
+        title_frame = ctk.CTkFrame(card, fg_color="transparent")
+        title_frame.grid(row=0, column=0, columnspan=2, sticky="w", padx=24, pady=(24, 4))
+        if logo_img is not None:
+            logo_label = ctk.CTkLabel(title_frame, image=logo_img, text="")
+            logo_label.pack(side="left")
         ctk.CTkLabel(
             card,
             text="Client desktop interface with a dark navy CustomTkinter shell.",
@@ -157,7 +185,7 @@ class QcSuiteDesktopApp(ctk.CTk):
         configure_customtkinter()
         super().__init__()
         self.local_only = DEFAULT_LOCAL_ONLY
-        self.title("QC Suite Python")
+        self.title("QC Suite")
         self.geometry("1440x900")
         self.minsize(1160, 720)
         self.configure(fg_color=APP_BG)
@@ -176,7 +204,10 @@ class QcSuiteDesktopApp(ctk.CTk):
 
         header = ctk.CTkFrame(self.shell, fg_color=SHELL_BG, corner_radius=0, border_width=0)
         header.pack(fill="x")
-        ctk.CTkLabel(header, text="QC Suite Python", font=("Segoe UI", 16, "bold"), text_color=TEXT_PRIMARY).pack(side="left", padx=(16, 12), pady=14)
+        # Logo in header
+        header_logo = _get_logo_image(width=28)
+        if header_logo is not None:
+            ctk.CTkLabel(header, image=header_logo, text="").pack(side="left", padx=(16, 8), pady=10)
         self.user_label = ctk.CTkLabel(header, text="Not authenticated", text_color=TEXT_SECONDARY)
         self.user_label.pack(side="left", padx=16)
         self.endpoint_label = ctk.CTkLabel(

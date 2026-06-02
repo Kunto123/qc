@@ -176,10 +176,11 @@ class AppConfig:
 
     # ── 4-Relay + 2-Input Modbus mapping ──
     # Coil addresses (FC05/FC15) — 4 output relays
-    plc_relay_clamp_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_CLAMP_ADDRESS", "0")))
-    plc_relay_buzzer_green_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_BUZZER_GREEN_ADDRESS", "1")))
-    plc_relay_red_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_RED_ADDRESS", "2")))
-    plc_relay_buzzer_reject_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_BUZZER_REJECT_ADDRESS", "3")))
+    # CH1=Enji Buzzer, CH2=OK Light+Buzzer, CH3=Clamp, CH4=Spare
+    plc_relay_clamp_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_CLAMP_ADDRESS", "3")))
+    plc_relay_ok_light_buzzer_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_OK_LIGHT_BUZZER_ADDRESS", "2")))
+    plc_relay_enji_buzzer_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_ENJI_BUZZER_ADDRESS", "1")))
+    plc_relay_spare_address: int = max(0, int(os.getenv("QC_SUITE_PLC_RELAY_SPARE_ADDRESS", "0")))
     # Input addresses (FC02) — release, template cycle, optional clamp feedback
     plc_input_release_address: int = max(0, int(os.getenv("QC_SUITE_PLC_INPUT_RELEASE_ADDRESS", "0")))
     plc_input_template_address: int = max(0, int(os.getenv("QC_SUITE_PLC_INPUT_TEMPLATE_ADDRESS", "1")))
@@ -189,6 +190,14 @@ class AppConfig:
     plc_clamp_feedback_fallback_delay_ms: int = max(0, int(os.getenv("QC_SUITE_PLC_CLAMP_FEEDBACK_FALLBACK_DELAY_MS", "300")))
     # Accept pulse duration (ms)
     plc_accept_pulse_ms: int = max(100, int(os.getenv("QC_SUITE_PLC_ACCEPT_PULSE_MS", "1000")))
+    # Camera default rotation (degrees) applied to all templates unless overridden
+    camera_default_rotation_degrees: float = float(os.getenv("QC_SUITE_CAMERA_DEFAULT_ROTATION_DEGREES", "0"))
+    # PLC guard: minimum interval between clamp ON after any release/accept/manual (ms)
+    # Prevents rapid clamp cycling. Default 3000ms.
+    plc_min_reclamp_interval_ms: int = max(0, int(os.getenv("QC_SUITE_PLC_MIN_RECLAMP_INTERVAL_MS", "3000")))
+    # PLC guard: debounce for input release (ms)
+    # Input release must be stable for this long before triggering all_off
+    plc_release_input_debounce_ms: int = max(0, int(os.getenv("QC_SUITE_PLC_RELEASE_INPUT_DEBOUNCE_MS", "500")))
     # Session idle timeout (seconds): auto-end session after no frames received
     # for this duration. 0 = disabled (no auto-end). Default 300s (5 minutes).
     session_idle_timeout_s: int = max(0, int(os.getenv("QC_SUITE_SESSION_IDLE_TIMEOUT_S", "300")))

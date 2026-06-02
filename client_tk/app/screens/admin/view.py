@@ -189,7 +189,10 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_use_ocr_var = tk.BooleanVar(value=False)
         self.preset_ocr_flip_fallback_var = tk.BooleanVar(value=True)
         self.preset_max_tilt_var = tk.StringVar(value="")
+        self.preset_tilt_gate_var = tk.BooleanVar(value=False)
+        self.preset_gap_threshold_var = tk.StringVar(value="0.85")
         self.preset_camera_index_var = tk.StringVar(value="0")
+        self.preset_camera_rotation_var = tk.StringVar(value="0")
         self.preset_roi_choice_var = tk.StringVar(value="Sticker ROI")
         self.part_ready_roi_x_var = tk.StringVar(value="0.2")
         self.part_ready_roi_y_var = tk.StringVar(value="0.2")
@@ -401,8 +404,15 @@ class AdminScreen(ctk.CTkFrame):
         self._entry(wizard, 8, 0, "Sticker Code", self.preset_expected_code_var, columnspan=3)
         ttk.Checkbutton(wizard, text="Use OCR verification", variable=self.preset_use_ocr_var).grid(row=9, column=1, sticky="w", padx=(0, 12), pady=5)
         ttk.Checkbutton(wizard, text="Try 180 flip fallback", variable=self.preset_ocr_flip_fallback_var).grid(row=9, column=2, columnspan=2, sticky="w", padx=(0, 12), pady=5)
-        self._entry(wizard, 10, 0, "Max Tilt Degrees", self.preset_max_tilt_var, columnspan=3)
-        self._entry(wizard, 11, 0, "Camera Index", self.preset_camera_index_var, columnspan=3)
+        self._entry(wizard, 10, 0, "Max Tilt Degrees", self.preset_max_tilt_var, columnspan=2)
+        ttk.Checkbutton(wizard, text="Aktifkan cek miring", variable=self.preset_tilt_gate_var).grid(row=10, column=2, sticky="w", padx=(0, 12), pady=5)
+        self._entry(wizard, 11, 0, "Gap Threshold (0-1)", self.preset_gap_threshold_var, columnspan=3)
+        self._entry(wizard, 11, 0, "Camera Index", self.preset_camera_index_var, columnspan=1)
+        # Rotation field + hint inline
+        ttk.Label(wizard, text="Rotation°").grid(row=11, column=2, sticky="w", padx=(12, 4), pady=5)
+        rot_entry = ttk.Entry(wizard, textvariable=self.preset_camera_rotation_var, width=8)
+        rot_entry.grid(row=11, column=3, sticky="w", padx=(0, 12), pady=5)
+        ttk.Label(wizard, text="0/90/180/270", foreground="gray").grid(row=12, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(0, 4))
 
         # ── Part HSV section with color picker ──
         hsv_frame = ttk.LabelFrame(wizard, text="Part HSV (pick from image or capture from camera)", padding=6)
@@ -476,9 +486,10 @@ class AdminScreen(ctk.CTkFrame):
         btn_row = ttk.Frame(wizard)
         btn_row.grid(row=18, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 6))
         btn_row.columnconfigure(0, weight=1)
-        btn_row.columnconfigure(1, weight=1)
+        btn_row.columnconfigure(0, weight=1)
 
-        ctk.CTkButton(
+        # Dynamic action button: "Update" when editing, "Save & Deploy" when new
+        self._preset_action_btn = ctk.CTkButton(
             btn_row,
             text="Save & Deploy Preset",
             command=self.save_and_deploy_preset,
@@ -487,7 +498,8 @@ class AdminScreen(ctk.CTkFrame):
             text_color=TEXT_ON_ACCENT,
             height=34,
             corner_radius=6,
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        )
+        self._preset_action_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         ctk.CTkButton(
             btn_row,
             text="Export template.json",
@@ -1132,6 +1144,7 @@ class AdminScreen(ctk.CTkFrame):
         self.current_template_id = None
         self.current_template_version_id = None
         self._editing_deployment_id = None
+        self._refresh_preset_action_button()
         if hasattr(self, "preset_table"):
             for item_id in self.preset_table.selection():
                 self.preset_table.selection_remove(item_id)
@@ -1145,7 +1158,10 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_use_ocr_var.set(False)
         self.preset_ocr_flip_fallback_var.set(True)
         self.preset_max_tilt_var.set("")
+        self.preset_tilt_gate_var.set(False)
+        self.preset_gap_threshold_var.set("0.85")
         self.preset_camera_index_var.set("0")
+        self.preset_camera_rotation_var.set("0")
         self.part_ready_roi_x_var.set("0.2")
         self.part_ready_roi_y_var.set("0.2")
         self.part_ready_roi_w_var.set("0.25")
@@ -1221,8 +1237,12 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_use_ocr_var.set(bool(sticker.get("use_ocr", False)))
         self.preset_ocr_flip_fallback_var.set(bool(sticker.get("ocr_flip_fallback", True)))
         self.preset_max_tilt_var.set("" if sticker.get("max_tilt_degrees") is None else str(sticker.get("max_tilt_degrees")))
+        self.preset_tilt_gate_var.set(bool(sticker.get("tilt_gate_enabled", False)))
+        self.preset_gap_threshold_var.set(str(sticker.get("gap_match_threshold", 0.85)))
         camera_cfg = detail.get("camera") or {}
         self.preset_camera_index_var.set(str(camera_cfg.get("camera_index", 0)))
+        self.preset_camera_rotation_var.set(str(camera_cfg.get("rotation_degrees", 0)))
+        self._refresh_preset_action_button()
         part_ready_roi = detail.get("part_ready_roi") or {}
         sticker_roi = detail.get("sticker_roi") or detail.get("roi") or {}
         self.part_ready_roi_x_var.set(str(part_ready_roi.get("x", 0.2)))
@@ -1352,6 +1372,24 @@ class AdminScreen(ctk.CTkFrame):
             if frame is None:
                 messagebox.showwarning("Camera", "Camera returned no frame in time. Try again.")
                 return
+            # Apply camera rotation from preset config
+            try:
+                import cv2
+                import numpy as np
+                _rot = float(_float_or_default(self.preset_camera_rotation_var.get(), 0))
+                if _rot != 0.0:
+                    h, w = frame.shape[:2]
+                    center = (w // 2, h // 2)
+                    M = cv2.getRotationMatrix2D(center, -_rot, 1.0)
+                    cos_a = abs(M[0, 0])
+                    sin_a = abs(M[0, 1])
+                    new_w = int(h * sin_a + w * cos_a)
+                    new_h = int(h * cos_a + w * sin_a)
+                    M[0, 2] += (new_w - w) / 2
+                    M[1, 2] += (new_h - h) / 2
+                    frame = cv2.warpAffine(frame, M, (new_w, new_h), borderMode=cv2.BORDER_REPLICATE)
+            except Exception:
+                pass  # rotation failed, use original frame
             self._preset_roi_image_path = ""
             self.preset_roi_picker.load_image(frame.copy())
             self._preset_hsv_image = frame.copy()
@@ -1423,6 +1461,23 @@ class AdminScreen(ctk.CTkFrame):
             if frame is None:
                 messagebox.showwarning("Camera", "Camera returned no frame in time. Try again.")
                 return
+            # Apply camera rotation from preset config
+            try:
+                import cv2
+                _rot = float(_float_or_default(self.preset_camera_rotation_var.get(), 0))
+                if _rot != 0.0:
+                    h, w = frame.shape[:2]
+                    center = (w // 2, h // 2)
+                    M = cv2.getRotationMatrix2D(center, -_rot, 1.0)
+                    cos_a = abs(M[0, 0])
+                    sin_a = abs(M[0, 1])
+                    new_w = int(h * sin_a + w * cos_a)
+                    new_h = int(h * cos_a + w * sin_a)
+                    M[0, 2] += (new_w - w) / 2
+                    M[1, 2] += (new_h - h) / 2
+                    frame = cv2.warpAffine(frame, M, (new_w, new_h), borderMode=cv2.BORDER_REPLICATE)
+            except Exception:
+                pass
             self._preset_hsv_image = frame.copy()
             self._preset_hsv_image_path = ""
             self._preset_hsv_image_path_var.set(cam_idx)
@@ -1488,7 +1543,62 @@ class AdminScreen(ctk.CTkFrame):
         except Exception as exc:
             messagebox.showerror("HSV", f"Calculation failed: {exc}")
 
+    def _refresh_preset_action_button(self) -> None:
+        """Update preset action button text/command based on current_template_id."""
+        if self.current_template_id:
+            self._preset_action_btn.configure(
+                text=f"Update Template #{self.current_template_id}",
+                command=self.update_preset_only,
+                fg_color="#3b82f6",
+                hover_color="#2563eb",
+                text_color="#ffffff",
+            )
+        else:
+            self._preset_action_btn.configure(
+                text="Save & Deploy Preset",
+                command=self.save_and_deploy_preset,
+                fg_color=ACCENT,
+                hover_color=ACCENT_HOVER,
+                text_color=TEXT_ON_ACCENT,
+            )
+
+    def update_preset_only(self) -> None:
+        """Update current template parameters without creating a new version or deploying."""
+        if not self.current_template_id:
+            messagebox.showwarning("Preset", "No template loaded. Create a new preset first.")
+            return
+        try:
+            payload = self._preset_payload()
+        except ValueError as exc:
+            messagebox.showerror("Preset", str(exc))
+            return
+        try:
+            saved = self.api.update_template(self.current_template_id, payload, update_current_version=True)
+            template_id = int(saved.get("id") or self.current_template_id or 0)
+            version_id = int(saved.get("version_id") or saved.get("current_version_id") or 0)
+            self.current_template_id = template_id
+            self.current_template_version_id = version_id
+            # Reload exact version detail to wizard form so values reflect the update
+            try:
+                if version_id:
+                    detail = self.api.get_template_version(version_id)
+                else:
+                    detail = self.api.get_template(template_id)
+                self._apply_preset_detail(detail, deployment=None)
+                _reload_ok = True
+            except Exception:
+                _reload_ok = False
+            self.refresh_presets()
+            if _reload_ok:
+                self._set_status(f"Template #{template_id} v{version_id} updated.")
+                messagebox.showinfo("Preset", f"Template #{template_id} updated successfully.")
+            else:
+                self._set_status(f"Template #{template_id} saved, but detail reload failed.")
+                messagebox.showwarning("Preset", "Saved OK, but form reload failed. Values may appear stale until re-selected.")
+        except Exception as exc:
+            messagebox.showerror("Preset", str(exc))
     def save_and_deploy_preset(self) -> None:
+        """Save current template as new version and deploy."""
         try:
             payload = self._preset_payload()
         except ValueError as exc:
@@ -1506,9 +1616,9 @@ class AdminScreen(ctk.CTkFrame):
             # Auto-transition lifecycle: draft → review → approved → published
             for transition in ("review", "approved", "published"):
                 try:
-                    self.api.transition_template_lifecycle(template_id, transition, f"Auto-transition on deploy")
+                    self.api.transition_template_lifecycle(template_id, transition, "Auto-transition on deploy")
                 except Exception:
-                    pass  # ignore if transition not allowed (e.g. already in that state)
+                    pass
             deployment = self.api.deploy_template(
                 {
                     "template_id": template_id,
@@ -1517,7 +1627,7 @@ class AdminScreen(ctk.CTkFrame):
                     "station_id": self.preset_station_var.get().strip(),
                 }
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             messagebox.showerror("Preset", str(exc))
             return
         self.current_template_id = template_id
@@ -1526,6 +1636,8 @@ class AdminScreen(ctk.CTkFrame):
         self.refresh_presets()
         self._set_status(f"Preset deployed to {self.preset_line_var.get().strip()}/{self.preset_station_var.get().strip()}.")
         messagebox.showinfo("Preset", "Preset saved and deployed.")
+
+
 
     def _preset_payload(self) -> dict:
         name = self.preset_name_var.get().strip()
@@ -1557,6 +1669,7 @@ class AdminScreen(ctk.CTkFrame):
             "is_active": True,
             "camera": {
                 "camera_index": int(_float_or_default(self.preset_camera_index_var.get(), 0)),
+                "rotation_degrees": float(_float_or_default(self.preset_camera_rotation_var.get(), 0)),
                 "width": None, "height": None, "fps": None,
             },
             "part_ready_roi": {

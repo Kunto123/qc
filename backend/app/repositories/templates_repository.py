@@ -285,7 +285,49 @@ class TemplatesRepository(JsonRepository):
             return template_payload
         raise ValueError("Template not found.")
 
-    def list_versions(self, template_id: int) -> list[dict[str, Any]]:
+    def update_current_version(self, template_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        """Update the current version in-place without creating a new version entry."""
+        store = self._payload()
+        templates = store["templates"]
+        now = datetime.now(UTC).isoformat()
+        for item in templates:
+            if int(item["id"]) != int(template_id):
+                continue
+            current_versions = item.get("versions") or []
+            if not current_versions:
+                raise ValueError("Template has no versions.")
+            # Find the current version entry
+            current_version_id = item.get("current_version_id")
+            current_version = None
+            for v in current_versions:
+                if v["version_id"] == current_version_id:
+                    current_version = v
+                    break
+            if current_version is None:
+                # Fallback: use the last version
+                current_version = current_versions[-1]
+            # Normalize the updated payload
+            template_payload = self._normalize_template_payload(
+                {
+                    **dict(payload),
+                    "id": int(template_id),
+                    "version_id": current_version["version_id"],
+                    "version_number": current_version["version_number"],
+                    "is_active": bool(payload.get("is_active", item.get("is_active", True))),
+                }
+            )
+            # Replace the current version's template data in-place
+            current_version["template"] = template_payload
+            current_version["created_at"] = now
+            # Update top-level item fields
+            item["name"] = template_payload["name"]
+            item["description"] = template_payload.get("description", "")
+            item["is_active"] = bool(template_payload.get("is_active", item.get("is_active", True)))
+            item["updated_at"] = now
+            # Keep lifecycle_status as-is (don't reset to draft for in-place update)
+            self.save(store)
+            return template_payload
+        raise ValueError("Template not found.")
         template = self.get_template(template_id)
         if not template:
             raise ValueError("Template not found.")

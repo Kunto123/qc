@@ -59,8 +59,12 @@ def create_template():
 @require_roles(UserRole.ADMIN)
 def update_template(template_id: int):
     payload = request.get_json(force=True) or {}
+    update_current = str(request.args.get("update_current") or "").lower() in ("1", "true", "yes")
     try:
-        record = templates_repo.update_template(template_id, payload)
+        if update_current:
+            record = templates_repo.update_current_version(template_id, payload)
+        else:
+            record = templates_repo.update_template(template_id, payload)
     except TypeError as exc:
         return jsonify({"error": str(exc)}), 400
     except ValueError as exc:

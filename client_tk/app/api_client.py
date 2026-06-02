@@ -131,8 +131,8 @@ class ApiClient:
     def _post(self, path: str, payload: dict):
         return self._request_json("POST", path, payload=payload, timeout=20)
 
-    def _put(self, path: str, payload: dict):
-        return self._request_json("PUT", path, payload=payload, timeout=20)
+    def _put(self, path: str, payload: dict, params: dict | None = None):
+        return self._request_json("PUT", path, payload=payload, timeout=20, params=params)
 
     def _patch(self, path: str, payload: dict):
         return self._request_json("PATCH", path, payload=payload, timeout=20)
@@ -173,8 +173,8 @@ class ApiClient:
     def create_template(self, payload: dict) -> dict:
         return self._post("/templates", payload)
 
-    def update_template(self, template_id: int, payload: dict) -> dict:
-        return self._put(f"/templates/{template_id}", payload)
+    def update_template(self, template_id: int, payload: dict, update_current_version: bool = False) -> dict:
+        return self._put(f"/templates/{template_id}", payload, params={"update_current": str(update_current_version).lower()})
 
     def delete_template(self, template_id: int) -> dict:
         return self._delete(f"/templates/{template_id}")

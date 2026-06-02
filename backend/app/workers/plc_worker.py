@@ -49,6 +49,9 @@ class PlcWorker:
         input_template_address: int = 1,
         input_clamp_engaged_address: int = 2,
         clamp_feedback_enabled: bool = False,
+        relay_clamp_address: int = 3,
+        relay_ok_light_buzzer_address: int = 2,
+        relay_enji_buzzer_address: int = 1,
     ) -> None:
         self._adapter = adapter
         self._accept_pulse_ms = int(accept_pulse_ms)
@@ -57,6 +60,23 @@ class PlcWorker:
         self._input_template_address = max(0, int(input_template_address))
         self._input_clamp_engaged_address = max(0, int(input_clamp_engaged_address))
         self._clamp_feedback_enabled = bool(clamp_feedback_enabled)
+        # Relay coil addresses (configurable)
+        self._relay_clamp = max(0, int(relay_clamp_address))
+        self._relay_ok_light_buzzer = max(0, int(relay_ok_light_buzzer_address))
+        self._relay_enji_buzzer = max(0, int(relay_enji_buzzer_address))
+        # ── Cycle Lock State ──
+        # After ACCEPT/REJECT commit, lock prevents re-clamp until part is removed
+        self._cycle_locked: bool = False
+        self._cycle_lock_reason: str = ""
+        self._last_clamp_off_at: float = 0.0  # timestamp of last clamp release
+        self._last_part_ready_event_id: str | None = None  # deduplicate guard
+        # Config (set from container)
+        self._min_reclamp_interval_ms: int = 3000
+        self._release_input_debounce_ms: int = 500
+        self._dry_run: bool = False
+        # Release input edge tracking (prevents stuck-high from retriggering)
+        self._release_input_started_at: float | None = None
+        self._release_input_triggered: bool = False
         # State
         self._state: str = "IDLE"
         self._accept_pulse_end: float | None = None
@@ -143,6 +163,25 @@ class PlcWorker:
         """Callback dipanggil saat PLC state berubah. old_state, new_state."""
         self._on_state_change_callback = callback
 
+    def configure_guards(
+        self,
+        *,
+        min_reclamp_interval_ms: int = 3000,
+        release_input_debounce_ms: int = 500,
+        dry_run: bool = False,
+    ) -> None:
+        """Configure cycle guard settings (called from container init)."""
+        self._min_reclamp_interval_ms = max(0, int(min_reclamp_interval_ms))
+        self._release_input_debounce_ms = max(0, int(release_input_debounce_ms))
+        self._dry_run = bool(dry_run)
+
+    def unlock_cycle(self, *, reason: str = "manual") -> None:
+        """Explicitly unlock cycle (called from inspection session after part removal)."""
+        logger.info("[plc-worker] cycle unlocked — %s", reason)
+        self._cycle_locked = False
+        self._cycle_lock_reason = ""
+        self._last_part_ready_event_id = None
+
     def status(self) -> dict:
         with self._lock:
             clamp_engaged = self._clamp_engaged_from_snapshot_locked()
@@ -157,6 +196,9 @@ class PlcWorker:
                 "last_template_cycle_at": self._last_template_cycle_at,
                 "last_input_snapshot": list(self._last_input_snapshot),
                 "cmd_queue_depth": len(self._cmd_queue),
+                "cycle_locked": self._cycle_locked,
+                "cycle_lock_reason": self._cycle_lock_reason,
+                "dry_run": self._dry_run,
                 **self._adapter.status(),
             }
 
@@ -224,6 +266,7 @@ class PlcWorker:
             self._adapter.all_off(self._num_channels)
         except Exception as exc:
             logger.error("[plc-worker] all_off failed: %s", exc)
+        self._last_clamp_off_at = time.time()
         self._set_state("IDLE")
         logger.info("[plc-worker] ALL OFF — %s", reason)
 
@@ -234,17 +277,18 @@ class PlcWorker:
         ACCEPT:
         1. CH0=OFF (release clamp)
         2. CH1=ON (Green+Buzzer, Red OFF via NC)
-        3. Timer 1s → CH1=OFF (Red ON via NC) → IDLE
+        3. Timer _accept_pulse_ms → CH1=OFF → IDLE
         """
         self._set_state("ACCEPT_PULSE")
-        self._write_coil(0, False)  # CH0=OFF (release)
-        self._write_coil(1, True)   # CH1=ON (Green+Buzzer)
+        self._write_coil(self._relay_clamp, False)       # Clamp=OFF (release)
+        self._write_coil(self._relay_ok_light_buzzer, True)  # OK Light+Buzzer=ON
         self._accept_pulse_end = time.time() + (self._accept_pulse_ms / 1000.0)
         logger.info("[plc-worker] ACCEPT — CH1 pulse %dms", self._accept_pulse_ms)
 
     def _finish_accept_pulse(self) -> None:
-        self._write_coil(1, False)  # CH1=OFF (Red ON via NC)
+        self._write_coil(self._relay_ok_light_buzzer, False)  # OK Light+Buzzer=OFF
         self._accept_pulse_end = None
+        self._last_clamp_off_at = time.time()
         self._set_state("IDLE")
         logger.info("[plc-worker] ACCEPT done → IDLE")
 
@@ -259,8 +303,9 @@ class PlcWorker:
         4. Wait Input 1
         """
         self._set_state("REJECT_BUZZER")
-        self._write_coil(2, True)   # CH2=ON (Buzzer Reject)
-        # CH0 stays ON, CH1=OFF (Red ON)
+        self._write_coil(self._relay_enji_buzzer, True)   # Enji Buzzer=ON
+        self._write_coil(self._relay_clamp, True)         # Clamp stays ON
+        # OK Light=OFF (Red ON via NC)
         logger.info("[plc-worker] REJECT — CH2 ON, waiting Input 1")
 
     # ------------------------------------------------------------------
@@ -283,15 +328,36 @@ class PlcWorker:
 
     def _cmd_part_ready(self, cmd: dict) -> None:
         """Handle part_ready command in worker thread."""
+        event_id = cmd.get("event_id")
+        # Deduplicate: ignore if same event_id already processed
+        if event_id and event_id == self._last_part_ready_event_id:
+            logger.info("[plc-worker] part_ready dedup — event=%s", event_id)
+            return
+        # Cycle lock: reject clamp if locked
+        if self._cycle_locked:
+            logger.info("[plc-worker] part_ready blocked (cycle_locked=%s) — event=%s",
+                        self._cycle_lock_reason, event_id)
+            return
+        # Min reclamp interval: reject if too soon after last clamp off
+        now = time.time()
+        if self._last_clamp_off_at > 0:
+            _elapsed_since_release_ms = (now - self._last_clamp_off_at) * 1000.0
+            if _elapsed_since_release_ms < self._min_reclamp_interval_ms:
+                logger.info(
+                    "[plc-worker] part_ready blocked (reclamp interval %.0fms < %dms) — event=%s",
+                    _elapsed_since_release_ms, self._min_reclamp_interval_ms, event_id,
+                )
+                return
         with self._lock:
             if self._state != "IDLE":
                 logger.info("[plc-worker] part_ready ignored (state=%s)", self._state)
                 return
-        self._write_coil(0, True)   # CH0=ON (clamp)
-        self._write_coil(1, False)  # CH1=OFF (Red ON via NC)
-        self._write_coil(2, False)  # CH2=OFF
+        self._last_part_ready_event_id = event_id
+        self._write_coil(self._relay_clamp, True)         # Clamp=ON
+        self._write_coil(self._relay_ok_light_buzzer, False)  # OK Light=OFF
+        self._write_coil(self._relay_enji_buzzer, False)  # Enji Buzzer=OFF
         self._set_state("CLAMPING")
-        logger.info("[plc-worker] CLAMPING — event=%s", cmd.get("event_id"))
+        logger.info("[plc-worker] CLAMPING — event=%s", event_id)
 
     def _cmd_decision(self, cmd: dict) -> None:
         """Handle decision command in worker thread."""
@@ -351,15 +417,29 @@ class PlcWorker:
         with self._lock:
             self._last_input_snapshot = list(inputs[:_INPUT_READ_COUNT])
 
-        # Input 1 (index 0): Manual Release
-        if self._input_release_address < len(inputs) and inputs[self._input_release_address]:
-            last = self._last_input_press.get(self._input_release_address, 0.0)
-            if now - last > self._input_debounce_s:
-                self._last_input_press[self._input_release_address] = now
-                logger.info("[plc-worker] INPUT 1 — Manual Release")
-                self._all_off("input_1")
+        # Input 1 (index 0): Manual Release — edge triggered + stable debounce
+        _release_addr = self._input_release_address
+        if _release_addr < len(inputs):
+            _release_active = bool(inputs[_release_addr])
+            _now = now
+            # Track the timestamp when release input first went high
+            if _release_active:
+                if self._release_input_started_at is None:
+                    self._release_input_started_at = _now
+                # Only trigger if input has been stable high for debounce period
+                _stable_ms = (_now - self._release_input_started_at) * 1000.0
+                if _stable_ms >= self._release_input_debounce_ms:
+                    # Edge: only trigger once per activation cycle
+                    if not self._release_input_triggered:
+                        self._release_input_triggered = True
+                        logger.info("[plc-worker] INPUT 1 — Manual Release (stable %.0fms)", _stable_ms)
+                        self._all_off("input_1")
+            else:
+                # Input went low — reset state for next edge
+                self._release_input_started_at = None
+                self._release_input_triggered = False
 
-        # Input 2 (index 1): Ganti Template
+        # Input 2 (index 1): Ganti Template — edge triggered + debounce
         if self._input_template_address < len(inputs) and inputs[self._input_template_address]:
             last = self._last_input_press.get(self._input_template_address, 0.0)
             if now - last > self._input_debounce_s:

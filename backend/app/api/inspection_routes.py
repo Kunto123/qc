@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from flask import Blueprint, Response, g, jsonify, request
 
 from backend.app.core.container import audit_repo, inspection_results_repo, inspection_session_service, plc_worker, reject_log_repo
+from backend.app.core.json_safety import safe_jsonify
 from backend.app.core.http import require_auth, require_roles
 from shared.contracts.enums import DecisionCode, RejectReasonCode, UserRole
 
@@ -44,13 +45,14 @@ def start_session():
         session = inspection_session_service.start_session(
             client_id=str(payload.get("client_id") or "").strip() or str(g.current_user.id),
             camera_index=int(payload.get("camera_index") or 0),
+            camera_rotation_degrees=float(payload.get("camera_rotation_degrees") or 0),
             template_version_id=int(payload.get("template_version_id") or 0),
             line_id=str(payload.get("line_id") or "").strip() or None,
             station_id=str(payload.get("station_id") or "").strip() or None,
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    return jsonify(session), 201
+    return safe_jsonify(session), 201
 
 
 @inspection_blueprint.post("/inspection/sessions/<session_id>/frame")
@@ -67,7 +69,7 @@ def push_frame(session_id: str):
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    return jsonify(result)
+    return safe_jsonify(result)
 
 
 @inspection_blueprint.post("/inspection/sessions/<session_id>/roi")
@@ -107,7 +109,7 @@ def latest_preview():
     result = inspection_session_service.get_latest_preview()
     if result is None:
         return jsonify({"error": "No active session with frames available."}), 404
-    return jsonify(result)
+    return safe_jsonify(result)
 
 
 @inspection_blueprint.get("/inspections")
@@ -132,7 +134,7 @@ def get_inspection(result_id: int):
     item = inspection_results_repo.get_result(result_id)
     if item is None:
         return jsonify({"error": "Inspection result not found"}), 404
-    return jsonify(item)
+    return safe_jsonify(item)
 
 
 @inspection_blueprint.patch("/inspections/<int:result_id>")
