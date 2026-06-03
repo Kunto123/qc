@@ -22,6 +22,13 @@ DEFAULT_HSV_UPPER = np.array([130, 255, 255])
 # Reference storage directory
 PART_READY_REF_DIR = "backend/app/assets/part_ready_refs"
 
+def _auto_canny(gray: np.ndarray, sigma: float = 0.33) -> np.ndarray:
+    """Auto-tune Canny thresholds from image median — robust terhadap perubahan cahaya."""
+    median = float(np.median(gray))
+    low = int(max(0, (1.0 - sigma) * median))
+    high = int(min(255, (1.0 + sigma) * median))
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    return cv2.Canny(blurred, low, high)
 
 def get_ref_path(template_id: int) -> Path:
     """Get the file path for a template's reference patch."""
@@ -51,20 +58,12 @@ def save_ref_patch(frame_bgr: np.ndarray, roi: dict, save_path: str,
                    hsv_upper: np.ndarray = DEFAULT_HSV_UPPER,
                    padding_px: int = 20,
                    rotation: float = 0.0) -> bool:
-    """Extract and save reference gap patch from a calibration frame.
-
-    1. Crop the ROI region from the frame.
-    2. HSV-segment the blue clamp.
-    3. Find the lower edge of the clamp mask.
-    4. Extract the gap area below the clamp.
-    5. Save as PNG.
-    """
+    """Crop ROI, apply Canny edge detection, save as grayscale PNG."""
     try:
         rx, ry = int(roi.get("x", 0)), int(roi.get("y", 0))
         rw, rh = int(roi.get("w", 0)), int(roi.get("h", 0))
         if rw <= 0 or rh <= 0:
             return False
-        # Clamp to frame bounds
         fh, fw = frame_bgr.shape[:2]
         rx = max(0, min(rx, fw - 1))
         ry = max(0, min(ry, fh - 1))
@@ -73,8 +72,6 @@ def save_ref_patch(frame_bgr: np.ndarray, roi: dict, save_path: str,
         roi_frame = frame_bgr[ry:ry+rh, rx:rx+rw]
         if roi_frame.size == 0:
             return False
-
-        # Deskew rotated ROI before HSV extraction
         if abs(rotation) > 0.1:
             center = (rw / 2, rh / 2)
             M = cv2.getRotationMatrix2D(center, -rotation, 1.0)
@@ -83,33 +80,10 @@ def save_ref_patch(frame_bgr: np.ndarray, roi: dict, save_path: str,
                 flags=cv2.INTER_LINEAR,
                 borderMode=cv2.BORDER_REPLICATE,
             )
-
-        # HSV segmentation for blue clamp
-        hsv = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
-        # Clean up noise
-        kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-        # Find clamp lower edge
-        ys = np.any(mask > 0, axis=1)
-        if not np.any(ys):
-            return False
-        clamp_bottom = np.max(np.where(ys)[0])
-
-        # Extract gap area: from clamp_bottom + padding to bottom of ROI
-        gap_start = min(clamp_bottom + padding_px, rh - 1)
-        gap_end = rh
-        if gap_end - gap_start < 10:
-            return False
-
-        gap_patch = roi_frame[gap_start:gap_end, :]
-        if gap_patch.size == 0:
-            return False
-
+        gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+        edge_map = _auto_canny(gray)
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(save_path, gap_patch)
+        cv2.imwrite(save_path, edge_map)
         return True
     except Exception:
         return False
@@ -136,6 +110,12 @@ def match_gap(frame_bgr: np.ndarray, roi: dict, ref_patch: np.ndarray,
         roi_frame = frame_bgr[ry:ry+rh, rx:rx+rw]
         if roi_frame.size == 0:
             return {"match": False, "score": 0.0, "location": (0, 0)}
+
+        # Konversi ke edge map (auto-tune Canny) untuk matching yang robust
+        gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+        roi_frame = _auto_canny(gray)
+        if ref_patch.ndim == 3:
+            ref_patch = cv2.cvtColor(ref_patch, cv2.COLOR_BGR2GRAY)
 
         # Ref patch must fit inside ROI
         ph, pw = ref_patch.shape[:2]

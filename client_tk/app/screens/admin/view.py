@@ -1196,15 +1196,22 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_tilt_gate_var.set(bool(sticker.get("tilt_gate_enabled", False)))
         self.preset_gap_threshold_var.set(str(part_ready.get("gap_match_threshold", 0.85)))
         # Update gap ref status label
-        _gap_ref_path = detail.get("gap_ref_path") or detail.get("part_ready", {}).get("gap_ref_path")
+        _gap_ref_path = detail.get("gap_ref_path") or part_ready.get("gap_ref_path")
+        _gap_ref_type = part_ready.get("gap_ref_type", "raw")
         if _gap_ref_path:
             from pathlib import Path
-            if Path(_gap_ref_path).is_file():
-                self.gap_ref_status_label.configure(text="Referensi: ada", foreground="green")
+            if not Path(_gap_ref_path).is_file():
+                self.gap_ref_status_label.configure(
+                    text="Referensi: file tidak ditemukan", foreground="orange")
+            elif _gap_ref_type != "edge_map":
+                self.gap_ref_status_label.configure(
+                    text="⚠ Format lama — capture ulang diperlukan", foreground="orange")
             else:
-                self.gap_ref_status_label.configure(text="Referensi: file tidak ditemukan", foreground="orange")
+                self.gap_ref_status_label.configure(
+                    text="Referensi: edge map ✓", foreground="green")
         else:
-            self.gap_ref_status_label.configure(text="Referensi: belum dikonfigurasi", foreground="gray")
+            self.gap_ref_status_label.configure(
+                text="Referensi: belum dikonfigurasi", foreground="gray")
         camera_cfg = detail.get("camera") or {}
         self.preset_camera_index_var.set(str(camera_cfg.get("camera_index", 0)))
         self.preset_camera_rotation_var.set(str(camera_cfg.get("rotation_degrees", 0)))
@@ -1544,19 +1551,59 @@ class AdminScreen(ctk.CTkFrame):
             }
             _pr_roi = self.preset_roi_picker.get_roi("part_ready")
             roi["rotation"] = float(_pr_roi.get("rotation", 0.0))
-            roi["gap_hsv_lower"] = [90, 50, 50]
-            roi["gap_hsv_upper"] = [130, 255, 255]
-            roi["gap_padding_px"] = 20
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
             frame_b64 = base64.b64encode(buf).decode("ascii")
             result = self.api.capture_part_ready_ref(self.current_template_id, frame_b64, roi)
             if result.get("saved"):
-                self.gap_ref_status_label.configure(text=f"Referensi: ada", foreground="green")
-                messagebox.showinfo("Reference", "Referensi gap berhasil disimpan.")
+                self.gap_ref_status_label.configure(
+                    text="Referensi: edge map ✓", foreground="green")
+                preview_b64 = result.get("preview_b64")
+                if preview_b64:
+                    self._show_edge_map_preview(preview_b64)
+                else:
+                    messagebox.showinfo("Reference", "Edge map referensi berhasil disimpan.")
             else:
                 messagebox.showerror("Reference", result.get("error", "Gagal menyimpan referensi."))
         except Exception as exc:
             messagebox.showerror("Reference", f"Capture failed: {exc}")
+
+    def _show_edge_map_preview(self, preview_b64: str) -> None:
+        """Dialog preview edge map yang baru disimpan sebagai master."""
+        try:
+            import base64 as _b64
+            import numpy as np
+            import cv2
+            from PIL import Image, ImageTk
+
+            raw = _b64.b64decode(preview_b64)
+            arr = np.frombuffer(raw, np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                messagebox.showinfo("Reference", "Edge map disimpan (preview tidak tersedia).")
+                return
+            max_w, max_h = 640, 400
+            h, w = img.shape[:2]
+            scale = min(max_w / max(w, 1), max_h / max(h, 1), 1.0)
+            if scale < 1.0:
+                img = cv2.resize(img, (int(w * scale), int(h * scale)))
+            pil_img = Image.fromarray(img)
+            photo = ImageTk.PhotoImage(pil_img)
+            dlg = tk.Toplevel(self)
+            dlg.title("Preview Edge Map Referensi")
+            dlg.resizable(False, False)
+            tk.Label(dlg, image=photo).pack(padx=10, pady=10)
+            tk.Label(
+                dlg,
+                text="Ini yang disimpan sebagai master.\n"
+                     "Pastikan tepi part & clamp terlihat jelas.",
+                justify="center",
+            ).pack(pady=(0, 6))
+            tk.Button(dlg, text="OK", width=10, command=dlg.destroy).pack(pady=(0, 10))
+            dlg._photo = photo
+            dlg.grab_set()
+            dlg.wait_window()
+        except Exception as exc:
+            messagebox.showinfo("Reference", f"Edge map disimpan. Preview error: {exc}")
 
     def _upload_part_ready_ref(self) -> None:
         """Upload reference patch image from file."""

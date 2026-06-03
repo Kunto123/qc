@@ -55,7 +55,8 @@ class PartReadyConfig:
     # Gap detection via template matching
     gap_match_threshold: float = 0.85  # min cv2.matchTemplate score for part_ready=True
     gap_ref_path: str | None = None    # relative path to reference PNG on disk
-    gap_hsv_lower: list[int] = field(default_factory=lambda: [90, 50, 50])  # blue clamp HSV lower
+    gap_ref_type: str = "raw"          # "raw" = HSV lama, "edge_map" = Canny baru
+    gap_hsv_lower: list[int] = field(default_factory=lambda: [90, 50, 50])
     gap_hsv_upper: list[int] = field(default_factory=lambda: [130, 255, 255])  # blue clamp HSV upper
     gap_padding_px: int = 20  # px padding around clamp mask to extract gap patch
     # Legacy color profile fields (kept for backward compatibility)
