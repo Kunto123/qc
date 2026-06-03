@@ -816,33 +816,72 @@ class InspectionSessionService:
         _effective_pr_ready = bool(operator_state_decision.run_inspection)
         detections: list[dict[str, Any]] = []
         inference_ms = 0.0
+        stage_timings: dict[str, Any] = {}
+
+        # ── Async background inference (frame skip + TTL cache) ──
+        # Submit inference every 3rd frame when not busy.
+        # Use cached result if fresh (<500ms), otherwise compose without bbox.
         if _effective_pr_ready:
-            inference_started = time.perf_counter()
-            # DEBUG: log sticker ROI and frame info
-            logger.info(
-                "[inference] sticker_roi=%s frame=%dx%d crop=%dx%d expected=%s",
-                state.template.sticker_roi,
-                frame.shape[1], frame.shape[0],
-                sticker_frame.shape[1], sticker_frame.shape[0],
-                state.template.sticker.expected_class,
+            state.inference_frame_counter += 1
+            _should_submit = (
+                state.inference_frame_counter % 3 == 0
+                and not state.inference_thread_busy
             )
-            inference_payload = self._run_sticker_inference(sticker_frame, state)
-            inference_ms = _elapsed_ms(inference_started)
-            detections = list(inference_payload.get("detections") or [])
-            # DEBUG: log detection results with class names
-            logger.info(
-                "[inference] raw=%d filtered=%d classes=%s allowed=%s",
-                inference_payload.get("raw_detection_count", 0),
-                len(detections),
-                inference_payload.get("class_names", []),
-                inference_payload.get("allowed_labels_filter", []),
-            )
-            stage_timings = dict(inference_payload.get("timings") or {})
-            for key, value in stage_timings.items():
+            if _should_submit:
+                state.inference_thread_busy = True
+                # Lazy-init executor per session
+                if state._inference_executor is None:
+                    state._inference_executor = concurrent.futures.ThreadPoolExecutor(
+                        max_workers=1,
+                        thread_name_prefix=f"qc-inference-{state.session_id[:8]}",
+                    )
                 try:
-                    timings[f"inference_{key}"] = float(value)
-                except (TypeError, ValueError):
-                    continue
+                    _future = state._inference_executor.submit(
+                        self._run_sticker_inference_sync,
+                        sticker_frame.copy(),
+                        state,
+                    )
+                    _future.add_done_callback(
+                        lambda f, s=state: self._on_inference_done(f, s)
+                    )
+                except Exception as exc:
+                    logger.warning("[inference] submit failed: %s", exc)
+                    state.inference_thread_busy = False
+
+            # Use cached result if fresh enough
+            _age = monotonic() - state.inference_result_ts
+            if state.inference_result_cache is not None and _age <= 0.5:
+                _cached = state.inference_result_cache
+                detections = list(_cached.get("detections") or [])
+                inference_ms = float(_cached.get("inference_ms", 0.0))
+                stage_timings = dict(_cached.get("timings") or {})
+                for key, value in stage_timings.items():
+                    try:
+                        timings[f"inference_{key}"] = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                inference_payload = _cached
+            else:
+                # Stale or no cache — compose without bbox
+                inference_payload = {
+                    "backend": "async_cache",
+                    "model_path": state.template.vision.model_path,
+                    "meta_path": state.template.vision.model_meta_path,
+                    "class_names": state.template.vision.classes,
+                    "fallback_reason": None,
+                    "raw_detection_count": 0,
+                    "allowed_labels_filter": [],
+                    "anchor": None,
+                    "ocr": None,
+                    "geometry": None,
+                    "device_mode": None,
+                    "effective_device": None,
+                    "device_backend": None,
+                    "device_fallback_reason": None,
+                    "gpu_available": None,
+                    "timings": {},
+                    "inference_ms": 0.0,
+                }
             sticker_detection = self._build_sticker_detection_payload(
                 detections,
                 skipped=False,
@@ -1256,6 +1295,29 @@ class InspectionSessionService:
         meta = {"x": x, "y": y, "width": x2 - x, "height": y2 - y}
         return cropped, meta
 
+    def _on_inference_done(
+        self, future: concurrent.futures.Future, state: SessionState
+    ) -> None:
+        """Callback when async inference completes. Thread-safe write to cache."""
+        try:
+            result = future.result()
+            state.inference_result_cache = result
+            state.inference_result_ts = monotonic()
+        except Exception as exc:
+            logger.warning("[inference-thread] callback error: %s", exc)
+        finally:
+            state.inference_thread_busy = False
+
+    def _run_sticker_inference_sync(
+        self, frame: np.ndarray, state: SessionState
+    ) -> dict:
+        """Wrapper for background thread — calls sync inference and returns serializable dict."""
+        try:
+            return self._run_sticker_inference(frame, state)
+        except Exception as exc:
+            logger.warning("[inference-thread] error: %s", exc)
+            return {"detections": [], "timings": {}}
+
     def _run_sticker_inference(self, frame, state: SessionState) -> dict[str, Any]:
         return self._sticker_inference.predict(
             frame,
@@ -1382,13 +1444,10 @@ class InspectionSessionService:
                 "gap_method": "template_match",
             }
 
-        # Build ROI dict for gap detector
-        roi = {
-            "x": state.template.part_ready_roi.x,
-            "y": state.template.part_ready_roi.y,
-            "w": state.template.part_ready_roi.w,
-            "h": state.template.part_ready_roi.h,
-        }
+        # frame sudah di-crop ke part_ready_roi oleh _crop_stage_roi
+        # — gunakan full dimensi frame sebagai area pencarian gap
+        _fh, _fw = frame.shape[:2]
+        roi = {"x": 0, "y": 0, "w": _fw, "h": _fh}
 
         result = match_gap(frame, roi, ref_patch, threshold)
         score = result["score"]

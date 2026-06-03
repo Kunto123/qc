@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import base64
+import os
+
+import cv2
+import numpy as np
 from flask import Blueprint, g, jsonify, request
 
 from backend.app.core.container import templates_repo
+from backend.app.services.gap_detector import save_ref_patch, get_ref_path
 from backend.app.core.http import require_auth, require_roles
 from backend.app.services.template_config_manager import TemplateConfigManager
 from shared.contracts.enums import UserRole
@@ -113,6 +119,96 @@ def transition_template_lifecycle(template_id: int):
         status_code = 404 if "not found" in message.lower() else 400
         return jsonify({"error": message}), status_code
     return jsonify(result)
+
+
+@template_blueprint.post("/<int:template_id>/part-ready-ref/capture")
+@require_roles(UserRole.ADMIN)
+def capture_part_ready_ref(template_id: int):
+    """Capture reference gap patch from a calibration frame."""
+    payload = request.get_json(force=True) or {}
+    frame_b64 = str(payload.get("frame_b64") or "")
+    roi = payload.get("roi") or {}
+    if not frame_b64:
+        return jsonify({"error": "frame_b64 required"}), 400
+    try:
+        raw = base64.b64decode(frame_b64)
+        arr = np.frombuffer(raw, np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            return jsonify({"error": "Invalid image data"}), 400
+    except Exception as exc:
+        return jsonify({"error": f"Decode failed: {exc}"}), 400
+
+    save_path = str(get_ref_path(template_id))
+    _hsv_lower = np.array(roi.get("gap_hsv_lower", [90, 50, 50]))
+    _hsv_upper = np.array(roi.get("gap_hsv_upper", [130, 255, 255]))
+    _padding = int(roi.get("gap_padding_px", 20))
+
+    ok = save_ref_patch(frame, roi, save_path, _hsv_lower, _hsv_upper, _padding)
+    if ok:
+        # Update template config with ref_path
+        try:
+            detail = templates_repo.get_template_detail(template_id)
+            if detail:
+                pr = detail.get("part_ready") or {}
+                pr["gap_ref_path"] = save_path
+                # Keep method as gap_template_match
+                pr["method"] = "gap_template_match"
+                templates_repo.update_template(template_id, {"part_ready": pr})
+        except Exception:
+            pass  # non-critical
+        return jsonify({"saved": True, "path": save_path}), 201
+    return jsonify({"error": "Failed to extract gap patch — check ROI and camera"}), 400
+
+
+@template_blueprint.post("/<int:template_id>/part-ready-ref/upload")
+@require_roles(UserRole.ADMIN)
+def upload_part_ready_ref(template_id: int):
+    """Upload reference patch image (user provides the patch directly)."""
+    file_bytes = None
+
+    # Try multipart file upload first
+    if "file" in request.files:
+        file = request.files["file"]
+        if not file.filename:
+            return jsonify({"error": "Empty filename"}), 400
+        file_bytes = file.read()
+    else:
+        # Fallback: accept base64 JSON from local mode client
+        payload = request.get_json(silent=True) or {}
+        file_b64 = str(payload.get("file_b64") or "")
+        if file_b64:
+            try:
+                file_bytes = base64.b64decode(file_b64)
+            except Exception:
+                return jsonify({"error": "Invalid base64"}), 400
+        else:
+            return jsonify({"error": "No file uploaded"}), 400
+
+    save_path = str(get_ref_path(template_id))
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    try:
+        arr = np.frombuffer(file_bytes, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return jsonify({"error": "Invalid image file"}), 400
+        cv2.imwrite(save_path, img)
+    except Exception as exc:
+        return jsonify({"error": f"Save failed: {exc}"}), 400
+
+    return jsonify({"saved": True, "path": save_path}), 201
+
+
+@template_blueprint.delete("/<int:template_id>/part-ready-ref")
+@require_roles(UserRole.ADMIN)
+def delete_part_ready_ref(template_id: int):
+    """Delete reference patch for a template."""
+    ref_path = get_ref_path(template_id)
+    if ref_path.exists():
+        ref_path.unlink()
+        return jsonify({"deleted": True}), 200
+    return jsonify({"error": "No reference found"}), 404
 
 
 @template_blueprint.post("/<int:template_id>/rollback")

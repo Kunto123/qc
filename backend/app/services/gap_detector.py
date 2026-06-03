@@ -13,7 +13,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from backend.app.core.container import project_root
+from backend.app.core.config import PROJECT_ROOT as project_root
 
 # Default HSV range for blue clamp detection
 DEFAULT_HSV_LOWER = np.array([90, 50, 50])

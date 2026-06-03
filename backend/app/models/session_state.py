@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -60,7 +61,7 @@ class SessionState:
     inference_result_ts: float = 0.0
     inference_frame_counter: int = 0
     inference_thread_busy: bool = False
-    _inference_executor = None  # ThreadPoolExecutor, lazy-init per session
+    _inference_executor: concurrent.futures.ThreadPoolExecutor | None = None  # lazy-init per session
     part_removed_seen_at: datetime | None = None
     # Hysteresis counter: number of consecutive settled frames.
     # Reset to 0 when part_ready/presence is lost.

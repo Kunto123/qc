@@ -197,6 +197,43 @@ class ApiClient:
     def create_session(self, payload: dict) -> dict:
         return self._post("/inspection/sessions/start", payload)
 
+    def capture_part_ready_ref(self, template_id: int, frame_b64: str, roi: dict) -> dict:
+        return self._post(
+            f"/templates/{template_id}/part-ready-ref/capture",
+            {"frame_b64": frame_b64, "roi": roi},
+        )
+
+    def upload_part_ready_ref(self, template_id: int, file_path: str) -> dict:
+        """Upload reference patch image."""
+        import mimetypes
+        from pathlib import Path
+        path = Path(file_path)
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        with path.open("rb") as fh:
+            if self._local_mode:
+                # Local mode: read file and send as payload
+                file_bytes = fh.read()
+                import base64
+                return self._post(
+                    f"/templates/{template_id}/part-ready-ref/upload",
+                    {"file_b64": base64.b64encode(file_bytes).decode("ascii")},
+                )
+            response = self.session.request(
+                method="POST",
+                url=f"{self.base_url}/templates/{template_id}/part-ready-ref/upload",
+                files={"file": (path.name, fh, content_type)},
+                headers=self._headers(json_content_type=False),
+                timeout=30,
+            )
+            if not response.ok:
+                detail = response.text
+                try:
+                    detail = response.json().get("error") or detail
+                except ValueError:
+                    pass
+                raise RuntimeError(f"{response.status_code}: {detail}")
+            return response.json()
+
     def update_roi(self, session_id: str, payload: dict) -> dict:
         return self._post(f"/inspection/sessions/{session_id}/roi", payload)
 

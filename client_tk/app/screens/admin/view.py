@@ -406,8 +406,15 @@ class AdminScreen(ctk.CTkFrame):
         ttk.Checkbutton(wizard, text="Try 180 flip fallback", variable=self.preset_ocr_flip_fallback_var).grid(row=9, column=2, columnspan=2, sticky="w", padx=(0, 12), pady=5)
         self._entry(wizard, 10, 0, "Max Tilt Degrees", self.preset_max_tilt_var, columnspan=2)
         ttk.Checkbutton(wizard, text="Aktifkan cek miring", variable=self.preset_tilt_gate_var).grid(row=10, column=2, sticky="w", padx=(0, 12), pady=5)
-        self._entry(wizard, 11, 0, "Gap Threshold (0-1)", self.preset_gap_threshold_var, columnspan=3)
-        self._entry(wizard, 11, 0, "Camera Index", self.preset_camera_index_var, columnspan=1)
+        self._entry(wizard, 11, 0, "Gap Threshold (0-1)", self.preset_gap_threshold_var, columnspan=2)
+        # Reference patch buttons
+        ref_btn_row = ttk.Frame(wizard)
+        ref_btn_row.grid(row=12, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 4))
+        ttk.Button(ref_btn_row, text="Capture Reference", command=self._capture_part_ready_ref).pack(side="left", padx=(0, 6))
+        ttk.Button(ref_btn_row, text="Upload Reference", command=self._upload_part_ready_ref).pack(side="left")
+        self.gap_ref_status_label = ttk.Label(wizard, text="Referensi: belum dikonfigurasi", foreground="gray")
+        self.gap_ref_status_label.grid(row=13, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 6))
+        self._entry(wizard, 14, 0, "Camera Index", self.preset_camera_index_var, columnspan=1)
         # Rotation field + hint inline
         ttk.Label(wizard, text="Rotation°").grid(row=11, column=2, sticky="w", padx=(12, 4), pady=5)
         rot_entry = ttk.Entry(wizard, textvariable=self.preset_camera_rotation_var, width=8)
@@ -1239,6 +1246,16 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_max_tilt_var.set("" if sticker.get("max_tilt_degrees") is None else str(sticker.get("max_tilt_degrees")))
         self.preset_tilt_gate_var.set(bool(sticker.get("tilt_gate_enabled", False)))
         self.preset_gap_threshold_var.set(str(sticker.get("gap_match_threshold", 0.85)))
+        # Update gap ref status label
+        _gap_ref_path = detail.get("gap_ref_path") or detail.get("part_ready", {}).get("gap_ref_path")
+        if _gap_ref_path:
+            from pathlib import Path
+            if Path(_gap_ref_path).is_file():
+                self.gap_ref_status_label.configure(text="Referensi: ada", foreground="green")
+            else:
+                self.gap_ref_status_label.configure(text="Referensi: file tidak ditemukan", foreground="orange")
+        else:
+            self.gap_ref_status_label.configure(text="Referensi: belum dikonfigurasi", foreground="gray")
         camera_cfg = detail.get("camera") or {}
         self.preset_camera_index_var.set(str(camera_cfg.get("camera_index", 0)))
         self.preset_camera_rotation_var.set(str(camera_cfg.get("rotation_degrees", 0)))
@@ -1639,6 +1656,65 @@ class AdminScreen(ctk.CTkFrame):
 
 
 
+    def _capture_part_ready_ref(self) -> None:
+        """Capture reference gap patch from current camera frame."""
+        if not self.current_template_id:
+            messagebox.showwarning("Reference", "Pilih template terlebih dahulu.")
+            return
+        try:
+            import cv2
+            import base64
+            from client_tk.app.services.camera_capture import CameraCaptureService
+            cam = CameraCaptureService()
+            cam_idx = int(self.preset_camera_index_var.get() or 0)
+            cam.start(cam_idx)
+            import time
+            time.sleep(0.5)
+            frame = cam.get_latest_frame()
+            cam.stop()
+            if frame is None:
+                messagebox.showwarning("Reference", "Tidak ada frame dari kamera.")
+                return
+            roi = {
+                "x": int(float(self.part_ready_roi_x_var.get() or 0.2) * frame.shape[1]),
+                "y": int(float(self.part_ready_roi_y_var.get() or 0.2) * frame.shape[0]),
+                "w": int(float(self.part_ready_roi_w_var.get() or 0.25) * frame.shape[1]),
+                "h": int(float(self.part_ready_roi_h_var.get() or 0.25) * frame.shape[0]),
+            }
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            frame_b64 = base64.b64encode(buf).decode("ascii")
+            result = self.api.capture_part_ready_ref(self.current_template_id, frame_b64, roi)
+            if result.get("saved"):
+                self.gap_ref_status_label.configure(text=f"Referensi: ada", foreground="green")
+                messagebox.showinfo("Reference", "Referensi gap berhasil disimpan.")
+            else:
+                messagebox.showerror("Reference", result.get("error", "Gagal menyimpan referensi."))
+        except Exception as exc:
+            messagebox.showerror("Reference", f"Capture failed: {exc}")
+
+    def _upload_part_ready_ref(self) -> None:
+        """Upload reference patch image from file."""
+        if not self.current_template_id:
+            messagebox.showwarning("Reference", "Pilih template terlebih dahulu.")
+            return
+        from tkinter import filedialog
+        file_path = filedialog.askopenfilename(
+            title="Pilih gambar referensi gap",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg"), ("All files", "*.*")],
+        )
+        if not file_path:
+            return
+        try:
+            result = self.api.upload_part_ready_ref(self.current_template_id, file_path)
+            if result.get("saved"):
+                self.gap_ref_status_label.configure(text="Referensi: ada", foreground="green")
+                messagebox.showinfo("Reference", "Referensi gap berhasil diupload.")
+            else:
+                messagebox.showerror("Reference", result.get("error", "Gagal upload referensi."))
+        except Exception as exc:
+            messagebox.showerror("Reference", f"Upload failed: {exc}")
+
+
     def _preset_payload(self) -> dict:
         name = self.preset_name_var.get().strip()
         line = self.preset_line_var.get().strip()
@@ -1707,7 +1783,7 @@ class AdminScreen(ctk.CTkFrame):
             },
             "part_ready": {
                 "enabled": True,
-                "method": "hsv_black_ratio",
+                "method": "gap_template_match",
                 "color_profile_id": None,
                 "colorspace": "HSV",
                 "distance_threshold": None,
@@ -1746,7 +1822,7 @@ class AdminScreen(ctk.CTkFrame):
                 "expected_dot_y": None,
                 "max_anchor_offset_x": None,
                 "max_anchor_offset_y": None,
-                "tilt_gate_enabled": max_tilt is not None,
+                "tilt_gate_enabled": bool(self.preset_tilt_gate_var.get()),
                 "commit_stable_frames": 1,
                 "part_ready_settle_ms": None,
                 "white_hsv_lower": [0, 0, 160],
