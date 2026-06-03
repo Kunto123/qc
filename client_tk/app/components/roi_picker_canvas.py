@@ -393,11 +393,26 @@ class RoiPickerCanvas(ctk.CTkFrame):
             return None
         x, y, w, h = rect
         px, py = int(event.x), int(event.y)
+        rotation = float(roi.get("rotation", 0.0))
+        if abs(rotation) > 0.1:
+            # Rotated: check handles at rotated corners, move inside rotated bbox
+            corners = _rotated_corners(x, y, w, h, rotation)
+            for name, (hx, hy) in zip(("nw", "ne", "sw", "se"), corners):
+                if abs(px - hx) <= 8 and abs(py - hy) <= 8:
+                    return name
+            # Inside check: transform click ke koordinat un-rotated
+            cx, cy = x + w / 2.0, y + h / 2.0
+            angle = math.radians(-rotation)
+            dx, dy = px - cx, py - cy
+            rx = dx * math.cos(angle) - dy * math.sin(angle)
+            ry = dx * math.sin(angle) + dy * math.cos(angle)
+            if abs(rx) <= w / 2 and abs(ry) <= h / 2:
+                return "move"
+            return None
+        # No rotation: original axis-aligned logic
         handles = {
-            "nw": (x, y),
-            "ne": (x + w, y),
-            "sw": (x, y + h),
-            "se": (x + w, y + h),
+            "nw": (x, y), "ne": (x + w, y),
+            "sw": (x, y + h), "se": (x + w, y + h),
         }
         for mode, (hx, hy) in handles.items():
             if abs(px - hx) <= 8 and abs(py - hy) <= 8:

@@ -41,6 +41,18 @@ AUTO_START_FRAME_WAIT_MS = 150
 AUTO_START_MAX_ATTEMPTS = 40
 
 
+def _overlay_rotated_corners(x: int, y: int, w: int, h: int,
+                              rotation_deg: float) -> list[tuple[int, int]]:
+    import math
+    cx = x + w / 2.0
+    cy = y + h / 2.0
+    angle = math.radians(rotation_deg)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    result = []
+    for dx, dy in [(-w/2, -h/2), (w/2, -h/2), (-w/2, h/2), (w/2, h/2)]:
+        result.append((int(cx + dx*cos_a - dy*sin_a), int(cy + dx*sin_a + dy*cos_a)))
+    return result
+
 class OperatorScreen(ctk.CTkFrame):
     def __init__(self, master, api_client, session_state):
         super().__init__(master, fg_color=APP_BG, corner_radius=0)
@@ -92,10 +104,12 @@ class OperatorScreen(ctk.CTkFrame):
         self.part_ready_roi_y_value = tk.StringVar(value="0.2")
         self.part_ready_roi_w_value = tk.StringVar(value="0.25")
         self.part_ready_roi_h_value = tk.StringVar(value="0.25")
+        self.part_ready_roi_rotation_value = tk.StringVar(value="0.0")
         self.sticker_roi_x_value = tk.StringVar(value="0.2")
         self.sticker_roi_y_value = tk.StringVar(value="0.2")
         self.sticker_roi_w_value = tk.StringVar(value="0.6")
         self.sticker_roi_h_value = tk.StringVar(value="0.6")
+        self.sticker_roi_rotation_value = tk.StringVar(value="0.0")
         self.template_choice = tk.StringVar()
         self.display_source = tk.StringVar(value="Right View: Live Camera + ROIs")
 
@@ -622,12 +636,14 @@ class OperatorScreen(ctk.CTkFrame):
                 "y": self.part_ready_roi_y_value,
                 "w": self.part_ready_roi_w_value,
                 "h": self.part_ready_roi_h_value,
+                "rotation": self.part_ready_roi_rotation_value,
             }
         return {
             "x": self.sticker_roi_x_value,
             "y": self.sticker_roi_y_value,
             "w": self.sticker_roi_w_value,
             "h": self.sticker_roi_h_value,
+            "rotation": self.sticker_roi_rotation_value,
         }
 
     def _format_roi_value(self, value) -> str:
@@ -713,6 +729,7 @@ class OperatorScreen(ctk.CTkFrame):
             "y": roi["y"],
             "width": roi["w"],
             "height": roi["h"],
+            "rotation": roi.get("rotation", 0.0),
         }
 
     def _resolve_roi_rect(
@@ -808,17 +825,20 @@ class OperatorScreen(ctk.CTkFrame):
         )
         if part_ready_box is not None:
             px, py, pw, ph = part_ready_box
-            cv2.rectangle(overlay, (px, py), (px + pw, py + ph), (50, 180, 255), 3)
-            cv2.putText(
-                overlay,
-                "Part Ready ROI",
-                (px, max(18, py - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (50, 180, 255),
-                2,
-                cv2.LINE_AA,
-            )
+            _pr_rot = float(part_ready_roi.get("rotation", 0.0) or 0.0)
+            if abs(_pr_rot) > 0.1:
+                _corners = _overlay_rotated_corners(px, py, pw, ph, _pr_rot)
+                pts = [list(c) for c in _corners]
+                cv2.polylines(overlay, [__import__("numpy").array(
+                    [pts[0], pts[1], pts[3], pts[2]], dtype="int32")],
+                    True, (50, 180, 255), 3, cv2.LINE_AA)
+                cv2.putText(overlay, "Part Ready ROI",
+                    (pts[0][0], max(18, pts[0][1] - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (50, 180, 255), 2, cv2.LINE_AA)
+            else:
+                cv2.rectangle(overlay, (px, py), (px + pw, py + ph), (50, 180, 255), 3)
+                cv2.putText(overlay, "Part Ready ROI", (px, max(18, py - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (50, 180, 255), 2, cv2.LINE_AA)
 
         sticker_box = self._resolve_roi_rect(
             sticker_roi,
@@ -829,17 +849,20 @@ class OperatorScreen(ctk.CTkFrame):
         )
         if sticker_box is not None:
             sx, sy, sw, sh = sticker_box
-            cv2.rectangle(overlay, (sx, sy), (sx + sw, sy + sh), (255, 200, 0), 3)
-            cv2.putText(
-                overlay,
-                "Sticker ROI",
-                (sx, max(18, sy - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (255, 200, 0),
-                2,
-                cv2.LINE_AA,
-            )
+            _st_rot = float(sticker_roi.get("rotation", 0.0) or 0.0)
+            if abs(_st_rot) > 0.1:
+                _corners = _overlay_rotated_corners(sx, sy, sw, sh, _st_rot)
+                pts = [list(c) for c in _corners]
+                cv2.polylines(overlay, [__import__("numpy").array(
+                    [pts[0], pts[1], pts[3], pts[2]], dtype="int32")],
+                    True, (255, 200, 0), 3, cv2.LINE_AA)
+                cv2.putText(overlay, "Sticker ROI",
+                    (pts[0][0], max(18, pts[0][1] - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 200, 0), 2, cv2.LINE_AA)
+            else:
+                cv2.rectangle(overlay, (sx, sy), (sx + sw, sy + sh), (255, 200, 0), 3)
+                cv2.putText(overlay, "Sticker ROI", (sx, max(18, sy - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 200, 0), 2, cv2.LINE_AA)
 
         return overlay
 
@@ -886,18 +909,23 @@ class OperatorScreen(ctk.CTkFrame):
         roi_h = max(1, int(float(payload.get("h", 1.0)) * height))
         x2 = min(width, x + roi_w)
         y2 = min(height, y + roi_h)
+        _rot = float(payload.get("rotation", 0.0) or 0.0)
         annotated = frame.copy()
-        cv2.rectangle(annotated, (x, y), (x2, y2), color, 2)
-        cv2.putText(
-            annotated,
-            f"{label} | x={x} y={y} w={x2 - x} h={y2 - y}",
-            (x, max(22, y - 8)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            color,
-            2,
-            cv2.LINE_AA,
-        )
+        if abs(_rot) > 0.1:
+            import numpy as _np
+            _c = _overlay_rotated_corners(x, y, roi_w, roi_h, _rot)
+            cv2.polylines(annotated, [_np.array(
+                [_c[0], _c[1], _c[3], _c[2]], dtype="int32")],
+                True, color, 2, cv2.LINE_AA)
+            cv2.putText(annotated, label,
+                (_c[0][0], max(22, _c[0][1] - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        else:
+            cv2.rectangle(annotated, (x, y), (x2, y2), color, 2)
+            cv2.putText(annotated,
+                f"{label} | x={x} y={y} w={x2 - x} h={y2 - y}",
+                (x, max(22, y - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
         return annotated
 
     def _build_local_detection_overlay(self, frame, payload: dict):
@@ -942,7 +970,15 @@ class OperatorScreen(ctk.CTkFrame):
         )
         if part_ready_box is not None:
             px, py, pw, ph = part_ready_box
-            cv2.rectangle(overlay, (px, py), (px + pw, py + ph), (50, 180, 255), 2)
+            _pr_rot = float(part_ready_roi.get("rotation", 0.0) or 0.0)
+            if abs(_pr_rot) > 0.1:
+                import numpy as _np
+                _c = _overlay_rotated_corners(px, py, pw, ph, _pr_rot)
+                cv2.polylines(overlay, [_np.array(
+                    [_c[0], _c[1], _c[3], _c[2]], dtype="int32")],
+                    True, (50, 180, 255), 2, cv2.LINE_AA)
+            else:
+                cv2.rectangle(overlay, (px, py), (px + pw, py + ph), (50, 180, 255), 2)
 
         # Sticker ROI box (yellow).
         sticker_box = self._resolve_roi_rect(
@@ -955,7 +991,15 @@ class OperatorScreen(ctk.CTkFrame):
         sx = sy = sw = sh = 0
         if sticker_box is not None:
             sx, sy, sw, sh = sticker_box
-            cv2.rectangle(overlay, (sx, sy), (sx + sw, sy + sh), (255, 200, 0), 2)
+            _st_rot = float(sticker_roi.get("rotation", 0.0) or 0.0)
+            if abs(_st_rot) > 0.1:
+                import numpy as _np
+                _c = _overlay_rotated_corners(sx, sy, sw, sh, _st_rot)
+                cv2.polylines(overlay, [_np.array(
+                    [_c[0], _c[1], _c[3], _c[2]], dtype="int32")],
+                    True, (255, 200, 0), 2, cv2.LINE_AA)
+            else:
+                cv2.rectangle(overlay, (sx, sy), (sx + sw, sy + sh), (255, 200, 0), 2)
 
         # Detection bounding boxes (coordinates are relative to sticker ROI, in backend frame space).
         for det in detections:
@@ -1039,7 +1083,12 @@ class OperatorScreen(ctk.CTkFrame):
             height, width = frame.shape[:2]
             client_timings.setdefault("frame_width", width)
             client_timings.setdefault("frame_height", height)
-        return {**payload, "client_timings": client_timings}
+        return {
+            **payload,
+            "client_timings": client_timings,
+            "part_ready_roi_meta": self._roi_meta_payload("part_ready"),
+            "sticker_roi_meta": self._roi_meta_payload("sticker"),
+        }
 
     def _rotate_frame_for_display(self, frame):
         """Apply camera rotation to frame for display. Same formula as backend."""
