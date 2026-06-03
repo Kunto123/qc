@@ -65,22 +65,6 @@ def _float_or_default(value: object, default: float) -> float:
         return default
 
 
-def _hsv_triplet_or_default(value: object, default: list[int]) -> list[int]:
-    raw = str(value or "").replace(";", ",").strip()
-    parts = [part.strip() for part in raw.split(",") if part.strip()]
-    if len(parts) != 3:
-        return list(default)
-    result: list[int] = []
-    for index, part in enumerate(parts):
-        upper = 180 if index == 0 else 255
-        try:
-            parsed = int(float(part))
-        except (TypeError, ValueError):
-            parsed = default[index]
-        result.append(max(0, min(upper, parsed)))
-    return result
-
-
 def _random_password(length: int = 24) -> str:
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(max(16, int(length))))
@@ -198,11 +182,6 @@ class AdminScreen(ctk.CTkFrame):
         self.part_ready_roi_y_var = tk.StringVar(value="0.2")
         self.part_ready_roi_w_var = tk.StringVar(value="0.25")
         self.part_ready_roi_h_var = tk.StringVar(value="0.25")
-        self.part_ready_hsv_lower_var = tk.StringVar(value="0,0,0")
-        self.part_ready_hsv_upper_var = tk.StringVar(value="180,255,80")
-        self.part_ready_min_ratio_var = tk.StringVar(value="0.75")
-        self._preset_hsv_image_path: str = ""
-        self._preset_hsv_image: np.ndarray | None = None
         self._preset_roi_image_path: str = ""
         self.sticker_roi_x_var = tk.StringVar(value="0.2")
         self.sticker_roi_y_var = tk.StringVar(value="0.2")
@@ -416,42 +395,14 @@ class AdminScreen(ctk.CTkFrame):
         self.gap_ref_status_label.grid(row=13, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 6))
         self._entry(wizard, 14, 0, "Camera Index", self.preset_camera_index_var, columnspan=1)
         # Rotation field + hint inline
-        ttk.Label(wizard, text="Rotation°").grid(row=11, column=2, sticky="w", padx=(12, 4), pady=5)
+        ttk.Label(wizard, text="Rotation°\n(0/90/180/270)", foreground="gray").grid(row=11, column=2, sticky="w", padx=(12, 4), pady=5)
         rot_entry = ttk.Entry(wizard, textvariable=self.preset_camera_rotation_var, width=8)
         rot_entry.grid(row=11, column=3, sticky="w", padx=(0, 12), pady=5)
-        ttk.Label(wizard, text="0/90/180/270", foreground="gray").grid(row=12, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(0, 4))
-
-        # ── Part HSV section with color picker ──
-        hsv_frame = ttk.LabelFrame(wizard, text="Part HSV (pick from image or capture from camera)", padding=6)
-        hsv_frame.grid(row=12, column=0, columnspan=4, sticky="ew", padx=12, pady=(12, 2))
-        hsv_frame.columnconfigure(1, weight=1)
-        hsv_frame.columnconfigure(3, weight=1)
-
-        # Image picker row
-        picker_row = ttk.Frame(hsv_frame)
-        picker_row.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 6))
-        self._preset_hsv_image_path_var = tk.StringVar(value="")
-        ttk.Button(picker_row, text="Pick Image", command=self._pick_hsv_image).pack(side="left")
-        ttk.Button(picker_row, text="Capture from Camera", command=self._capture_hsv_from_camera).pack(side="left", padx=(4, 0))
-        ttk.Label(picker_row, textvariable=self._preset_hsv_image_path_var, wraplength=250).pack(side="left", padx=(8, 0))
-        ttk.Button(picker_row, text="Calculate HSV", command=self._calculate_hsv_from_image).pack(side="right")
-
-        # HSV value entries
-        self._entry(hsv_frame, 1, 0, "HSV Lower", self.part_ready_hsv_lower_var)
-        self._entry(hsv_frame, 1, 2, "HSV Upper", self.part_ready_hsv_upper_var)
-        self._entry(hsv_frame, 2, 0, "Min Ratio", self.part_ready_min_ratio_var, columnspan=3)
-
-        # Tolerance hint
-        ttk.Label(
-            hsv_frame,
-            text="Tip: Use 'Capture from Camera' with the actual part in view for best results. HSV values are auto-calculated but editable.",
-            foreground="#475569", wraplength=400, justify="left", font=("Segoe UI", 8),
-        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         # Visual ROI picker. Values are kept in StringVars for payload compatibility,
         # but production users edit them through the image overlay only.
         roi_panel = ctk.CTkFrame(wizard, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        roi_panel.grid(row=13, column=0, columnspan=4, sticky="ew", padx=12, pady=(12, 2))
+        roi_panel.grid(row=15, column=0, columnspan=4, sticky="ew", padx=12, pady=(12, 2))
         roi_panel.columnconfigure(0, weight=1)
         ctk.CTkLabel(roi_panel, text="Visual ROI Picker", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
             row=0, column=0, sticky="w", padx=10, pady=(10, 4)
@@ -1173,9 +1124,6 @@ class AdminScreen(ctk.CTkFrame):
         self.part_ready_roi_y_var.set("0.2")
         self.part_ready_roi_w_var.set("0.25")
         self.part_ready_roi_h_var.set("0.25")
-        self.part_ready_hsv_lower_var.set("0,0,0")
-        self.part_ready_hsv_upper_var.set("180,255,80")
-        self.part_ready_min_ratio_var.set("0.75")
         self.sticker_roi_x_var.set("0.2")
         self.sticker_roi_y_var.set("0.2")
         self.sticker_roi_w_var.set("0.6")
@@ -1183,7 +1131,7 @@ class AdminScreen(ctk.CTkFrame):
         self._preset_roi_image_path = ""
         if hasattr(self, "preset_roi_picker"):
             self.preset_roi_picker.clear()
-            self._sync_preset_roi_picker()
+            self._sync_preset_roi_picker(part_ready_rotation=0.0, sticker_rotation=0.0)
         self._set_status("Preset wizard reset.")
 
     def _on_preset_selected(self, _event=None) -> None:
@@ -1233,6 +1181,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_name_var.set(str(detail.get("name") or (deployment or {}).get("template_name") or ""))
         self.preset_description_var.set(str(detail.get("description") or ""))
         sticker = detail.get("sticker") or {}
+        part_ready = detail.get("part_ready") or {}
         if deployment:
             self.preset_line_var.set(str(deployment.get("line_id") or ""))
             self.preset_station_var.set(str(deployment.get("station_id") or ""))
@@ -1245,7 +1194,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_ocr_flip_fallback_var.set(bool(sticker.get("ocr_flip_fallback", True)))
         self.preset_max_tilt_var.set("" if sticker.get("max_tilt_degrees") is None else str(sticker.get("max_tilt_degrees")))
         self.preset_tilt_gate_var.set(bool(sticker.get("tilt_gate_enabled", False)))
-        self.preset_gap_threshold_var.set(str(sticker.get("gap_match_threshold", 0.85)))
+        self.preset_gap_threshold_var.set(str(part_ready.get("gap_match_threshold", 0.85)))
         # Update gap ref status label
         _gap_ref_path = detail.get("gap_ref_path") or detail.get("part_ready", {}).get("gap_ref_path")
         if _gap_ref_path:
@@ -1270,11 +1219,10 @@ class AdminScreen(ctk.CTkFrame):
         self.sticker_roi_y_var.set(str(sticker_roi.get("y", 0.2)))
         self.sticker_roi_w_var.set(str(sticker_roi.get("w", 0.6)))
         self.sticker_roi_h_var.set(str(sticker_roi.get("h", 0.6)))
-        self._sync_preset_roi_picker()
-        part_ready = detail.get("part_ready") or {}
-        self.part_ready_hsv_lower_var.set(",".join(str(v) for v in part_ready.get("hsv_lower", [0, 0, 0])))
-        self.part_ready_hsv_upper_var.set(",".join(str(v) for v in part_ready.get("hsv_upper", [180, 255, 80])))
-        self.part_ready_min_ratio_var.set(str(part_ready.get("min_match_ratio", 0.75)))
+        self._sync_preset_roi_picker(
+            part_ready_rotation=float(part_ready_roi.get("rotation", 0.0)),
+            sticker_rotation=float(sticker_roi.get("rotation", 0.0)),
+        )
 
         vision = detail.get("vision") or {}
         model_path = str(vision.get("model_path") or "")
@@ -1322,24 +1270,36 @@ class AdminScreen(ctk.CTkFrame):
             "h": _float_or_default(h_var.get(), defaults["h"]),
         }
 
-    def _sync_preset_roi_picker(self) -> None:
+    def _sync_preset_roi_picker(self, *,
+                                part_ready_rotation: float | None = None,
+                                sticker_rotation: float | None = None) -> None:
         if not hasattr(self, "preset_roi_picker"):
             return
+        _pr_rot = (part_ready_rotation if part_ready_rotation is not None
+                   else self.preset_roi_picker.get_roi("part_ready").get("rotation", 0.0))
+        _st_rot = (sticker_rotation if sticker_rotation is not None
+                   else self.preset_roi_picker.get_roi("sticker").get("rotation", 0.0))
         self.preset_roi_picker.set_rois(
-            part_ready_roi=self._roi_payload_from_vars(
-                self.part_ready_roi_x_var,
-                self.part_ready_roi_y_var,
-                self.part_ready_roi_w_var,
-                self.part_ready_roi_h_var,
-                defaults={"x": 0.2, "y": 0.2, "w": 0.25, "h": 0.25},
-            ),
-            sticker_roi=self._roi_payload_from_vars(
-                self.sticker_roi_x_var,
-                self.sticker_roi_y_var,
-                self.sticker_roi_w_var,
-                self.sticker_roi_h_var,
-                defaults={"x": 0.2, "y": 0.2, "w": 0.6, "h": 0.6},
-            ),
+            part_ready_roi={
+                **self._roi_payload_from_vars(
+                    self.part_ready_roi_x_var,
+                    self.part_ready_roi_y_var,
+                    self.part_ready_roi_w_var,
+                    self.part_ready_roi_h_var,
+                    defaults={"x": 0.2, "y": 0.2, "w": 0.25, "h": 0.25},
+                ),
+                "rotation": _pr_rot,
+            },
+            sticker_roi={
+                **self._roi_payload_from_vars(
+                    self.sticker_roi_x_var,
+                    self.sticker_roi_y_var,
+                    self.sticker_roi_w_var,
+                    self.sticker_roi_h_var,
+                    defaults={"x": 0.2, "y": 0.2, "w": 0.6, "h": 0.6},
+                ),
+                "rotation": _st_rot,
+            },
         )
         self.preset_roi_picker.set_active_roi(self._preset_roi_kind())
 
@@ -1409,9 +1369,6 @@ class AdminScreen(ctk.CTkFrame):
                 pass  # rotation failed, use original frame
             self._preset_roi_image_path = ""
             self.preset_roi_picker.load_image(frame.copy())
-            self._preset_hsv_image = frame.copy()
-            self._preset_hsv_image_path = ""
-            self._preset_hsv_image_path_var.set(f"Camera {cam_idx}")
             self._sync_preset_roi_picker()
             self._set_status(f"Captured ROI reference from camera {cam_idx}.")
         except Exception as exc:
@@ -1437,128 +1394,6 @@ class AdminScreen(ctk.CTkFrame):
             self.sticker_roi_h_var.set("0.6")
             self._set_status("Sticker ROI reset to default.")
         self._sync_preset_roi_picker()
-
-    def _pick_hsv_image(self) -> None:
-        """Open a file dialog to pick an image for HSV calculation."""
-        path = filedialog.askopenfilename(
-            title="Pick Reference Image",
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp"), ("All", "*.*")],
-        )
-        if not path:
-            return
-        self._preset_hsv_image_path = path
-        self._preset_hsv_image_path_var.set(Path(path).name)
-        try:
-            frame = cv2.imread(path)
-            if frame is not None:
-                self._preset_hsv_image = frame
-        except Exception:
-            self._preset_hsv_image = None
-
-    def _capture_hsv_from_camera(self) -> None:
-        """Capture a reference frame from the selected camera and use it for HSV calculation."""
-        try:
-            from client_tk.app.services.camera_capture import CameraCaptureService
-        except ImportError:
-            messagebox.showerror("Camera", "Camera service not available.")
-            return
-
-        cam_idx = 0
-        try:
-            cam_idx = int(self.preset_camera_index_var.get() or 0)
-        except (TypeError, ValueError):
-            pass
-
-        cap_service = CameraCaptureService()
-        try:
-            cap_service.start(cam_idx)
-            import time
-            time.sleep(0.5)  # let camera warm up
-            frame = cap_service.get_latest_frame()
-            if frame is None:
-                messagebox.showwarning("Camera", "Camera returned no frame in time. Try again.")
-                return
-            # Apply camera rotation from preset config
-            try:
-                import cv2
-                _rot = float(_float_or_default(self.preset_camera_rotation_var.get(), 0))
-                if _rot != 0.0:
-                    h, w = frame.shape[:2]
-                    center = (w // 2, h // 2)
-                    M = cv2.getRotationMatrix2D(center, -_rot, 1.0)
-                    cos_a = abs(M[0, 0])
-                    sin_a = abs(M[0, 1])
-                    new_w = int(h * sin_a + w * cos_a)
-                    new_h = int(h * cos_a + w * sin_a)
-                    M[0, 2] += (new_w - w) / 2
-                    M[1, 2] += (new_h - h) / 2
-                    frame = cv2.warpAffine(frame, M, (new_w, new_h), borderMode=cv2.BORDER_REPLICATE)
-            except Exception:
-                pass
-            self._preset_hsv_image = frame.copy()
-            self._preset_hsv_image_path = ""
-            self._preset_hsv_image_path_var.set(cam_idx)
-            messagebox.showinfo(
-                "Camera",
-                f"Captured frame from camera {cam_idx} ({frame.shape[1]}x{frame.shape[0]}).\n"
-                "Click 'Calculate HSV' to compute values.",
-            )
-        except Exception as exc:
-            messagebox.showerror("Camera", f"Failed to capture from camera {cam_idx}: {exc}")
-        finally:
-            try:
-                cap_service.stop()
-            except Exception:
-                pass
-
-    def _calculate_hsv_from_image(self) -> None:
-        """Calculate HSV lower/upper from the picked reference image.
-
-        Uses the Part Ready ROI to crop the region of interest, then computes
-        mean ± 2*std in HSV space.  Results are editable afterwards.
-        """
-        if self._preset_hsv_image is None:
-            messagebox.showwarning("HSV", "Pick an image first.")
-            return
-
-        try:
-            # Crop using Part Ready ROI values
-            h, w = self._preset_hsv_image.shape[:2]
-            x = max(0, min(w - 1, int(_float_or_default(self.part_ready_roi_x_var.get(), 0.2) * w)))
-            y = max(0, min(h - 1, int(_float_or_default(self.part_ready_roi_y_var.get(), 0.2) * h)))
-            roi_w = max(1, int(_float_or_default(self.part_ready_roi_w_var.get(), 0.25) * w))
-            roi_h = max(1, int(_float_or_default(self.part_ready_roi_h_var.get(), 0.25) * h))
-            x2 = min(w, x + roi_w)
-            y2 = min(h, y + roi_h)
-            roi = self._preset_hsv_image[y:y2, x:x2]
-
-            if roi.size == 0:
-                messagebox.showwarning("HSV", "ROI is empty. Check ROI values.")
-                return
-
-            hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-            mean = hsv_roi.mean(axis=(0, 1))
-            std = hsv_roi.std(axis=(0, 1))
-
-            lower = [max(0, int(mean[i] - 2 * std[i])) for i in range(3)]
-            upper = [min(255, int(mean[i] + 2 * std[i])) for i in range(3)]
-            # Clamp H to 180
-            lower[0] = min(180, lower[0])
-            upper[0] = min(180, upper[0])
-
-            self.part_ready_hsv_lower_var.set(f"{lower[0]},{lower[1]},{lower[2]}")
-            self.part_ready_hsv_upper_var.set(f"{upper[0]},{upper[1]},{upper[2]}")
-
-            messagebox.showinfo(
-                "HSV",
-                f"Calculated from ROI ({x},{y}→{x2},{y2}):\n"
-                f"  Mean HSV: {mean[0]:.0f}, {mean[1]:.0f}, {mean[2]:.0f}\n"
-                f"  Lower: {lower[0]},{lower[1]},{lower[2]}\n"
-                f"  Upper: {upper[0]},{upper[1]},{upper[2]}\n\n"
-                f"You can edit these values to fine-tune.",
-            )
-        except Exception as exc:
-            messagebox.showerror("HSV", f"Calculation failed: {exc}")
 
     def _refresh_preset_action_button(self) -> None:
         """Update preset action button text/command based on current_template_id."""
@@ -1656,6 +1491,18 @@ class AdminScreen(ctk.CTkFrame):
 
 
 
+    def _get_existing_gap_ref_path(self) -> str | None:
+        """Return existing gap_ref_path from current template detail, if any."""
+        if not self.current_template_id:
+            return None
+        try:
+            detail = self.api.get_template(self.current_template_id)
+            if detail:
+                return detail.get("gap_ref_path") or (detail.get("part_ready") or {}).get("gap_ref_path")
+        except Exception:
+            pass
+        return None
+
     def _capture_part_ready_ref(self) -> None:
         """Capture reference gap patch from current camera frame."""
         if not self.current_template_id:
@@ -1675,12 +1522,31 @@ class AdminScreen(ctk.CTkFrame):
             if frame is None:
                 messagebox.showwarning("Reference", "Tidak ada frame dari kamera.")
                 return
+            # Apply camera rotation to match runtime behavior
+            _rot = float(_float_or_default(self.preset_camera_rotation_var.get(), 0))
+            if _rot != 0.0:
+                h, w = frame.shape[:2]
+                center = (w // 2, h // 2)
+                M = cv2.getRotationMatrix2D(center, -_rot, 1.0)
+                cos_a = abs(M[0, 0])
+                sin_a = abs(M[0, 1])
+                new_w = int(h * sin_a + w * cos_a)
+                new_h = int(h * cos_a + w * sin_a)
+                M[0, 2] += (new_w - w) / 2
+                M[1, 2] += (new_h - h) / 2
+                frame = cv2.warpAffine(frame, M, (new_w, new_h),
+                                       borderMode=cv2.BORDER_REPLICATE)
             roi = {
                 "x": int(float(self.part_ready_roi_x_var.get() or 0.2) * frame.shape[1]),
                 "y": int(float(self.part_ready_roi_y_var.get() or 0.2) * frame.shape[0]),
                 "w": int(float(self.part_ready_roi_w_var.get() or 0.25) * frame.shape[1]),
                 "h": int(float(self.part_ready_roi_h_var.get() or 0.25) * frame.shape[0]),
             }
+            _pr_roi = self.preset_roi_picker.get_roi("part_ready")
+            roi["rotation"] = float(_pr_roi.get("rotation", 0.0))
+            roi["gap_hsv_lower"] = [90, 50, 50]
+            roi["gap_hsv_upper"] = [130, 255, 255]
+            roi["gap_padding_px"] = 20
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
             frame_b64 = base64.b64encode(buf).decode("ascii")
             result = self.api.capture_part_ready_ref(self.current_template_id, frame_b64, roi)
@@ -1753,12 +1619,14 @@ class AdminScreen(ctk.CTkFrame):
                 "y": _float_or_default(self.part_ready_roi_y_var.get(), 0.2),
                 "w": _float_or_default(self.part_ready_roi_w_var.get(), 0.25),
                 "h": _float_or_default(self.part_ready_roi_h_var.get(), 0.25),
+                "rotation": self.preset_roi_picker.get_roi("part_ready").get("rotation", 0.0),
             },
             "sticker_roi": {
                 "x": _float_or_default(self.sticker_roi_x_var.get(), 0.2),
                 "y": _float_or_default(self.sticker_roi_y_var.get(), 0.2),
                 "w": _float_or_default(self.sticker_roi_w_var.get(), 0.6),
                 "h": _float_or_default(self.sticker_roi_h_var.get(), 0.6),
+                "rotation": self.preset_roi_picker.get_roi("sticker").get("rotation", 0.0),
             },
             "vision": {
                 "model_path": model_path,
@@ -1784,12 +1652,8 @@ class AdminScreen(ctk.CTkFrame):
             "part_ready": {
                 "enabled": True,
                 "method": "gap_template_match",
-                "color_profile_id": None,
-                "colorspace": "HSV",
-                "distance_threshold": None,
-                "min_match_ratio": _float_or_default(self.part_ready_min_ratio_var.get(), 0.75),
-                "hsv_lower": _hsv_triplet_or_default(self.part_ready_hsv_lower_var.get(), [0, 0, 0]),
-                "hsv_upper": _hsv_triplet_or_default(self.part_ready_hsv_upper_var.get(), [180, 255, 80]),
+                "gap_match_threshold": _float_or_default(self.preset_gap_threshold_var.get(), 0.85),
+                "gap_ref_path": self._get_existing_gap_ref_path(),
                 "stable_ms": 500,
                 "release_ms": 300,
             },

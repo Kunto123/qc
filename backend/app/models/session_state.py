@@ -62,6 +62,7 @@ class SessionState:
     inference_frame_counter: int = 0
     inference_thread_busy: bool = False
     _inference_executor: concurrent.futures.ThreadPoolExecutor | None = None  # lazy-init per session
+    gap_ref_cache: dict[str, Any] = field(default_factory=dict)  # cache for loaded gap reference patches
     part_removed_seen_at: datetime | None = None
     # Hysteresis counter: number of consecutive settled frames.
     # Reset to 0 when part_ready/presence is lost.

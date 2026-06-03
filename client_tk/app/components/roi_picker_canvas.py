@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import tkinter as tk
 from typing import Callable
 
@@ -32,6 +33,39 @@ def _draw_roi_box(frame, x: int, y: int, w: int, h: int, color, label: str) -> N
         cv2.LINE_AA,
     )
 
+
+def _draw_roi_box_rotated(frame, x: int, y: int, w: int, h: int,
+                          rotation_deg: float, color, label: str) -> None:
+    cx = x + w / 2.0
+    cy = y + h / 2.0
+    angle = math.radians(rotation_deg)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    corners_rel = [
+        (-w / 2, -h / 2), (w / 2, -h / 2),
+        (w / 2,  h / 2),  (-w / 2,  h / 2),
+    ]
+    corners = []
+    for dx, dy in corners_rel:
+        px = int(cx + dx * cos_a - dy * sin_a)
+        py = int(cy + dx * sin_a + dy * cos_a)
+        corners.append((px, py))
+    for i in range(4):
+        cv2.line(frame, corners[i], corners[(i + 1) % 4],
+                 color, 2, cv2.LINE_AA)
+    cv2.putText(frame, label,
+                (corners[0][0], max(16, corners[0][1] - 6)),
+                _LABEL_FONT, 0.42, color, 1, cv2.LINE_AA)
+
+def _rotated_corners(x: int, y: int, w: int, h: int,
+                     rotation_deg: float) -> list[tuple[int, int]]:
+    cx = x + w / 2.0
+    cy = y + h / 2.0
+    angle = math.radians(rotation_deg)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    result = []
+    for dx, dy in [(-w/2, -h/2), (w/2, -h/2), (-w/2, h/2), (w/2, h/2)]:
+        result.append((int(cx + dx*cos_a - dy*sin_a), int(cy + dx*sin_a + dy*cos_a)))
+    return result
 
 def _draw_crosshair(frame, px: int, py: int, color, label: str = "") -> None:
     cv2.line(frame, (px - _ARM, py), (px + _ARM, py), color, 2, cv2.LINE_AA)
@@ -114,6 +148,25 @@ class RoiPickerCanvas(ctk.CTkFrame):
         self._hint.grid(row=2, column=0, sticky="w", padx=10, pady=(6, 10))
         self._photo = None
 
+        # Rotation slider row
+        _rot_row = tk.Frame(self, bg=PANEL_BG)
+        _rot_row.grid(row=3, column=0, sticky="w", padx=10, pady=(0, 8))
+        tk.Label(_rot_row, text="Rotasi ROI:",
+                 bg=PANEL_BG, fg=TEXT_SECONDARY,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(0, 4))
+        self._rotation_var = tk.StringVar(value="0.0")
+        from tkinter import ttk
+        self._rot_spinbox = ttk.Spinbox(
+            _rot_row, from_=-180, to=180, increment=1,
+            textvariable=self._rotation_var, width=7,
+        )
+        self._rot_spinbox.pack(side="left")
+        tk.Label(_rot_row, text="°", bg=PANEL_BG,
+                 fg=TEXT_SECONDARY,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(2, 0))
+        self._rotation_var.trace_add(
+            "write", lambda *_: self._on_rotation_changed())
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -133,6 +186,9 @@ class RoiPickerCanvas(ctk.CTkFrame):
         if kind not in {"part_ready", "sticker", None}:
             raise ValueError("kind must be 'part_ready', 'sticker', or None")
         self._active_roi_kind = kind
+        if kind is not None:
+            rot = self._roi_for_kind(kind).get("rotation", 0.0)
+            self._rotation_var.set(str(round(float(rot), 2)))
         self.redraw()
 
     def get_roi(self, kind: str) -> dict:
@@ -206,15 +262,41 @@ class RoiPickerCanvas(ctk.CTkFrame):
 
         if self._part_ready_roi:
             rx, ry, rw, rh = _roi_px(self._part_ready_roi)
-            _draw_roi_box(canvas_frame, rx, ry, rw, rh, _COLOR_PART_READY, "Part Ready ROI")
+            _rot = float(self._part_ready_roi.get("rotation", 0))
+            if abs(_rot) > 0.1:
+                _draw_roi_box_rotated(canvas_frame, rx, ry, rw, rh,
+                                      _rot, _COLOR_PART_READY, "Part Ready ROI")
+            else:
+                _draw_roi_box(canvas_frame, rx, ry, rw, rh,
+                              _COLOR_PART_READY, "Part Ready ROI")
             if self._active_roi_kind == "part_ready":
-                self._draw_handles(canvas_frame, rx, ry, rw, rh, _COLOR_PART_READY)
+                if abs(_rot) > 0.1:
+                    for px, py in _rotated_corners(rx, ry, rw, rh, _rot):
+                        cv2.rectangle(canvas_frame, (px-5, py-5), (px+5, py+5),
+                                      _COLOR_PART_READY, -1)
+                        cv2.rectangle(canvas_frame, (px-5, py-5), (px+5, py+5),
+                                      (255, 255, 255), 1)
+                else:
+                    self._draw_handles(canvas_frame, rx, ry, rw, rh, _COLOR_PART_READY)
 
         if self._sticker_roi:
             rx, ry, rw, rh = _roi_px(self._sticker_roi)
-            _draw_roi_box(canvas_frame, rx, ry, rw, rh, _COLOR_STICKER, "Sticker ROI")
+            _rot = float(self._sticker_roi.get("rotation", 0))
+            if abs(_rot) > 0.1:
+                _draw_roi_box_rotated(canvas_frame, rx, ry, rw, rh,
+                                      _rot, _COLOR_STICKER, "Sticker ROI")
+            else:
+                _draw_roi_box(canvas_frame, rx, ry, rw, rh,
+                              _COLOR_STICKER, "Sticker ROI")
             if self._active_roi_kind == "sticker":
-                self._draw_handles(canvas_frame, rx, ry, rw, rh, _COLOR_STICKER)
+                if abs(_rot) > 0.1:
+                    for px, py in _rotated_corners(rx, ry, rw, rh, _rot):
+                        cv2.rectangle(canvas_frame, (px-5, py-5), (px+5, py+5),
+                                      _COLOR_STICKER, -1)
+                        cv2.rectangle(canvas_frame, (px-5, py-5), (px+5, py+5),
+                                      (255, 255, 255), 1)
+                else:
+                    self._draw_handles(canvas_frame, rx, ry, rw, rh, _COLOR_STICKER)
             exp_px = rx + int(self._cx * rw)
             exp_py = ry + int(self._cy * rh)
             _draw_crosshair(canvas_frame, exp_px, exp_py, _COLOR_CROSSHAIR, "EXP CTR")
@@ -285,7 +367,8 @@ class RoiPickerCanvas(ctk.CTkFrame):
         h = max(min_size, min(1.0, h))
         x = max(0.0, min(1.0 - w, x))
         y = max(0.0, min(1.0 - h, y))
-        return {"x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4)}
+        return {"x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4),
+                "rotation": round(self._to_float(roi.get("rotation"), 0.0), 2)}
 
     def _to_float(self, value, default: float) -> float:
         try:
@@ -380,7 +463,8 @@ class RoiPickerCanvas(ctk.CTkFrame):
                 top = max(0.0, min(bottom - min_size, top + dy))
             if "s" in self._drag_mode:
                 bottom = min(1.0, max(top + min_size, bottom + dy))
-            roi = {"x": left, "y": top, "w": right - left, "h": bottom - top}
+            roi = {"x": left, "y": top, "w": right - left, "h": bottom - top,
+                   "rotation": self._drag_start_roi.get("rotation", 0.0)}
 
         self._set_roi_for_kind(self._active_roi_kind, roi)
 
@@ -388,6 +472,17 @@ class RoiPickerCanvas(ctk.CTkFrame):
         self._drag_mode = None
         self._drag_start = None
         self._drag_start_roi = None
+
+    def _on_rotation_changed(self) -> None:
+        if self._active_roi_kind is None:
+            return
+        try:
+            rotation = float(self._rotation_var.get() or 0)
+        except ValueError:
+            return
+        roi = dict(self._roi_for_kind(self._active_roi_kind))
+        roi["rotation"] = rotation
+        self._set_roi_for_kind(self._active_roi_kind, roi, notify=False)
 
     def _on_motion(self, event: tk.Event) -> None:
         if self._active_roi_kind is None:

@@ -49,7 +49,8 @@ def load_ref_patch(ref_path: str | None, template_id: int | None = None) -> np.n
 def save_ref_patch(frame_bgr: np.ndarray, roi: dict, save_path: str,
                    hsv_lower: np.ndarray = DEFAULT_HSV_LOWER,
                    hsv_upper: np.ndarray = DEFAULT_HSV_UPPER,
-                   padding_px: int = 20) -> bool:
+                   padding_px: int = 20,
+                   rotation: float = 0.0) -> bool:
     """Extract and save reference gap patch from a calibration frame.
 
     1. Crop the ROI region from the frame.
@@ -72,6 +73,16 @@ def save_ref_patch(frame_bgr: np.ndarray, roi: dict, save_path: str,
         roi_frame = frame_bgr[ry:ry+rh, rx:rx+rw]
         if roi_frame.size == 0:
             return False
+
+        # Deskew rotated ROI before HSV extraction
+        if abs(rotation) > 0.1:
+            center = (rw / 2, rh / 2)
+            M = cv2.getRotationMatrix2D(center, -rotation, 1.0)
+            roi_frame = cv2.warpAffine(
+                roi_frame, M, (rw, rh),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
 
         # HSV segmentation for blue clamp
         hsv = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2HSV)

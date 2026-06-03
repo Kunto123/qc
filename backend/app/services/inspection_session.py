@@ -518,6 +518,10 @@ class InspectionSessionService:
         state.status = SessionStatus.STOPPED
         with self._lock:
             self._sessions.pop(session_id, None)
+        # Shutdown background inference thread cleanly
+        if state._inference_executor is not None:
+            state._inference_executor.shutdown(wait=False)
+            state._inference_executor = None
         return self._session_payload(state)
 
     def has_session(self, session_id: str) -> bool:
@@ -1292,6 +1296,16 @@ class InspectionSessionService:
         x2 = min(width, x + roi_w)
         y2 = min(height, y + roi_h)
         cropped = frame[y:y2, x:x2]
+        rotation = float(roi.get("rotation", 0.0) or 0.0)
+        if abs(rotation) > 0.1:
+            ch, cw = cropped.shape[:2]
+            center = (cw / 2, ch / 2)
+            M = cv2.getRotationMatrix2D(center, -rotation, 1.0)
+            cropped = cv2.warpAffine(
+                cropped, M, (cw, ch),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
         meta = {"x": x, "y": y, "width": x2 - x, "height": y2 - y}
         return cropped, meta
 
@@ -1422,12 +1436,11 @@ class InspectionSessionService:
 
         # Load reference patch (cached in state if available)
         cache_key = f"_gap_ref_{state.template.id}_{ref_path}"
-        ref_patch = getattr(state, cache_key, None)
+        ref_patch = state.gap_ref_cache.get(cache_key)
         if ref_patch is None:
-            template_id = state.template.id
-            ref_patch = load_ref_patch(ref_path, template_id)
+            ref_patch = load_ref_patch(ref_path, state.template.id)
             if ref_patch is not None:
-                setattr(state, cache_key, ref_patch)
+                state.gap_ref_cache[cache_key] = ref_patch
 
         if ref_patch is None:
             return {

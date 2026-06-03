@@ -19,6 +19,7 @@ class RoiGeometry:
     y: float = 0.0
     w: float = 1.0
     h: float = 1.0
+    rotation: float = 0.0
     width: int | None = None
     height: int | None = None
 

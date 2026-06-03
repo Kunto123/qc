@@ -143,18 +143,19 @@ def capture_part_ready_ref(template_id: int):
     _hsv_lower = np.array(roi.get("gap_hsv_lower", [90, 50, 50]))
     _hsv_upper = np.array(roi.get("gap_hsv_upper", [130, 255, 255]))
     _padding = int(roi.get("gap_padding_px", 20))
+    _rotation = float(roi.get("rotation", 0.0) or 0.0)
 
-    ok = save_ref_patch(frame, roi, save_path, _hsv_lower, _hsv_upper, _padding)
+    ok = save_ref_patch(frame, roi, save_path, _hsv_lower, _hsv_upper, _padding, _rotation)
     if ok:
-        # Update template config with ref_path
+        # Update template config with ref_path — use update_current_version with full detail
         try:
             detail = templates_repo.get_template_detail(template_id)
             if detail:
-                pr = detail.get("part_ready") or {}
+                pr = dict(detail.get("part_ready") or {})
                 pr["gap_ref_path"] = save_path
-                # Keep method as gap_template_match
                 pr["method"] = "gap_template_match"
-                templates_repo.update_template(template_id, {"part_ready": pr})
+                detail["part_ready"] = pr
+                templates_repo.update_current_version(template_id, detail)
         except Exception:
             pass  # non-critical
         return jsonify({"saved": True, "path": save_path}), 201
@@ -196,6 +197,18 @@ def upload_part_ready_ref(template_id: int):
         cv2.imwrite(save_path, img)
     except Exception as exc:
         return jsonify({"error": f"Save failed: {exc}"}), 400
+
+    # Persist gap_ref_path to template JSON
+    try:
+        detail = templates_repo.get_template_detail(template_id)
+        if detail:
+            pr = dict(detail.get("part_ready") or {})
+            pr["gap_ref_path"] = save_path
+            pr["method"] = "gap_template_match"
+            detail["part_ready"] = pr
+            templates_repo.update_current_version(template_id, detail)
+    except Exception:
+        pass  # non-critical
 
     return jsonify({"saved": True, "path": save_path}), 201
 
