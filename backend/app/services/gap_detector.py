@@ -22,12 +22,12 @@ DEFAULT_HSV_UPPER = np.array([130, 255, 255])
 # Reference storage directory
 PART_READY_REF_DIR = "backend/app/assets/part_ready_refs"
 
-def _auto_canny(gray: np.ndarray, sigma: float = 0.33) -> np.ndarray:
+def _auto_canny(gray: np.ndarray, sigma: float = 0.8) -> np.ndarray:
     """Auto-tune Canny thresholds from image median — robust terhadap perubahan cahaya."""
     median = float(np.median(gray))
     low = int(max(0, (1.0 - sigma) * median))
     high = int(min(255, (1.0 + sigma) * median))
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
     return cv2.Canny(blurred, low, high)
 
 def get_ref_path(template_id: int) -> Path:
@@ -42,13 +42,14 @@ def load_ref_patch(ref_path: str | None, template_id: int | None = None) -> np.n
     if ref_path:
         p = Path(ref_path)
         if p.is_file():
-            img = cv2.imread(str(p))
+            img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+
             return img if img is not None else None
     # Fallback to standard path
     if template_id is not None:
         p = get_ref_path(template_id)
         if p.is_file():
-            img = cv2.imread(str(p))
+            img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
             return img if img is not None else None
     return None
 
@@ -114,8 +115,6 @@ def match_gap(frame_bgr: np.ndarray, roi: dict, ref_patch: np.ndarray,
         # Konversi ke edge map (auto-tune Canny) untuk matching yang robust
         gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
         roi_frame = _auto_canny(gray)
-        if ref_patch.ndim == 3:
-            ref_patch = cv2.cvtColor(ref_patch, cv2.COLOR_BGR2GRAY)
 
         # Ref patch must fit inside ROI
         ph, pw = ref_patch.shape[:2]

@@ -1620,8 +1620,9 @@ class AdminScreen(ctk.CTkFrame):
         try:
             result = self.api.upload_part_ready_ref(self.current_template_id, file_path)
             if result.get("saved"):
-                self.gap_ref_status_label.configure(text="Referensi: ada", foreground="green")
-                messagebox.showinfo("Reference", "Referensi gap berhasil diupload.")
+                self.gap_ref_status_label.configure(
+                    text="Referensi: edge map ✓", foreground="green")
+                messagebox.showinfo("Reference", "Referensi edge map berhasil diupload.")
             else:
                 messagebox.showerror("Reference", result.get("error", "Gagal upload referensi."))
         except Exception as exc:

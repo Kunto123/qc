@@ -140,31 +140,26 @@ def capture_part_ready_ref(template_id: int):
         return jsonify({"error": f"Decode failed: {exc}"}), 400
 
     save_path = str(get_ref_path(template_id))
+    _hsv_lower = np.array(roi.get("gap_hsv_lower", [90, 50, 50]))
+    _hsv_upper = np.array(roi.get("gap_hsv_upper", [130, 255, 255]))
+    _padding = int(roi.get("gap_padding_px", 20))
     _rotation = float(roi.get("rotation", 0.0) or 0.0)
 
-    ok = save_ref_patch(frame, roi, save_path, rotation=_rotation)
+    ok = save_ref_patch(frame, roi, save_path, _hsv_lower, _hsv_upper, _padding, _rotation)
     if ok:
-        preview_b64 = None
-        try:
-            edge_img = cv2.imread(save_path, cv2.IMREAD_GRAYSCALE)
-            if edge_img is not None:
-                _, buf = cv2.imencode(".png", edge_img)
-                preview_b64 = base64.b64encode(buf).decode("ascii")
-        except Exception:
-            pass
+        # Update template config with ref_path — use update_current_version with full detail
         try:
             detail = templates_repo.get_template_detail(template_id)
             if detail:
                 pr = dict(detail.get("part_ready") or {})
                 pr["gap_ref_path"] = save_path
-                pr["gap_ref_type"] = "edge_map"
                 pr["method"] = "gap_template_match"
                 detail["part_ready"] = pr
                 templates_repo.update_current_version(template_id, detail)
         except Exception:
-            pass
-        return jsonify({"saved": True, "path": save_path, "preview_b64": preview_b64}), 201
-    return jsonify({"error": "Failed to save edge map — check ROI and camera"}), 400
+            pass  # non-critical
+        return jsonify({"saved": True, "path": save_path}), 201
+    return jsonify({"error": "Failed to extract gap patch — check ROI and camera"}), 400
 
 
 @template_blueprint.post("/<int:template_id>/part-ready-ref/upload")
@@ -199,7 +194,10 @@ def upload_part_ready_ref(template_id: int):
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if img is None:
             return jsonify({"error": "Invalid image file"}), 400
-        cv2.imwrite(save_path, img)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        from backend.app.services.gap_detector import _auto_canny
+        edge_map = _auto_canny(gray)
+        cv2.imwrite(save_path, edge_map)
     except Exception as exc:
         return jsonify({"error": f"Save failed: {exc}"}), 400
 
@@ -209,6 +207,7 @@ def upload_part_ready_ref(template_id: int):
         if detail:
             pr = dict(detail.get("part_ready") or {})
             pr["gap_ref_path"] = save_path
+            pr["gap_ref_type"] = "edge_map"
             pr["method"] = "gap_template_match"
             detail["part_ready"] = pr
             templates_repo.update_current_version(template_id, detail)
