@@ -980,6 +980,7 @@ class InspectionSessionService:
             )
 
         # Determine commit_allowed with grace period + stability
+
         _commit_allowed = False
         _policy_action = "pending"
         _pending_reason = ""

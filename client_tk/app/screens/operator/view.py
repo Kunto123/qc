@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import platform
 import threading
-from time import time
+from time import monotonic, time
 import tkinter as tk
 import uuid
 from tkinter import messagebox, ttk
@@ -949,7 +949,7 @@ class OperatorScreen(ctk.CTkFrame):
         detections = payload.get("detections") or []
         _stale_detections = False
         if not detections and self._last_detections:
-            _age = time.monotonic() - self._last_detections_ts
+            _age = monotonic() - self._last_detections_ts
             if _age < self._detection_holdover_s:
                 detections = self._last_detections
                 _stale_detections = True
@@ -1823,7 +1823,7 @@ class OperatorScreen(ctk.CTkFrame):
         new_dets = payload.get("detections") or []
         if new_dets:
             self._last_detections = new_dets
-            self._last_detections_ts = time.monotonic()
+            self._last_detections_ts =monotonic()
 
         # Update all UI elements directly (no separate poll needed)
         try:
