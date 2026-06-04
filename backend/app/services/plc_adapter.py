@@ -67,24 +67,23 @@ class DryRunPlcAdapter(PlcAdapter):
 
 
 class ModbusRtuPlcAdapter(PlcAdapter):
-    """Modbus RTU simple — berdasarkan testall.py"""
-
     def __init__(
         self,
         port: str = "COM7",
         baudrate: int = 9600,
         slave_id: int = 255,
         timeout: float = 0.5,
+        parity: str = "N",
+        bytesize: int = 8,
+        stopbits: int = 1,
     ):
-        if ModbusSerialClient is None:
-            raise RuntimeError("pymodbus is not installed")
-        self._slave_id = slave_id
+        ...
         self._client = ModbusSerialClient(
             port=port,
             baudrate=baudrate,
-            parity="N",
-            stopbits=1,
-            bytesize=8,
+            parity=parity,
+            stopbits=stopbits,
+            bytesize=bytesize,
             timeout=timeout,
         )
         self._port = port
@@ -212,7 +211,10 @@ def build_plc_adapter(config) -> PlcAdapter:
             port=config.plc_serial_port or "COM7",
             baudrate=config.plc_serial_baudrate,
             slave_id=config.plc_modbus_unit_id,
-            timeout=0.5,
+            timeout=config.plc_timeout_ms / 1000.0,
+            parity=config.plc_serial_parity,
+            bytesize=config.plc_serial_bytesize,
+            stopbits=config.plc_serial_stopbits,
         )
     elif config.plc_transport == "tcp":
         return ModbusTcpPlcAdapter(
