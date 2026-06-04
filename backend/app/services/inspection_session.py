@@ -254,12 +254,13 @@ class InspectionSessionService:
                     state.plc_part_ready_triggered = False
                     state.inspection_result_cache = None
                     state.operator_state = "IDLE"
-                    # Release part-ready latch so next part starts fresh
                     state.part_ready_latched = False
                     state.part_ready_latched_at = None
+                    state.part_ready_unsettled_at = None
+                    state.consecutive_part_ready_frames = 0          # ← reset untuk part berikutnya
+                    state.part_ready_settle_started_at = None
                     if self._plc_worker is not None:
                         self._plc_worker.unlock_cycle(reason="part_removed_stable")
-                    state.part_ready_unsettled_at = None
                     state.last_inference_ms = 0
                     # Unlock PLC cycle
                     if self._plc_worker is not None:
@@ -602,84 +603,45 @@ class InspectionSessionService:
         timings["sticker_roi_crop_ms"] = _elapsed_ms(roi_crop_started)
 
         # ------------------------------------------------------------------
-        # Settle-time debounce
-        # Hold inference and commit for settle_ms after part_ready first
-        # transitions to True.  settle_ms = 0 restores legacy behaviour.
-        # Resolution priority: template (when not None) > env default > 0.
+        # Settle — frame-count based
+        # Tunggu N frame berturut-turut di atas threshold sebelum clamp engage.
+        # Jika sudah latched, abaikan raw state — tetap settled.
         # ------------------------------------------------------------------
-        _template_settle = getattr(state.template.sticker, "part_ready_settle_ms", None)
-        settle_ms = (
-            max(0, int(_template_settle))
-            if _template_settle is not None
-            else self._default_settle_ms
+        _settle_frames = int(
+            getattr(state.template.sticker, "part_ready_settle_frames", 5) or 5
         )
         _settle_now = datetime.now(UTC)
         _raw_part_ready = part_ready.get("part_ready", False)
-        if _raw_part_ready and presence.get("present", False):
-            if state.part_ready_settle_started_at is None:
-                state.part_ready_settle_started_at = _settle_now
-            _elapsed_settle_ms = (
-                (_settle_now - state.part_ready_settle_started_at).total_seconds() * 1000.0
-            )
-            part_ready_settled = settle_ms == 0 or _elapsed_settle_ms >= settle_ms
+
+        if state.part_ready_latched:
+            # Sudah engaged — tetap settled tanpa melihat raw part_ready
+            part_ready_settled = True
+            settle_remaining_ms = 0.0
+        elif _raw_part_ready and presence.get("present", False):
+            state.consecutive_part_ready_frames += 1
+            part_ready_settled = state.consecutive_part_ready_frames >= _settle_frames
             settle_remaining_ms = (
-                max(0.0, float(settle_ms) - _elapsed_settle_ms)
-                if not part_ready_settled
-                else 0.0
+                max(0.0, float(_settle_frames - state.consecutive_part_ready_frames) * 100.0)
+                if not part_ready_settled else 0.0
             )
         else:
-            state.part_ready_settle_started_at = None
+            state.consecutive_part_ready_frames = 0
             part_ready_settled = False
             settle_remaining_ms = 0.0
             self._reset_clamp_gate(state)
 
         # ------------------------------------------------------------------
         # Part-Ready Latch Logic
-        # Once raw_part_ready is settled and clamp is requested, we latch so
-        # brief drops in raw_part_ready (shadow, vibration) do not cancel the
-        # sticker inference cycle. Latch resets only when:
-        #   - PLC returns to IDLE (part removed / manual release)
-        #   - Session stop / ROI override changed
-        #   - Presence stays False longer than release_ms
+        # Sekali latched, TIDAK pernah release karena part_ready drop atau
+        # presence hilang. Latch hanya direset oleh _on_plc_state_change
+        # ketika PLC kembali ke IDLE (ACCEPT otomatis atau IN1 manual).
         # ------------------------------------------------------------------
-        _release_ms = self._part_ready_release_ms
-        _now_dt = _settle_now  # datetime already computed above
+        _now_dt = _settle_now
 
         if part_ready_settled and not state.part_ready_latched:
-            # First frame where settle is satisfied → latch on
             state.part_ready_latched = True
             state.part_ready_latched_at = _now_dt
             state.part_ready_unsettled_at = None
-        elif not _raw_part_ready and state.part_ready_latched:
-            # Raw dropped while latched — start debounce timer
-            if state.part_ready_unsettled_at is None:
-                state.part_ready_unsettled_at = _now_dt
-            # Check if raw has been down longer than release_ms
-            _unsettled_elapsed_ms = (
-                (_now_dt - state.part_ready_unsettled_at).total_seconds() * 1000.0
-            )
-            if _release_ms > 0 and _unsettled_elapsed_ms < _release_ms:
-                # Within debounce window — keep latch, treat as settled
-                part_ready_settled = True
-                settle_remaining_ms = 0.0
-            else:
-                # Exceeded debounce — release latch
-                state.part_ready_latched = False
-                state.part_ready_latched_at = None
-                state.part_ready_unsettled_at = None
-                part_ready_settled = False
-                settle_remaining_ms = 0.0
-                self._reset_clamp_gate(state)
-        elif _raw_part_ready and state.part_ready_latched:
-            # Raw is back up while latched — clear unsettled timer
-            state.part_ready_unsettled_at = None
-
-        # Release latch when presence is gone (part truly left)
-        if not presence.get("present", False) and state.part_ready_latched:
-            state.part_ready_latched = False
-            state.part_ready_latched_at = None
-            state.part_ready_unsettled_at = None
-            self._reset_clamp_gate(state)
 
         # Trigger PLC clamp hold on the first frame where part is settled.
         # But check release/next-part cooldown before re-clamping.
@@ -706,7 +668,7 @@ class InspectionSessionService:
         )
         phase_ready_for_inference, phase_payload = self._operator_phase_status(
             state,
-            raw_part_ready=bool(_raw_part_ready),
+            raw_part_ready=bool(_raw_part_ready or state.part_ready_latched),
             part_ready_settled=bool(part_ready_settled),
             clamp_ready=bool(clamp_ready_for_inference),
             now_s=_now_s,
@@ -735,7 +697,7 @@ class InspectionSessionService:
 
         # Build effective_part_ready dict for backward compatibility
         if effective_part_ready_val:
-            effective_part_ready = part_ready
+            effective_part_ready = {**part_ready, "part_ready": True}
         else:
             effective_part_ready = {
                 **part_ready,
@@ -779,12 +741,16 @@ class InspectionSessionService:
             else "inactive"
         )
 
+        _effective_present = (
+            bool(presence.get("present", False)) or state.part_ready_latched
+        )
         operator_state_decision = self._operator_state_machine.update(
             state,
-            part_ready=bool(_raw_part_ready),
-            present=bool(presence.get("present", False)),
+            part_ready=bool(effective_part_ready_val),
+            present=_effective_present,          # ← ganti dari presence.get("present", False)
             settled=bool(part_ready_settled and clamp_ready_for_inference and phase_ready_for_inference),
         )
+
         if operator_state_decision.use_cached_result and state.inspection_result_cache:
             cached_payload = dict(state.inspection_result_cache)
             cached_timings = dict(cached_payload.get("timings") or {})
@@ -1089,7 +1055,7 @@ class InspectionSessionService:
             part_ready_payload=effective_part_ready,
             presence=presence,
             now=_now_policy,
-            settle_ms=settle_ms,
+            settle_ms=0,
         )
 
         # Policy commit gate overrides count_committed

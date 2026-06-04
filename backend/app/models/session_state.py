@@ -69,6 +69,7 @@ class SessionState:
     settle_frame_count: int = 0
     # Inference cooldown: timestamp (ms) of last inference run.
     # Prevents inference from running more than once per second.
+    consecutive_part_ready_frames: int = 0
     last_inference_ms: int = 0
     # Inference interval (ms): minimum time between inference runs.
     # 0 = unlimited (every frame), 200 = max ~5 fps inference.
