@@ -7,6 +7,7 @@ the part is at the correct position within the part_ready ROI.
 from __future__ import annotations
 
 import os
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ import numpy as np
 
 from backend.app.core.config import PROJECT_ROOT as project_root
 
+_logger = logging.getLogger(__name__)
 # Default HSV range for blue clamp detection
 DEFAULT_HSV_LOWER = np.array([90, 50, 50])
 DEFAULT_HSV_UPPER = np.array([130, 255, 255])
@@ -86,7 +88,8 @@ def save_ref_patch(frame_bgr: np.ndarray, roi: dict, save_path: str,
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(save_path, edge_map)
         return True
-    except Exception:
+    except Exception as exc:
+        _logger.warning("save_ref_patch failed: %s", exc, exc_info=True)
         return False
 
 

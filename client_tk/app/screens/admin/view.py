@@ -3059,7 +3059,7 @@ class AdminScreen(ctk.CTkFrame):
         self._admin_import_path_var.set("No file selected")
         self._admin_import_name_var.set("")
         self.refresh_model_options()
-        messagebox.info("Upload", f"Model '{name}' uploaded ({runtime}).")
+        messagebox.showinfo("Upload", f"Model '{name}' uploaded ({runtime}).")
 
     def _admin_export_model(self) -> None:
         sel = self._admin_model_list.curselection()

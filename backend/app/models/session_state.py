@@ -101,4 +101,5 @@ class SessionState:
     policy_stable_frames: int = 0
     # After ACCEPT commit, wait for part to actually leave before allowing next cycle.
     awaiting_part_removal_after_commit: bool = False
+    policy_holdover_expires_at: datetime | None = None
     part_absent_started_at: datetime | None = None

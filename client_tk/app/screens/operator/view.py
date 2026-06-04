@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import platform
 import threading
+from time import time
 import tkinter as tk
 import uuid
 from tkinter import messagebox, ttk
@@ -61,6 +62,9 @@ class OperatorScreen(ctk.CTkFrame):
         self.capture = CameraCaptureService()
         self.uploader = FrameUploadService()  # Local frame pump via API client bridge.
         self._latest_payload: dict | None = None
+        self._last_detections: list = []
+        self._last_detections_ts: float = 0.0
+        self._detection_holdover_s: float = 1.5
         self._latest_error: str | None = None
         self._lock = threading.Lock()
         self._after_id: str | None = None
@@ -943,6 +947,12 @@ class OperatorScreen(ctk.CTkFrame):
         sticker_roi = payload.get("sticker_roi_meta") or {}
         part_ready_roi = payload.get("part_ready_roi_meta") or {}
         detections = payload.get("detections") or []
+        _stale_detections = False
+        if not detections and self._last_detections:
+            _age = time.monotonic() - self._last_detections_ts
+            if _age < self._detection_holdover_s:
+                detections = self._last_detections
+                _stale_detections = True
         event_state = payload.get("event_state") or "idle"
 
         # Backend computes roi_meta pixel coords from the (possibly downscaled) frame
@@ -1008,7 +1018,8 @@ class OperatorScreen(ctk.CTkFrame):
             y1 = int(sy + float(pos.get("y1", 0)) * scale_y)
             x2 = int(sx + float(pos.get("x2", 0)) * scale_x)
             y2 = int(sy + float(pos.get("y2", 0)) * scale_y)
-            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 255), 2)
+            _bbox_color = (100, 180, 255) if _stale_detections else (0, 255, 255)  # biru-muda vs cyan
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), _bbox_color, 2)
             lbl = str(det.get("label") or "")
             conf = float(det.get("confidence") or 0.0)
             cv2.putText(overlay, f"{lbl} {conf:.2f}", (x1, max(20, y1 - 8)),
@@ -1809,9 +1820,10 @@ class OperatorScreen(ctk.CTkFrame):
         """Handle inference result from backend. Update UI directly."""
         with self._lock:
             self._latest_payload = payload
-            self._latest_error = None
-        self._auth_error_notified = False
-        self._last_payload_seq += 1
+        new_dets = payload.get("detections") or []
+        if new_dets:
+            self._last_detections = new_dets
+            self._last_detections_ts = time.monotonic()
 
         # Update all UI elements directly (no separate poll needed)
         try:
@@ -1848,6 +1860,7 @@ class OperatorScreen(ctk.CTkFrame):
             self._refresh_context_summary()
             self._update_status_badges(payload)
             self._update_result_info(payload)
+            self._render_overlay_direct(payload)
 
         except tk.TclError:
             pass

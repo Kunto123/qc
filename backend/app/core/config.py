@@ -99,6 +99,10 @@ class AppConfig:
     accept_stable_frames: int = max(1, int(os.getenv("QC_SUITE_ACCEPT_STABLE_FRAMES", "2")))
     # accept: minimal stable elapsed ms before commit (default 200).
     accept_stable_ms: int = max(0, int(os.getenv("QC_SUITE_ACCEPT_STABLE_MS", "200")))
+    # Detection holdover: when ACCEPT transitions to NOT_FOUND briefly,
+    # hold the ACCEPT state for this duration before resetting stability.
+    # 0 = disabled (legacy: reset immediately on key change).
+    accept_holdover_ms: int = max(0, int(os.getenv("QC_SUITE_ACCEPT_HOLDOVER_MS", "800")))
     # hard_reject: minimal consecutive stable frames before commit (default 3).
     hard_reject_stable_frames: int = max(1, int(os.getenv("QC_SUITE_HARD_REJECT_STABLE_FRAMES", "3")))
     # hard_reject: minimal stable elapsed ms before commit (default 500).

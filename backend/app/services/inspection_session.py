@@ -145,6 +145,7 @@ class InspectionSessionService:
         self._sticker_inference = sticker_inference
         self._sessions: dict[str, SessionState] = {}
         self._lock = threading.RLock()
+        self._accept_holdover_ms: int = app_config.accept_holdover_ms
         # System-wide settle default: used when a template's part_ready_settle_ms is None.
         self._default_settle_ms: int = (
             max(0, int(app_config.part_ready_settle_ms_default))
@@ -942,13 +943,36 @@ class InspectionSessionService:
         )
 
         # Track stability
+        _was_accept = state.last_policy_key.split("|")[0] == "ACCEPT"
+
+        # Start holdover window when transitioning ACCEPT → non-ACCEPT
+        if _was_accept and not _is_accept and self._accept_holdover_ms > 0:
+            if state.policy_holdover_expires_at is None:
+                state.policy_holdover_expires_at = _now_policy + timedelta(
+                    milliseconds=self._accept_holdover_ms
+                )
+
+        _in_holdover = (
+            state.policy_holdover_expires_at is not None
+            and _now_policy < state.policy_holdover_expires_at
+            and not _is_accept
+        )
+
+        _effective_is_accept = _is_accept or _in_holdover
+        if _is_accept:                           # real detection came back
+            state.policy_holdover_expires_at = None  # cancel holdover on re-detection
+
         if _policy_key == state.last_policy_key:
+            state.policy_stable_frames += 1
+        elif _in_holdover:
+            # During holdover: don't reset counters, treat gap as noise
             state.policy_stable_frames += 1
         else:
             state.last_policy_key = _policy_key
             state.policy_stable_frames = 1
             state.policy_stable_started_at = _now_policy
-
+            state.policy_holdover_expires_at = None
+            
         _stable_elapsed_ms = 0.0
         if state.policy_stable_started_at is not None:
             _stable_elapsed_ms = (
@@ -986,7 +1010,7 @@ class InspectionSessionService:
             if not _pending_reason:
                 _pending_reason = "waiting_part_removed"
 
-        elif _is_accept:
+        elif _effective_is_accept:
             # Accept: commit only after grace period + stability
             _grace_ok = _stable_elapsed_ms >= self._commit_grace_ms
             _frames_ok = state.policy_stable_frames >= self._accept_stable_frames
