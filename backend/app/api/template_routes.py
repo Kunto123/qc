@@ -145,7 +145,7 @@ def capture_part_ready_ref(template_id: int):
     _padding = int(roi.get("gap_padding_px", 20))
     _rotation = float(roi.get("rotation", 0.0) or 0.0)
 
-    ok = save_ref_patch(frame, roi, save_path, _hsv_lower, _hsv_upper, _padding, _rotation)
+    ok, err_msg = save_ref_patch(frame, roi, save_path, _hsv_lower, _hsv_upper, _padding, _rotation)
     if ok:
         # Update template config with ref_path — use update_current_version with full detail
         try:
@@ -159,7 +159,8 @@ def capture_part_ready_ref(template_id: int):
         except Exception:
             pass  # non-critical
         return jsonify({"saved": True, "path": save_path}), 201
-    return jsonify({"error": "Failed to extract gap patch — check ROI and camera"}), 400
+    reason = err_msg or "check ROI and camera"
+    return jsonify({"error": f"Failed to extract gap patch — {reason}"}), 400
 
 
 @template_blueprint.post("/<int:template_id>/part-ready-ref/upload")

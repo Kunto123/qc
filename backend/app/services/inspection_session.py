@@ -125,7 +125,6 @@ def _estimate_tilt_from_roi(roi_frame, expected_tilt_degrees: float, config: Any
     Always delegates to estimate_sticker_rotation (alias: estimate_white_text_tilt).
     """
     return estimate_white_text_tilt(roi_frame, expected_tilt_degrees, config)
-    candidates: list[dict[str, Any]] = []
 
 
 class InspectionSessionService:
@@ -1113,6 +1112,7 @@ class InspectionSessionService:
             state.policy_stable_frames = 0
             state.last_policy_key = ""
             state.policy_stable_started_at = None
+            state.policy_holdover_expires_at = None
 
         # Event state advance — always use original validation for event tracking.
         # Policy commit gate overrides count_committed afterwards.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import platform
 import threading
 from time import monotonic, time
@@ -1823,7 +1824,7 @@ class OperatorScreen(ctk.CTkFrame):
         new_dets = payload.get("detections") or []
         if new_dets:
             self._last_detections = new_dets
-            self._last_detections_ts =monotonic()
+            self._last_detections_ts = monotonic()
 
         # Update all UI elements directly (no separate poll needed)
         try:

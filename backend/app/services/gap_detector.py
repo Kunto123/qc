@@ -60,13 +60,16 @@ def save_ref_patch(frame_bgr: np.ndarray, roi: dict, save_path: str,
                    hsv_lower: np.ndarray = DEFAULT_HSV_LOWER,
                    hsv_upper: np.ndarray = DEFAULT_HSV_UPPER,
                    padding_px: int = 20,
-                   rotation: float = 0.0) -> bool:
-    """Crop ROI, apply Canny edge detection, save as grayscale PNG."""
+                   rotation: float = 0.0) -> tuple[bool, str]:
+    """Crop ROI, apply Canny edge detection, save as grayscale PNG.
+
+    Returns (True, "") on success, (False, reason) on failure.
+    """
     try:
         rx, ry = int(roi.get("x", 0)), int(roi.get("y", 0))
         rw, rh = int(roi.get("w", 0)), int(roi.get("h", 0))
         if rw <= 0 or rh <= 0:
-            return False
+            return False, f"ROI dimensions invalid: w={rw} h={rh} (must be > 0)"
         fh, fw = frame_bgr.shape[:2]
         rx = max(0, min(rx, fw - 1))
         ry = max(0, min(ry, fh - 1))
@@ -74,7 +77,7 @@ def save_ref_patch(frame_bgr: np.ndarray, roi: dict, save_path: str,
         rh = min(rh, fh - ry)
         roi_frame = frame_bgr[ry:ry+rh, rx:rx+rw]
         if roi_frame.size == 0:
-            return False
+            return False, f"ROI region empty after clipping (frame {fw}x{fh}, roi x={rx} y={ry} w={rw} h={rh})"
         if abs(rotation) > 0.1:
             center = (rw / 2, rh / 2)
             M = cv2.getRotationMatrix2D(center, -rotation, 1.0)
@@ -87,10 +90,10 @@ def save_ref_patch(frame_bgr: np.ndarray, roi: dict, save_path: str,
         edge_map = _auto_canny(gray)
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(save_path, edge_map)
-        return True
+        return True, ""
     except Exception as exc:
         _logger.warning("save_ref_patch failed: %s", exc, exc_info=True)
-        return False
+        return False, str(exc)
 
 
 def match_gap(frame_bgr: np.ndarray, roi: dict, ref_patch: np.ndarray,
