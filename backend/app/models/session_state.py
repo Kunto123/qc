@@ -105,6 +105,10 @@ class SessionState:
     # ── Inspection Policy Stability Tracking ──
     # Policy key = hash of (decision, reject_reason_code, detected_class, expected_class)
     # Used to track consecutive stable frames before commit.
+    # Cycle-level timestamp: when ACCEPT was first seen in this clamping cycle.
+    # Persists across detection gaps (bridges holdover expiry) — reset only on commit
+    # or when the cycle resets (part removed). Used for commit_grace_ms check.
+    accept_cycle_started_at: datetime | None = None
     last_policy_key: str = ""
     policy_stable_started_at: datetime | None = None
     policy_stable_frames: int = 0

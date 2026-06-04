@@ -290,6 +290,7 @@ class InspectionSessionService:
         state.plc_clamp_event_id = None
         state.operator_sticker_delay_started_at = 0.0
         state.operator_sticker_ready_at = 0.0
+        state.accept_cycle_started_at = None
 
     def _clamp_gate_status(self, state: SessionState, *, part_ready_settled: bool, now_s: float) -> tuple[bool, dict[str, Any]]:
         if self._plc_worker is None:
@@ -1008,6 +1009,23 @@ class InspectionSessionService:
             state.inference_accept_first_ts = 0.0
             state.inference_last_counted_generation = -1
 
+        # ── Cycle-level grace timer ──
+        # Tracks the first moment ACCEPT was seen in this clamping cycle.
+        # Unlike policy_stable_started_at, this does NOT reset when holdover expires —
+        # it persists across all detection gaps until the cycle resets.
+        if _effective_is_accept:
+            if state.accept_cycle_started_at is None:
+                state.accept_cycle_started_at = _now_policy
+        elif not _is_accept and not _in_holdover:
+            # True non-accept (holdover fully expired) — reset cycle timer
+            state.accept_cycle_started_at = None
+
+        _accept_cycle_elapsed_ms = 0.0
+        if state.accept_cycle_started_at is not None:
+            _accept_cycle_elapsed_ms = (
+                (_now_policy - state.accept_cycle_started_at).total_seconds() * 1000.0
+            )
+
         _stable_elapsed_ms = 0.0
         if state.policy_stable_started_at is not None:
             _stable_elapsed_ms = (
@@ -1051,7 +1069,7 @@ class InspectionSessionService:
             # Both policy_stable_frames AND inference_accept_count must meet thresholds.
             # inference_accept_count only increments when a NEW inference result arrives,
             # so repeated reads of the same cached result don't count as extra stable frames.
-            _grace_ok = _stable_elapsed_ms >= self._commit_grace_ms
+            _grace_ok = _accept_cycle_elapsed_ms >= self._commit_grace_ms
             _frames_ok = state.policy_stable_frames >= self._accept_stable_frames
             _inference_ok = state.inference_accept_count >= self._accept_stable_frames
             _ms_ok = _stable_elapsed_ms >= self._accept_stable_ms
@@ -1064,7 +1082,7 @@ class InspectionSessionService:
                 _policy_action = "pending"
                 _parts = []
                 if not _grace_ok:
-                    _parts.append(f"grace({_stable_elapsed_ms:.0f}/{self._commit_grace_ms}ms)")
+                    _parts.append(f"grace({_accept_cycle_elapsed_ms:.0f}/{self._commit_grace_ms}ms)")
                 if not _frames_ok:
                     _parts.append(f"stable_frames({state.policy_stable_frames}/{self._accept_stable_frames})")
                 if not _inference_ok:
@@ -1113,6 +1131,7 @@ class InspectionSessionService:
             state.last_policy_key = ""
             state.policy_stable_started_at = None
             state.policy_holdover_expires_at = None
+            state.accept_cycle_started_at = None
 
         # Event state advance — always use original validation for event tracking.
         # Policy commit gate overrides count_committed afterwards.
@@ -1122,7 +1141,7 @@ class InspectionSessionService:
             part_ready_payload=effective_part_ready,
             presence=presence,
             now=_now_policy,
-            settle_ms=0,
+            settle_ms=self._commit_grace_ms,
         )
 
         # Policy commit gate overrides count_committed
