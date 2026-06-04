@@ -77,7 +77,9 @@ class ModbusRtuPlcAdapter(PlcAdapter):
         bytesize: int = 8,
         stopbits: int = 1,
     ):
-        ...
+        if ModbusSerialClient is None:
+            raise RuntimeError("pymodbus is not installed")
+        self._slave_id = slave_id
         self._client = ModbusSerialClient(
             port=port,
             baudrate=baudrate,
