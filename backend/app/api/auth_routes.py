@@ -64,6 +64,7 @@ def login():
 
     user = None
     credential_label = ""
+    rfid_last4 = ""
     if rfid_uid_input:
         try:
             rfid_uid_hash, _uid_last4 = _rfid_hash_from_payload(payload)
@@ -76,6 +77,7 @@ def login():
                 details=str(exc),
             )
             return jsonify({"error": "Invalid RFID card"}), 401
+        rfid_last4 = _uid_last4
         user = users_repo.authenticate_rfid_hash(rfid_uid_hash)
         credential_label = "rfid"
     else:
@@ -97,7 +99,8 @@ def login():
             username=username_input if credential_label == "password" else None,
             ip_address=ip,
             client_name=client,
-            details=f"Invalid {credential_label} credentials",
+            details=f"Invalid {credential_label} credentials"
+                     + (f"; rfid_last4={rfid_last4}" if rfid_last4 else ""),
         )
         return jsonify({"error": "Invalid credentials"}), 401
 

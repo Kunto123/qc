@@ -100,13 +100,24 @@ class StickerInferenceService:
             if interp is not None:
                 return interp
         try:
-            from tflite_runtime.interpreter import Interpreter  # type: ignore
+            from ai_edge_litert.interpreter import Interpreter  # type: ignore
             interpreter = Interpreter(model_path=resolved)
         except ImportError:
-            raise ModuleNotFoundError(
-                "tflite-runtime is required for TFLite inference. "
-                "Install it with: pip install tflite-runtime"
-            )
+            try:
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=".*tf.lite.Interpreter.*",
+                        category=UserWarning,
+                    )
+                    from tflite_runtime.interpreter import Interpreter  # type: ignore
+                    interpreter = Interpreter(model_path=resolved)
+            except ImportError:
+                raise ModuleNotFoundError(
+                    "tflite-runtime is required for TFLite inference. "
+                    "Install it with: pip install tflite-runtime"
+                )
         interpreter.allocate_tensors()
         with self._runtime_lock:
             self._loaded_models[resolved] = interpreter

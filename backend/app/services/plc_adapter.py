@@ -121,6 +121,14 @@ class ModbusRtuPlcAdapter(PlcAdapter):
 
     def write_coil(self, address: int, value: bool) -> None:
         self._ensure_connected()
+        # Drain stale bytes from serial buffer before sending new command.
+        # Prevents recv-buffer spam when polling at 100ms and response hasn't
+        # fully arrived before the next write.
+        try:
+            if hasattr(self._client, 'socket') and self._client.socket:
+                self._client.socket.reset_input_buffer()
+        except Exception:
+            pass
         resp = self._client.write_coil(address, bool(value), device_id=self._slave_id)
         if resp.isError():
             raise RuntimeError(f"write_coil error addr={address}: {resp}")

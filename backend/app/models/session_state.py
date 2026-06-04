@@ -62,6 +62,15 @@ class SessionState:
     inference_frame_counter: int = 0
     inference_thread_busy: bool = False
     _inference_executor: concurrent.futures.ThreadPoolExecutor | None = None  # lazy-init per session
+    # Inference generation counter — incremented each time a new inference result
+    # is committed to the cache. Used by the accept gate to count distinct
+    # inference runs (not just repeated reads of the same cached result).
+    inference_result_generation: int = 0
+    inference_accept_count: int = 0
+    inference_accept_first_ts: float = 0.0
+    inference_last_counted_generation: int = -1
+    # Inference cache TTL (ms) — configurable per session from app config.
+    inference_cache_ttl_ms: int = 10000
     gap_ref_cache: dict[str, Any] = field(default_factory=dict)  # cache for loaded gap reference patches
     part_removed_seen_at: datetime | None = None
     # Hysteresis counter: number of consecutive settled frames.

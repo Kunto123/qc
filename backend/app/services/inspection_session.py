@@ -235,6 +235,11 @@ class InspectionSessionService:
             float(app_config.camera_default_rotation_degrees)
             if app_config is not None else 0.0
         )
+        # Inference cache TTL (ms) — how long cached inference is considered fresh
+        self._inference_cache_ttl_ms: int = (
+            max(100, int(app_config.inference_cache_ttl_ms))
+            if app_config is not None else 10000
+        )
         # Register PLC state change callback
         if self._plc_worker is not None:
             self._plc_worker.set_on_state_change_callback(self._on_plc_state_change)
@@ -465,6 +470,7 @@ class InspectionSessionService:
             station_id=station_id,
             session_reject_breakdown=_empty_reject_breakdown(),
             inference_interval_ms=0,
+            inference_cache_ttl_ms=self._inference_cache_ttl_ms,
         )
         with self._lock:
             self._sessions[session_id] = state
@@ -820,8 +826,9 @@ class InspectionSessionService:
                     state.inference_thread_busy = False
 
             # Use cached result if fresh enough
+            _cache_ttl_s = state.inference_cache_ttl_ms / 1000.0
             _age = monotonic() - state.inference_result_ts
-            if state.inference_result_cache is not None and _age <= 0.5:
+            if state.inference_result_cache is not None and _age <= _cache_ttl_s:
                 _cached = state.inference_result_cache
                 detections = list(_cached.get("detections") or [])
                 inference_ms = float(_cached.get("inference_ms", 0.0))
@@ -972,7 +979,36 @@ class InspectionSessionService:
             state.policy_stable_frames = 1
             state.policy_stable_started_at = _now_policy
             state.policy_holdover_expires_at = None
-            
+
+        # ── Inference-generation-based accept gate ──
+        # Only count a frame as a "new accept reading" when the underlying
+        # inference result has actually changed (generation counter advanced).
+        # This prevents the same cached result from being counted as multiple
+        # stable frames on slow PCs where inference takes >500ms.
+        if _effective_is_accept:
+            if state.inference_result_generation > state.inference_last_counted_generation:
+                # New inference result since last counted — record it
+                state.inference_last_counted_generation = state.inference_result_generation
+                _now_s = time.time()
+                # Check if accept_window has expired since first accept reading
+                if state.inference_accept_first_ts > 0:
+                    _accept_window_ms = (_now_s - state.inference_accept_first_ts) * 1000.0
+                    if _accept_window_ms > self._accept_stable_ms * 3:
+                        # Window expired — reset and start fresh
+                        state.inference_accept_count = 1
+                        state.inference_accept_first_ts = _now_s
+                    else:
+                        state.inference_accept_count += 1
+                else:
+                    state.inference_accept_count = 1
+                    state.inference_accept_first_ts = _now_s
+            # else: same generation — don't double-count
+        else:
+            # Not an accept — reset generation-based counters
+            state.inference_accept_count = 0
+            state.inference_accept_first_ts = 0.0
+            state.inference_last_counted_generation = -1
+
         _stable_elapsed_ms = 0.0
         if state.policy_stable_started_at is not None:
             _stable_elapsed_ms = (
@@ -1013,10 +1049,14 @@ class InspectionSessionService:
 
         elif _effective_is_accept:
             # Accept: commit only after grace period + stability
+            # Both policy_stable_frames AND inference_accept_count must meet thresholds.
+            # inference_accept_count only increments when a NEW inference result arrives,
+            # so repeated reads of the same cached result don't count as extra stable frames.
             _grace_ok = _stable_elapsed_ms >= self._commit_grace_ms
             _frames_ok = state.policy_stable_frames >= self._accept_stable_frames
+            _inference_ok = state.inference_accept_count >= self._accept_stable_frames
             _ms_ok = _stable_elapsed_ms >= self._accept_stable_ms
-            if _grace_ok and _frames_ok and _ms_ok:
+            if _grace_ok and _frames_ok and _inference_ok and _ms_ok:
                 _commit_allowed = True
                 _policy_action = "accept_commit"
                 state.awaiting_part_removal_after_commit = True
@@ -1028,6 +1068,8 @@ class InspectionSessionService:
                     _parts.append(f"grace({_stable_elapsed_ms:.0f}/{self._commit_grace_ms}ms)")
                 if not _frames_ok:
                     _parts.append(f"stable_frames({state.policy_stable_frames}/{self._accept_stable_frames})")
+                if not _inference_ok:
+                    _parts.append(f"inference_count({state.inference_accept_count}/{self._accept_stable_frames})")
                 if not _ms_ok:
                     _parts.append(f"stable_ms({_stable_elapsed_ms:.0f}/{self._accept_stable_ms}ms)")
                 _pending_reason = f"accept_stabilizing({', '.join(_parts)})"
@@ -1308,6 +1350,7 @@ class InspectionSessionService:
             result = future.result()
             state.inference_result_cache = result
             state.inference_result_ts = monotonic()
+            state.inference_result_generation += 1
         except Exception as exc:
             logger.warning("[inference-thread] callback error: %s", exc)
         finally:

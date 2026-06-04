@@ -97,8 +97,8 @@ class AppConfig:
     # Stability thresholds for commit:
     # accept: minimal consecutive stable frames before commit (default 2).
     accept_stable_frames: int = max(1, int(os.getenv("QC_SUITE_ACCEPT_STABLE_FRAMES", "2")))
-    # accept: minimal stable elapsed ms before commit (default 200).
-    accept_stable_ms: int = max(0, int(os.getenv("QC_SUITE_ACCEPT_STABLE_MS", "200")))
+    # accept: minimal stable elapsed ms before commit (default 3000).
+    accept_stable_ms: int = max(0, int(os.getenv("QC_SUITE_ACCEPT_STABLE_MS", "3000")))
     # Detection holdover: when ACCEPT transitions to NOT_FOUND briefly,
     # hold the ACCEPT state for this duration before resetting stability.
     # 0 = disabled (legacy: reset immediately on key change).
@@ -132,6 +132,11 @@ class AppConfig:
     # Inference interval (ms): minimum time between YOLO inference runs.
     # 200 = max ~5 fps inference. 0 = every frame (unlimited).
     inference_interval_ms: int = max(0, int(os.getenv("QC_SUITE_INFERENCE_INTERVAL_MS", "0")))
+    # Inference cache TTL (ms): how long a cached inference result is considered
+    # fresh before it is discarded and the system falls back to "no detection".
+    # Default 10000 = 10 seconds. Increase this on slow edge PCs where YOLO
+    # inference takes >500ms per run.
+    inference_cache_ttl_ms: int = max(100, int(os.getenv("QC_SUITE_INFERENCE_CACHE_TTL_MS", "10000")))
 
     stream_port: int = max(1, int(os.getenv("QC_SUITE_STREAM_PORT", "8101")))
     stream_host: str = os.getenv("QC_SUITE_STREAM_HOST", "").strip()
@@ -198,9 +203,10 @@ class AppConfig:
     # PLC guard: minimum interval between clamp ON after any release/accept/manual (ms)
     # Prevents rapid clamp cycling. Default 3000ms.
     plc_min_reclamp_interval_ms: int = max(0, int(os.getenv("QC_SUITE_PLC_MIN_RECLAMP_INTERVAL_MS", "3000")))
-    # PLC guard: debounce for input release (ms)
-    # Input release must be stable for this long before triggering all_off
-    plc_release_input_debounce_ms: int = max(0, int(os.getenv("QC_SUITE_PLC_RELEASE_INPUT_DEBOUNCE_MS", "500")))
+    # PLC guard: debounce for input release (ms).
+    # Input release must be stable for this long before triggering all_off.
+    # Reduced from 500 to 200ms so short IN1 pulses (<500ms) still trigger release.
+    plc_release_input_debounce_ms: int = max(0, int(os.getenv("QC_SUITE_PLC_RELEASE_INPUT_DEBOUNCE_MS", "200")))
     # Session idle timeout (seconds): auto-end session after no frames received
     # for this duration. 0 = disabled (no auto-end). Default 300s (5 minutes).
     session_idle_timeout_s: int = max(0, int(os.getenv("QC_SUITE_SESSION_IDLE_TIMEOUT_S", "300")))

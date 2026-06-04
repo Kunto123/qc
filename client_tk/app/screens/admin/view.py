@@ -189,11 +189,14 @@ class AdminScreen(ctk.CTkFrame):
         self.sticker_roi_h_var = tk.StringVar(value="0.6")
 
         self.operator_username_var = tk.StringVar()
-        self.operator_rfid_var = tk.StringVar()
         self.operator_role_var = tk.StringVar(value="operator")
         self.operator_edit_id: int | None = None
         self.operator_edit_username_var = tk.StringVar()
         self.operator_edit_role_var = tk.StringVar(value="operator")
+
+        # Unified RFID bind state
+        self.bind_target_user_id: int | None = None
+        self.unified_rfid_var = tk.StringVar()
 
         self.training_dataset_var = tk.StringVar()
         self.training_base_model_var = tk.StringVar()
@@ -502,12 +505,14 @@ class AdminScreen(ctk.CTkFrame):
             row=2,
             height=18,
         )
-        # Bind double-click to edit
+        # Bind single-click to select bind target, double-click to edit
+        self.users_table.bind("<<TreeviewSelect>>", self._on_user_selected)
         self.users_table.bind("<Double-1>", self._on_user_double_click)
         footer = self._build_action_row(listing, [("Refresh", self.refresh_operators, "neutral", "left")])
         footer.grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 10))
 
-        # ---- Right: create/edit form ----
+        # ---- Right: Create User form + unified Bind RFID ----
+        # -- Create/edit user form --
         form = ctk.CTkFrame(self.operators_right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
         form.pack(fill="x")
         form.columnconfigure(1, weight=1)
@@ -515,20 +520,19 @@ class AdminScreen(ctk.CTkFrame):
         self.operator_form_title = ctk.CTkLabel(form, text="Add User", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY)
         self.operator_form_title.grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 0))
 
-        self.operator_form_hint = ctk.CTkLabel(form, text="Create a new user and bind RFID card.", text_color=TEXT_SECONDARY, wraplength=420, justify="left")
+        self.operator_form_hint = ctk.CTkLabel(form, text="Create a new user, then bind RFID below.", text_color=TEXT_SECONDARY, wraplength=420, justify="left")
         self.operator_form_hint.grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 10))
 
         self._entry(form, 2, 0, "Username", self.operator_username_var, columns=2)
-        self._entry(form, 3, 0, "RFID UID", self.operator_rfid_var, columns=2)
 
         # Role dropdown
-        ttk.Label(form, text="Role").grid(row=4, column=0, sticky="w", padx=(12, 8), pady=5)
+        ttk.Label(form, text="Role").grid(row=3, column=0, sticky="w", padx=(12, 8), pady=5)
         role_combo = ttk.Combobox(form, textvariable=self.operator_role_var, values=("operator", "admin"), state="readonly", width=18)
-        role_combo.grid(row=4, column=1, sticky="ew", padx=(0, 12), pady=5)
+        role_combo.grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=5)
 
         # Action buttons row
         btn_row = ctk.CTkFrame(form, fg_color="transparent")
-        btn_row.grid(row=5, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 10))
+        btn_row.grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 10))
 
         self.operator_save_btn = ctk.CTkButton(
             btn_row,
@@ -565,7 +569,56 @@ class AdminScreen(ctk.CTkFrame):
             height=32,
             corner_radius=6,
         )
-        self.operator_delete_btn.grid(row=6, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 10))
+        self.operator_delete_btn.grid(row=5, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 10))
+
+        # -- Unified Bind RFID section --
+        bind_frame = ctk.CTkFrame(self.operators_right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        bind_frame.pack(fill="x", pady=(8, 0))
+        bind_frame.columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(bind_frame, text="Bind RFID", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 0))
+        ctk.CTkLabel(bind_frame, text="Select a user from the list, scan RFID, then click Bind.", text_color=TEXT_SECONDARY, wraplength=420, justify="left").grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 8))
+
+        self.bind_target_label = ctk.CTkLabel(bind_frame, text="Select a user from the list", text_color=TEXT_SECONDARY, font=("Segoe UI", 10))
+        self.bind_target_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6))
+
+        bind_entry_row = ttk.Frame(bind_frame)
+        bind_entry_row.grid(row=3, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 6))
+        bind_entry_row.columnconfigure(0, weight=1)
+        self.unified_rfid_entry = ttk.Entry(bind_entry_row, textvariable=self.unified_rfid_var)
+        self.unified_rfid_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        # Prevent keyboard-wedge Enter from bubbling / clearing the field
+        self.unified_rfid_entry.bind("<Return>", lambda e: "break")
+
+        bind_btn_row = ctk.CTkFrame(bind_frame, fg_color="transparent")
+        bind_btn_row.grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 6))
+
+        self.bind_rfid_btn = ctk.CTkButton(
+            bind_btn_row,
+            text="Bind",
+            command=self._on_bind_rfid,
+            fg_color=SUCCESS,
+            hover_color=SUCCESS_HOVER,
+            text_color=TEXT_ON_ACCENT,
+            height=30,
+            corner_radius=6,
+        )
+        self.bind_rfid_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        self.clear_rfid_btn = ctk.CTkButton(
+            bind_btn_row,
+            text="Clear RFID",
+            command=self._on_clear_rfid,
+            fg_color="#475569",
+            hover_color="#64748b",
+            text_color="#f8fafc",
+            height=30,
+            corner_radius=6,
+        )
+        self.clear_rfid_btn.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        self.bind_rfid_status = ctk.CTkLabel(bind_frame, text="", text_color=TEXT_SECONDARY, font=("Segoe UI", 9))
+        self.bind_rfid_status.grid(row=5, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 10))
 
     def _build_monitor_tab(self) -> None:
         self.monitor_tab.columnconfigure(0, weight=1)
@@ -968,13 +1021,65 @@ class AdminScreen(ctk.CTkFrame):
         """Reset the form back to create mode."""
         self.operator_edit_id = None
         self.operator_username_var.set("")
-        self.operator_rfid_var.set("")
         self.operator_role_var.set("operator")
         self.operator_form_title.configure(text="Add User")
-        self.operator_form_hint.configure(text="Create a new user and bind RFID card.")
+        self.operator_form_hint.configure(text="Create a new user, then bind RFID below.")
         self.operator_save_btn.configure(text="Create User")
         self.operator_cancel_btn.configure(state="disabled")
         self.operator_delete_btn.configure(state="disabled")
+        # Reset unified bind state
+        self.bind_target_user_id = None
+        self.bind_target_label.configure(text="Select a user from the list")
+        self.unified_rfid_var.set("")
+        self.bind_rfid_status.configure(text="")
+
+    def _on_user_selected(self, event=None) -> None:
+        """Single-click on table: set bind target user."""
+        sel = self.users_table.selection()
+        if not sel:
+            return
+        user_id = int(sel[0])
+        users = {int(u.get("id")): u for u in self._users_cache}
+        user = users.get(user_id)
+        if user is None:
+            return
+        self.bind_target_user_id = user_id
+        name = _safe_text(user.get("username"))
+        role = _safe_text(user.get("role"))
+        self.bind_target_label.configure(text=f"Target: {name} ({role}) #{user_id}")
+        self.after_idle(self.unified_rfid_entry.focus_set)
+
+    def _on_bind_rfid(self) -> None:
+        """Bind scanned RFID to the selected user."""
+        if self.bind_target_user_id is None:
+            self.bind_rfid_status.configure(text="Select a user first.", text_color="orange")
+            return
+        rfid_uid = self.unified_rfid_var.get().strip()
+        if not rfid_uid:
+            self.bind_rfid_status.configure(text="Scan RFID card first.", text_color="orange")
+            return
+        try:
+            self.api.bind_user_rfid(self.bind_target_user_id, rfid_uid)
+        except Exception as exc:
+            self.bind_rfid_status.configure(text=str(exc), text_color="red")
+            return
+        self.unified_rfid_var.set("")
+        self.bind_rfid_status.configure(text="RFID bound successfully!", text_color="green")
+        self.refresh_operators()
+
+    def _on_clear_rfid(self) -> None:
+        """Clear RFID binding from the selected user."""
+        if self.bind_target_user_id is None:
+            return
+        if not messagebox.askyesno("Clear RFID", "Remove RFID binding from this user?"):
+            return
+        try:
+            self.api.clear_user_rfid(self.bind_target_user_id)
+        except Exception as exc:
+            self.bind_rfid_status.configure(text=str(exc), text_color="red")
+            return
+        self.bind_rfid_status.configure(text="RFID cleared.", text_color=TEXT_SECONDARY)
+        self.refresh_operators()
 
     def _on_save_user(self) -> None:
         """Create new user or update existing user's role."""
@@ -996,12 +1101,8 @@ class AdminScreen(ctk.CTkFrame):
             self.refresh_operators()
             self._set_status(f"User #{user_id} role changed to {new_role}.")
         else:
-            # Create mode
-            rfid_uid = self.operator_rfid_var.get().strip()
+            # Create mode — no RFID here, user will bind below
             role = self.operator_role_var.get().strip()
-            if not rfid_uid:
-                messagebox.showerror("Users", "Scan RFID card first.")
-                return
             try:
                 created = self.api.create_user({
                     "username": username,
@@ -1011,15 +1112,19 @@ class AdminScreen(ctk.CTkFrame):
                 user_id = int(created.get("id") or 0)
                 if user_id <= 0:
                     raise ValueError("API did not return a valid user id.")
-                self.api.bind_user_rfid(user_id, rfid_uid)
             except Exception as exc:
                 messagebox.showerror("Users", str(exc))
                 return
             self.operator_username_var.set("")
-            self.operator_rfid_var.set("")
             self.operator_role_var.set("operator")
             self.refresh_operators()
-            self._set_status(f"User {username} ({role}) created and RFID bound.")
+            # Auto-select the newly created user in the table and focus RFID entry
+            self.bind_target_user_id = user_id
+            created_user = {int(u.get("id")): u for u in self._users_cache}.get(user_id, {})
+            name = _safe_text(created_user.get("username") or username)
+            self.bind_target_label.configure(text=f"Target: {name} ({role}) #{user_id}")
+            self.after_idle(self.unified_rfid_entry.focus_set)
+            self._set_status(f"User {username} created. Now scan RFID to bind.")
 
     def _on_delete_user(self) -> None:
         """Delete the selected user after confirmation."""
@@ -1891,37 +1996,6 @@ class AdminScreen(ctk.CTkFrame):
         self.refresh_model_options()
         self.refresh_models_training()
         self._set_status("Model archive imported.")
-
-    # ------------------------------------------------------------------
-    # Operator behavior
-    def create_operator_from_rfid(self) -> None:
-        username = self.operator_username_var.get().strip()
-        rfid_uid = self.operator_rfid_var.get().strip()
-        if not username:
-            messagebox.showerror("Operators", "Username is required.")
-            return
-        if not rfid_uid:
-            messagebox.showerror("Operators", "Scan RFID first.")
-            return
-        try:
-            created = self.api.create_user(
-                {
-                    "username": username,
-                    "password": _random_password(),
-                    "role": "operator",
-                }
-            )
-            user_id = int(created.get("id") or 0)
-            if user_id <= 0:
-                raise ValueError("User API did not return a valid id.")
-            self.api.bind_user_rfid(user_id, rfid_uid)
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Operators", str(exc))
-            return
-        self.operator_username_var.set("")
-        self.operator_rfid_var.set("")
-        self.refresh_operators()
-        self._set_status(f"Operator {username} created and RFID bound.")
 
     # ------------------------------------------------------------------
     # Monitor behavior

@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_POLL_INTERVAL_S = 0.1  # 100ms seperti testall.py
+_POLL_INTERVAL_S = 0.2  # 200ms — gives time for response to arrive before next poll
 _INPUT_READ_COUNT = 8   # sesuai firmware
 _CMD_QUEUE_MAX = 64     # max queue depth, drop oldest if full
 
@@ -262,13 +262,15 @@ class PlcWorker:
         raise RuntimeError(f"write_coil addr={addr} failed after {max_retries} attempts")
 
     def _all_off(self, reason: str) -> None:
-        try:
-            self._adapter.all_off(self._num_channels)
-        except Exception as exc:
-            logger.error("[plc-worker] all_off failed: %s", exc)
+        logger.info("[plc-worker] ALL OFF — %s", reason)
+        for i in range(self._num_channels):
+            try:
+                self._write_coil(i, False)
+                logger.info("[plc-worker] coil[%d] OFF (ok)", i)
+            except Exception as exc:
+                logger.error("[plc-worker] coil[%d] OFF failed: %s", i, exc)
         self._last_clamp_off_at = time.time()
         self._set_state("IDLE")
-        logger.info("[plc-worker] ALL OFF — %s", reason)
 
     # -- ACCEPT: release clamp, CH1 pulse, back to IDLE --
 
@@ -428,6 +430,10 @@ class PlcWorker:
                     self._release_input_started_at = _now
                 # Only trigger if input has been stable high for debounce period
                 _stable_ms = (_now - self._release_input_started_at) * 1000.0
+                logger.debug(
+                    "[plc-worker] IN1 HIGH — stable %.0fms / debounce %dms",
+                    _stable_ms, self._release_input_debounce_ms,
+                )
                 if _stable_ms >= self._release_input_debounce_ms:
                     # Edge: only trigger once per activation cycle
                     if not self._release_input_triggered:
@@ -436,6 +442,8 @@ class PlcWorker:
                         self._all_off("input_1")
             else:
                 # Input went low — reset state for next edge
+                if self._release_input_started_at is not None and self._release_input_triggered:
+                    logger.debug("[plc-worker] IN1 LOW — release cycle complete")
                 self._release_input_started_at = None
                 self._release_input_triggered = False
 

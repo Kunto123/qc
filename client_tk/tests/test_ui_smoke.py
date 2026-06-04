@@ -890,10 +890,19 @@ class UiSmokeTest(unittest.TestCase):
             side_effect=bind_user_rfid,
         ):
             screen = AdminScreen(self.root, self.api, self.state)
-            screen.operator_username_var.set("operator-a")
-            screen.operator_rfid_var.set("RFID-1234")
 
-            screen.create_operator_from_rfid()
+            # Step 1: create user (RFID binding is now separate)
+            screen.operator_username_var.set("operator-a")
+            with mock.patch.object(screen, "refresh_operators"):
+                screen._on_save_user()
+
+            # After save, bind target is auto-set to the new user
+            self.assertEqual(screen.bind_target_user_id, 77)
+
+            # Step 2: scan RFID and bind via unified bind section
+            screen.unified_rfid_var.set("RFID-1234")
+            with mock.patch.object(screen, "refresh_operators"):
+                screen._on_bind_rfid()
 
             self.assertEqual(created_payloads[-1]["username"], "operator-a")
             self.assertEqual(created_payloads[-1]["role"], "operator")
