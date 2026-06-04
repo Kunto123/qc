@@ -34,7 +34,7 @@ from shared.contracts.streaming import (
     MSG_RESULT,
 )
 
-_JPEG_ENCODE_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, 85]
+_PNG_ENCODE = True  # Gunakan PNG lossless untuk inference WebSocket
 
 
 class FrameStreamService:
@@ -192,7 +192,7 @@ class FrameStreamService:
             tick = time.perf_counter()
             frame = get_frame()
             if frame is not None:
-                ok, encoded = cv2.imencode(".jpg", frame, _JPEG_ENCODE_PARAMS)
+                ok, encoded = cv2.imencode(".png", frame)
                 if ok:
                     seq = (seq + 1) & 0xFFFF_FFFF
                     await ws.send(struct.pack(">I", seq) + encoded.tobytes())

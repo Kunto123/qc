@@ -1647,9 +1647,9 @@ class OperatorScreen(ctk.CTkFrame):
                     _time.sleep(0.05)
                     continue
 
-                # Encode frame ke JPEG
+                # Encode frame ke PNG
                 t0 = _time.perf_counter()
-                ok, buffer = _cv2.imencode(".jpg", frame, [_cv2.IMWRITE_JPEG_QUALITY, 75])
+                ok, buffer = _cv2.imencode(".png", frame)
                 encode_ms = (_time.perf_counter() - t0) * 1000.0
                 if not ok:
                     raise RuntimeError("Failed to encode frame.")

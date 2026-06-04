@@ -1551,7 +1551,7 @@ class AdminScreen(ctk.CTkFrame):
             }
             _pr_roi = self.preset_roi_picker.get_roi("part_ready")
             roi["rotation"] = float(_pr_roi.get("rotation", 0.0))
-            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            _, buf = cv2.imencode(".png", frame)
             frame_b64 = base64.b64encode(buf).decode("ascii")
             result = self.api.capture_part_ready_ref(self.current_template_id, frame_b64, roi)
             if result.get("saved"):
