@@ -3043,7 +3043,7 @@ class AdminScreen(ctk.CTkFrame):
         right = ttk.LabelFrame(shell, text="Import / Detail", padding=8)
         right.grid(row=0, column=1, sticky="nsew")
 
-        import_frame = ttk.LabelFrame(right, text="Upload Model (.pt / .tflite)", padding=6)
+        import_frame = ttk.LabelFrame(right, text="Upload Model (.pt / .tflite / .onnx)", padding=6)
         import_frame.pack(fill="x")
         self._admin_import_path_var = tk.StringVar(value="No file selected")
         self._admin_import_name_var = tk.StringVar()
@@ -3056,6 +3056,7 @@ class AdminScreen(ctk.CTkFrame):
         ttk.Radiobutton(fmt_row, text="Auto-detect", variable=self._admin_import_format_var, value="auto").pack(side="left", padx=(4, 0))
         ttk.Radiobutton(fmt_row, text="PyTorch (.pt)", variable=self._admin_import_format_var, value="pt").pack(side="left", padx=(4, 0))
         ttk.Radiobutton(fmt_row, text="TFLite (.tflite)", variable=self._admin_import_format_var, value="tflite").pack(side="left", padx=(4, 0))
+        ttk.Radiobutton(fmt_row, text="ONNX (.onnx)", variable=self._admin_import_format_var, value="onnx").pack(side="left", padx=(4, 0))
         ttk.Button(import_frame, text="Choose File", command=self._admin_choose_import_file).pack(anchor="w")
         ttk.Label(import_frame, textvariable=self._admin_import_path_var, wraplength=300).pack(anchor="w", pady=(2, 0))
         ttk.Button(import_frame, text="Upload", command=self._admin_import_model).pack(anchor="w", pady=(4, 0))
@@ -3077,9 +3078,10 @@ class AdminScreen(ctk.CTkFrame):
     def _admin_choose_import_file(self) -> None:
         path = filedialog.askopenfilename(
             filetypes=[
-                ("All Model Files", "*.pt *.tflite"),
+                ("All Model Files", "*.pt *.tflite *.onnx"),
                 ("PyTorch Model", "*.pt"),
                 ("TFLite Model", "*.tflite"),
+                ("ONNX Model", "*.onnx"),
             ]
         )
         if path:
@@ -3089,6 +3091,8 @@ class AdminScreen(ctk.CTkFrame):
             ext = Path(path).suffix.lower()
             if ext == ".tflite":
                 self._admin_import_format_var.set("tflite")
+            elif ext == ".onnx":
+                self._admin_import_format_var.set("onnx")
             elif ext == ".pt":
                 self._admin_import_format_var.set("pt")
             # Auto-fill model name if empty
@@ -3115,6 +3119,8 @@ class AdminScreen(ctk.CTkFrame):
                 runtime = "ultralytics"
         elif fmt == "tflite":
             runtime = "tflite"
+        elif fmt == "onnx":
+            runtime = "onnx"
         else:
             runtime = "ultralytics"
         try:

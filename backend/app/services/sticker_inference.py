@@ -53,7 +53,7 @@ class StickerInferenceService:
 
     def _resolve_mode(self) -> str:
         mode = str(self._config.sticker_inference_mode or "auto").strip().lower()
-        return mode if mode in {"auto", "ultralytics", "classic", "tflite"} else "auto"
+        return mode if mode in {"auto", "ultralytics", "classic", "tflite", "onnx"} else "auto"
 
     def _resolve_model_path(self, vision: VisionConfig) -> str:
         direct = str(vision.model_path or "").strip()
@@ -122,6 +122,27 @@ class StickerInferenceService:
         with self._runtime_lock:
             self._loaded_models[resolved] = interpreter
         return interpreter
+
+    def _load_onnx_session(self, model_path: str):
+        """Load ONNX model via onnxruntime (CPU-friendly)."""
+        resolved = str(Path(model_path).resolve())
+        with self._runtime_lock:
+            sess = self._loaded_models.get(resolved)
+            if sess is not None:
+                return sess
+        try:
+            import onnxruntime as ort  # type: ignore
+        except ImportError:
+            raise ModuleNotFoundError(
+                "onnxruntime is required for ONNX inference. "
+                "Install it with: pip install onnxruntime"
+            )
+        opts = ort.SessionOptions()
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess = ort.InferenceSession(resolved, sess_options=opts, providers=["CPUExecutionProvider"])
+        with self._runtime_lock:
+            self._loaded_models[resolved] = sess
+        return sess
 
     def _resolve_device(self) -> DeviceResolution:
         return self._device_runtime.resolve()
@@ -349,6 +370,124 @@ class StickerInferenceService:
             "device_mode": "cpu",
             "effective_device": "cpu",
             "device_backend": "tflite",
+            "device_fallback_reason": None,
+            "gpu_available": False,
+        }
+
+    def _predict_onnx(
+        self, image, vision: VisionConfig, device_resolution: DeviceResolution, expected_class: str | None = None,
+    ) -> dict[str, Any]:
+        """Run inference via ONNX Runtime (CPU-friendly, no GPU needed)."""
+        import time as _time
+        t0 = _time.perf_counter()
+
+        model_path = self._resolve_model_path(vision)
+        if not model_path:
+            raise FileNotFoundError("Sticker model path is not configured.")
+        resolved_model_path = Path(model_path)
+        if not resolved_model_path.exists():
+            raise FileNotFoundError(f"ONNX model not found: {resolved_model_path}")
+
+        logger.info("[onnx] loading model: %s", resolved_model_path)
+        sess = self._load_onnx_session(str(resolved_model_path))
+        input_name = sess.get_inputs()[0].name
+        logger.info("[onnx] input_name=%s", input_name)
+
+        # Preprocess: resize to 640x640, BGR→RGB, normalize /255, float32
+        # Model expects NHWC [1, 640, 640, 3] (TFLite-origin ONNX, channel-last)
+        img_resized = cv2.resize(image, (640, 640))
+        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        img_norm = img_rgb.astype(np.float32) / 255.0
+        input_data = img_norm[np.newaxis, ...]  # [1, 640, 640, 3]
+        t1 = _time.perf_counter()
+        logger.info("[onnx] preprocess=%.1fms", (t1 - t0) * 1000)
+
+        # Inference
+        out = sess.run(None, {input_name: input_data})[0]  # [1, 6, 8400] or similar
+        t2 = _time.perf_counter()
+        logger.info("[onnx] invoke=%.1fms", (t2 - t1) * 1000)
+
+        # Parse output — YOLOv11 format: rows are [cx, cy, w, h, cls0_score, cls1_score, ...]
+        # No separate objectness score; class_probs ARE the confidence.
+        out = out[0]  # → [6, 8400] or [8400, 6]
+        if out.ndim == 2 and out.shape[0] < out.shape[1]:
+            out = out.T  # → [N, C]
+
+        candidates = []
+        for row in out:
+            class_scores = row[4:]
+            conf = float(np.max(class_scores))
+            if conf < float(vision.conf_threshold):
+                continue
+            class_id = int(np.argmax(class_scores))
+            xc, yc, w_b, h_b = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+            x1 = max(0.0, xc - w_b / 2)
+            y1 = max(0.0, yc - h_b / 2)
+            x2 = min(1.0, xc + w_b / 2)
+            y2 = min(1.0, yc + h_b / 2)
+            candidates.append((conf, class_id, x1, y1, x2, y2))
+
+        # NMS
+        detections = []
+        if candidates:
+            boxes_cv = [[c[2], c[3], c[4] - c[2], c[5] - c[3]] for c in candidates]
+            scores_cv = [c[0] for c in candidates]
+            indices = cv2.dnn.NMSBoxes(boxes_cv, scores_cv, float(vision.conf_threshold), 0.45)
+            if len(indices) > 0:
+                for idx in indices.flatten():
+                    conf, class_id, x1, y1, x2, y2 = candidates[int(idx)]
+                    detections.append({
+                        "label": str(class_id),
+                        "confidence": round(conf, 4),
+                        "class_confidence": round(conf, 4),
+                        "class_id": class_id,
+                        "position": {
+                            "x1": round(x1, 4), "y1": round(y1, 4),
+                            "x2": round(x2, 4), "y2": round(y2, 4),
+                        },
+                        "bbox": [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)],
+                    })
+
+        t3 = _time.perf_counter()
+        logger.info("[onnx] total=%.1fms parse=%.1fms raw=%d filtered=%d",
+                     (t3 - t0) * 1000, (t3 - t2) * 1000, len(candidates), len(detections))
+
+        # Load class names
+        meta = self._load_meta(self._resolve_meta_path(vision))
+        class_names = meta.get("class_names", [])
+        names_map = {i: name for i, name in enumerate(class_names)}
+
+        allowed_label_values = [str(label) for label in (vision.classes or []) if str(label).strip()]
+        if expected_class and str(expected_class).strip():
+            allowed_label_values.append(str(expected_class).strip())
+        if allowed_label_values:
+            for label in (getattr(vision, "text_anchor_class", ""), getattr(vision, "center_dot_class", "")):
+                if str(label or "").strip():
+                    allowed_label_values.append(str(label))
+        allowed_labels = {label.strip().lower() for label in allowed_label_values} or None
+
+        filtered = []
+        for det in detections:
+            label = names_map.get(det["class_id"], str(det["class_id"]))
+            det["label"] = label
+            if allowed_labels is not None:
+                if label.strip().lower() not in allowed_labels:
+                    continue
+            filtered.append(det)
+
+        return {
+            "backend": "onnx",
+            "mode": "onnx",
+            "model_path": str(resolved_model_path),
+            "meta_path": self._resolve_meta_path(vision) or None,
+            "class_names": class_names,
+            "detections": filtered,
+            "raw_detection_count": len(candidates),
+            "allowed_labels_filter": sorted(allowed_labels) if allowed_labels is not None else None,
+            "fallback_reason": None,
+            "device_mode": "cpu",
+            "effective_device": "cpu",
+            "device_backend": "onnx",
             "device_fallback_reason": None,
             "gpu_available": False,
         }
@@ -1142,6 +1281,8 @@ class StickerInferenceService:
             model_path = self._resolve_model_path(vision)
             if model_path and Path(model_path).suffix.lower() == ".tflite":
                 mode = "tflite"
+            elif model_path and Path(model_path).suffix.lower() == ".onnx":
+                mode = "onnx"
             else:
                 mode = "ultralytics"
 
@@ -1162,6 +1303,29 @@ class StickerInferenceService:
                 logging.warning("TFLite inference failed, fallback to classic: %s", exc)
                 payload = self._predict_classic(image, vision, expected_class)
                 payload["fallback_reason"] = f"tflite_error: {exc}"
+                return self._augment_with_anchor_ocr(
+                    payload, image, vision,
+                    expected_class=expected_class, sticker_rule=sticker_rule,
+                )
+
+        # ONNX mode: CPU-only via onnxruntime
+        if mode == "onnx":
+            try:
+                device_resolution = self._resolve_device()
+                payload = self._predict_onnx(image, vision, device_resolution, expected_class=expected_class)
+                if use_sticker_only:
+                    return self._augment_with_ocr_only(
+                        payload, image, vision,
+                        expected_class=expected_class, sticker_rule=sticker_rule,
+                    )
+                return self._augment_with_anchor_ocr(
+                    payload, image, vision,
+                    expected_class=expected_class, sticker_rule=sticker_rule,
+                )
+            except Exception as exc:
+                logging.warning("ONNX inference failed, fallback to classic: %s", exc)
+                payload = self._predict_classic(image, vision, expected_class)
+                payload["fallback_reason"] = f"onnx_error: {exc}"
                 return self._augment_with_anchor_ocr(
                     payload, image, vision,
                     expected_class=expected_class, sticker_rule=sticker_rule,
