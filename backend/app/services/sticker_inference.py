@@ -287,9 +287,10 @@ class StickerInferenceService:
         h_in, w_in = int(input_shape[1]), int(input_shape[2])
         img_resized = cv2.resize(image, (w_in, h_in))
         img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
-        img_normalized = img_rgb.astype(input_dtype)
-        if input_dtype == np.float32:
-            img_normalized = img_normalized / 255.0
+        if np.issubdtype(input_dtype, np.floating):
+            img_normalized = (img_rgb.astype(np.float32) / 255.0).astype(input_dtype)
+        else:
+            img_normalized = img_rgb.astype(input_dtype)
         input_data = np.expand_dims(img_normalized, axis=0)
         t1 = _time.perf_counter()
         logger.info("[tflite] preprocess=%.1fms", (t1 - t0) * 1000)
@@ -312,15 +313,19 @@ class StickerInferenceService:
                     out = out.T
                 raw_box_count = int(out.shape[0])
                 for row in out:
-                    conf = float(row[4]) if len(row) > 4 else 0.0
-                    if conf < float(vision.conf_threshold):
-                        continue
-                    class_id = int(row[5]) if len(row) > 5 else 0
-                    xc, yc, w_b, h_b = float(row[0]), float(row[1]), float(row[2]), float(row[3])
-                    x1 = max(0.0, xc - w_b / 2)
-                    y1 = max(0.0, yc - h_b / 2)
-                    x2 = min(1.0, xc + w_b / 2)
-                    y2 = min(1.0, yc + h_b / 2)
+                    candidates = []
+                    for row in out:
+                        class_scores = row[4:]
+                        conf = float(np.max(class_scores))
+                        if conf < float(vision.conf_threshold):
+                            continue
+                        class_id = int(np.argmax(class_scores))
+                        xc, yc, w_b, h_b = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+                        x1 = max(0.0, xc - w_b / 2)
+                        y1 = max(0.0, yc - h_b / 2)
+                        x2 = min(1.0, xc + w_b / 2)
+                        y2 = min(1.0, yc + h_b / 2)
+                        candidates.append((conf, class_id, x1, y1, x2, y2))
                     detections.append({
                         "label": str(class_id),
                         "confidence": round(conf, 4),
@@ -441,10 +446,7 @@ class StickerInferenceService:
                         "confidence": round(conf, 4),
                         "class_confidence": round(conf, 4),
                         "class_id": class_id,
-                        "position": {
-                            "x1": round(x1, 4), "y1": round(y1, 4),
-                            "x2": round(x2, 4), "y2": round(y2, 4),
-                        },
+                        "position": {"x1": round(x1, 4), "y1": round(y1, 4), "x2": round(x2, 4), "y2": round(y2, 4)},
                         "bbox": [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)],
                     })
 
