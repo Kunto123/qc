@@ -264,8 +264,6 @@ class InspectionSessionService:
                     state.part_ready_unsettled_at = None
                     state.consecutive_part_ready_frames = 0          # ← reset untuk part berikutnya
                     state.part_ready_settle_started_at = None
-                    if self._plc_worker is not None:
-                        self._plc_worker.unlock_cycle(reason="part_removed_stable")
                     state.last_inference_ms = 0
                     # Unlock PLC cycle
                     if self._plc_worker is not None:
@@ -290,7 +288,6 @@ class InspectionSessionService:
         state.plc_clamp_event_id = None
         state.operator_sticker_delay_started_at = 0.0
         state.operator_sticker_ready_at = 0.0
-        state.accept_cycle_started_at = None
 
     def _clamp_gate_status(self, state: SessionState, *, part_ready_settled: bool, now_s: float) -> tuple[bool, dict[str, Any]]:
         if self._plc_worker is None:
@@ -990,8 +987,9 @@ class InspectionSessionService:
                 # New inference result since last counted — record it
                 state.inference_last_counted_generation = state.inference_result_generation
                 _now_s = time.time()
-                # Check if accept_window has expired since first accept reading
-                if state.inference_accept_first_ts > 0:
+                # Check if accept_window has expired since first accept reading.
+                # Skip window check when accept_stable_ms=0 (no time threshold).
+                if state.inference_accept_first_ts > 0 and self._accept_stable_ms > 0:
                     _accept_window_ms = (_now_s - state.inference_accept_first_ts) * 1000.0
                     if _accept_window_ms > self._accept_stable_ms * 3:
                         # Window expired — reset and start fresh
@@ -999,6 +997,9 @@ class InspectionSessionService:
                         state.inference_accept_first_ts = _now_s
                     else:
                         state.inference_accept_count += 1
+                elif state.inference_accept_first_ts > 0:
+                    # accept_stable_ms=0: count every generation, no time window gate
+                    state.inference_accept_count += 1
                 else:
                     state.inference_accept_count = 1
                     state.inference_accept_first_ts = _now_s
@@ -1283,6 +1284,13 @@ class InspectionSessionService:
                     session_id, time.time() - last, self._idle_timeout_s,
                 )
                 state.status = SessionStatus.STOPPED
+                # Shutdown background inference executor to prevent thread leak
+                if state._inference_executor is not None:
+                    try:
+                        state._inference_executor.shutdown(wait=False)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    state._inference_executor = None
                 with self._lock:
                     self._sessions.pop(session_id, None)
                 raise ValueError("Inspection session stopped: idle timeout reached.")

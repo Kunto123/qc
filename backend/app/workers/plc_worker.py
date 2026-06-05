@@ -382,21 +382,22 @@ class PlcWorker:
 
     def _loop(self) -> None:
         while not self._stop_event.is_set():
-            # Process all pending commands first
-            while True:
-                cmd = self._dequeue_cmd()
-                if cmd is None:
-                    break
-                self._handle_cmd(cmd)
+            try:
+                # Process all pending commands first
+                while True:
+                    cmd = self._dequeue_cmd()
+                    if cmd is None:
+                        break
+                    self._handle_cmd(cmd)
 
-            # Check accept pulse timeout
-            if self._accept_pulse_end is not None and time.time() >= self._accept_pulse_end:
-                self._finish_accept_pulse()
+                # Check accept pulse timeout
+                if self._accept_pulse_end is not None and time.time() >= self._accept_pulse_end:
+                    self._finish_accept_pulse()
 
-            # Poll inputs
-            self._poll_inputs()
-
-            # Wait for next cycle or command signal
+                # Poll inputs
+                self._poll_inputs()
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[plc-worker] _loop unhandled exception: %s", exc, exc_info=True)
             self._cmd_event.wait(timeout=_POLL_INTERVAL_S)
             self._cmd_event.clear()
 

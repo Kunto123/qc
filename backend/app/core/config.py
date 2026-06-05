@@ -95,10 +95,10 @@ class AppConfig:
     # adjust sticker before final decision. Default 1500ms.
     commit_grace_ms: int = max(0, int(os.getenv("QC_SUITE_STICKER_COMMIT_GRACE_MS", "1500")))
     # Stability thresholds for commit:
-    # accept: minimal consecutive stable frames before commit (default 2).
-    accept_stable_frames: int = max(1, int(os.getenv("QC_SUITE_ACCEPT_STABLE_FRAMES", "2")))
-    # accept: minimal stable elapsed ms before commit (default 3000).
-    accept_stable_ms: int = max(0, int(os.getenv("QC_SUITE_ACCEPT_STABLE_MS", "3000")))
+    # accept: minimal consecutive stable frames before commit (default 1).
+    accept_stable_frames: int = max(1, int(os.getenv("QC_SUITE_ACCEPT_STABLE_FRAMES", "1")))
+    # accept: minimal stable elapsed ms before commit (default 200).
+    accept_stable_ms: int = max(0, int(os.getenv("QC_SUITE_ACCEPT_STABLE_MS", "200")))
     # Detection holdover: when ACCEPT transitions to NOT_FOUND briefly,
     # hold the ACCEPT state for this duration before resetting stability.
     # 0 = disabled (legacy: reset immediately on key change).

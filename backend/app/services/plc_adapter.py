@@ -231,7 +231,7 @@ def build_plc_adapter(config) -> PlcAdapter:
             host=config.plc_host or "127.0.0.1",
             port=config.plc_port or 502,
             slave_id=config.plc_modbus_unit_id,
-            timeout=0.5,
+            timeout=config.plc_timeout_ms / 1000.0,
         )
     else:
         return DryRunPlcAdapter()

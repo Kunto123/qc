@@ -350,11 +350,18 @@ def push_worker_status():
 @inspection_blueprint.get("/inspections/export")
 @require_auth
 def export_inspections():
+    try:
+        template_version_id = (
+            int(request.args["template_version_id"])
+            if request.args.get("template_version_id") else None
+        )
+    except (ValueError, TypeError):
+        return jsonify({"error": "template_version_id must be an integer"}), 400
     items = inspection_results_repo.list_results(
         line_id=request.args.get("line_id") or None,
         station_id=request.args.get("station_id") or None,
         part_name=request.args.get("part_name") or None,
-        template_version_id=int(request.args["template_version_id"]) if request.args.get("template_version_id") else None,
+        template_version_id=template_version_id,
         decision_code=request.args.get("decision_code") or None,
         limit=10000,
         offset=0,
