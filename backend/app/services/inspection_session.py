@@ -275,6 +275,9 @@ class InspectionSessionService:
                     state.plc_clamp_event_id = None
                     state.operator_sticker_delay_started_at = 0.0
                     state.operator_sticker_ready_at = 0.0
+                    # PLC IDLE = siklus hardware selesai definitif → buka gate untuk cycle berikutnya
+                    state.awaiting_part_removal_after_commit = False
+                    state.part_absent_started_at = None
             logger.info(
                 "[inspection] PLC returned IDLE - next-part delay %dms started",
                 self._phase_next_part_delay_ms,
