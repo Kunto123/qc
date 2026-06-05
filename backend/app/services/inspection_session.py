@@ -278,6 +278,14 @@ class InspectionSessionService:
                     # PLC IDLE = siklus hardware selesai definitif → buka gate untuk cycle berikutnya
                     state.awaiting_part_removal_after_commit = False
                     state.part_absent_started_at = None
+                    # Reset accept-cycle counters — mencegah commit instan dari akumulasi selama hold
+                    state.accept_cycle_started_at = None
+                    state.policy_stable_frames = 0
+                    state.policy_stable_started_at = None
+                    state.policy_holdover_expires_at = None
+                    state.inference_accept_count = 0
+                    state.inference_last_counted_generation = -1
+                    state.inference_accept_first_ts = 0.0
             logger.info(
                 "[inspection] PLC returned IDLE - next-part delay %dms started",
                 self._phase_next_part_delay_ms,
