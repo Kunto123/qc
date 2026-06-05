@@ -612,7 +612,7 @@ class InspectionSessionService:
         # Jika sudah latched, abaikan raw state — tetap settled.
         # ------------------------------------------------------------------
         _settle_frames = int(
-            getattr(state.template.sticker, "part_ready_settle_frames", 5) or 5
+            getattr(state.template.sticker, "part_ready_settle_frames", 2) or 2
         )
         _settle_now = datetime.now(UTC)
         _raw_part_ready = part_ready.get("part_ready", False)
@@ -798,7 +798,7 @@ class InspectionSessionService:
         if _effective_pr_ready:
             state.inference_frame_counter += 1
             _should_submit = (
-                state.inference_frame_counter % 3 == 0
+                state.inference_frame_counter % 1 == 0
                 and not state.inference_thread_busy
             )
             if _should_submit:
