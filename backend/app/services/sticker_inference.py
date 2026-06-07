@@ -303,6 +303,7 @@ class StickerInferenceService:
         logger.info("[tflite] invoke=%.1fms", (t2 - t1) * 1000)
 
         # Parse output
+        candidates = []
         raw_box_count = 0
         detections = []
         if output_data is not None and output_data.size > 0:
@@ -313,31 +314,38 @@ class StickerInferenceService:
                     out = out.T
                 raw_box_count = int(out.shape[0])
                 for row in out:
-                    candidates = []
-                    for row in out:
-                        class_scores = row[4:]
-                        conf = float(np.max(class_scores))
-                        if conf < float(vision.conf_threshold):
-                            continue
-                        class_id = int(np.argmax(class_scores))
-                        xc, yc, w_b, h_b = float(row[0]), float(row[1]), float(row[2]), float(row[3])
-                        x1 = max(0.0, xc - w_b / 2)
-                        y1 = max(0.0, yc - h_b / 2)
-                        x2 = min(1.0, xc + w_b / 2)
-                        y2 = min(1.0, yc + h_b / 2)
-                        candidates.append((conf, class_id, x1, y1, x2, y2))
-                    detections.append({
-                        "label": str(class_id),
-                        "confidence": round(conf, 4),
-                        "class_confidence": round(conf, 4),
-                        "class_id": class_id,
-                        "position": {"x1": round(x1, 4), "y1": round(y1, 4), "x2": round(x2, 4), "y2": round(y2, 4)},
-                        "bbox": [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)],
-                    })
+                    class_scores = row[4:]
+                    conf = float(np.max(class_scores))
+                    if conf < float(vision.conf_threshold):
+                        continue
+                    class_id = int(np.argmax(class_scores))
+                    xc, yc, w_b, h_b = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+                    x1 = max(0.0, xc - w_b / 2)
+                    y1 = max(0.0, yc - h_b / 2)
+                    x2 = min(1.0, xc + w_b / 2)
+                    y2 = min(1.0, yc + h_b / 2)
+                    candidates.append((conf, class_id, x1, y1, x2, y2))
+
+                # NMS — remove duplicate overlapping boxes
+                if candidates:
+                    boxes_cv = [[c[2], c[3], c[4] - c[2], c[5] - c[3]] for c in candidates]
+                    scores_cv = [c[0] for c in candidates]
+                    indices = cv2.dnn.NMSBoxes(boxes_cv, scores_cv, float(vision.conf_threshold), 0.45)
+                    if len(indices) > 0:
+                        for idx in indices.flatten():
+                            conf, class_id, x1, y1, x2, y2 = candidates[int(idx)]
+                            detections.append({
+                                "label": str(class_id),
+                                "confidence": round(conf, 4),
+                                "class_confidence": round(conf, 4),
+                                "class_id": class_id,
+                                "position": {"x1": round(x1, 4), "y1": round(y1, 4), "x2": round(x2, 4), "y2": round(y2, 4)},
+                                "bbox": [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)],
+                            })
 
         t3 = _time.perf_counter()
         logger.info("[tflite] total=%.1fms parse=%.1fms raw=%d filtered=%d",
-                     (t3 - t0) * 1000, (t3 - t2) * 1000, raw_box_count, len(detections))
+                     (t3 - t0) * 1000, (t3 - t2) * 1000, len(candidates), len(detections))
 
         # Load class names and filter
         meta = self._load_meta(self._resolve_meta_path(vision))
