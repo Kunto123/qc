@@ -275,9 +275,6 @@ class InspectionSessionService:
                     state.plc_clamp_event_id = None
                     state.operator_sticker_delay_started_at = 0.0
                     state.operator_sticker_ready_at = 0.0
-                    # PLC IDLE = siklus hardware selesai definitif → buka gate untuk cycle berikutnya
-                    state.awaiting_part_removal_after_commit = False
-                    state.part_absent_started_at = None
                     # Reset accept-cycle counters — mencegah commit instan dari akumulasi selama hold
                     state.accept_cycle_started_at = None
                     state.policy_stable_frames = 0
