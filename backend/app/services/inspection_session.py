@@ -387,6 +387,20 @@ class InspectionSessionService:
                 "elapsed_ms": round(elapsed_ms, 1),
                 "fallback_delay_ms": self._plc_clamp_feedback_fallback_delay_ms,
             }
+        if not feedback_ready:
+            # PLC masih IDLE — enqueue_part_ready diblock (reclamp interval / cycle lock).
+            # Reset agar session retry di frame berikutnya.
+            state.plc_part_ready_triggered = False
+            state.plc_clamp_requested_at = 0.0
+            state.plc_clamp_ready_at = 0.0
+            return False, {
+                "enabled": True,
+                "feedback_enabled": False,
+                "status": "clamping",
+                "ready": False,
+                "elapsed_ms": round(elapsed_ms, 1),
+                "fallback_delay_ms": self._plc_clamp_feedback_fallback_delay_ms,
+            }
         if not state.plc_clamp_ready_at:
             state.plc_clamp_ready_at = now_s
         return True, {
