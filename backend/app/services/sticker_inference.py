@@ -433,9 +433,12 @@ class StickerInferenceService:
             if model is not None:
                 return model
         try:
-            from openvino.runtime import Core  # type: ignore
+            from openvino import Core  # type: ignore  # OpenVINO 2024.x+
         except ImportError:
-            raise ModuleNotFoundError("openvino required: pip install openvino")
+            try:
+                from openvino.runtime import Core  # type: ignore  # Legacy 2022.x–2023.x
+            except ImportError:
+                raise ModuleNotFoundError("openvino required: pip install openvino")
         ie = Core()
         ov_model = ie.read_model(model=resolved)
         _n = getattr(self._config, "inference_num_threads", 4)
