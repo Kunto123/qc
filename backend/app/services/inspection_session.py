@@ -292,8 +292,8 @@ class InspectionSessionService:
                     #           (cocok jika operator tidak wajib angkat part sebelum re-clamp)
                     # NON-AKTIF: comment 2 baris di bawah → sistem tetap tunggu part pergi dari kamera
                     #           (cocok jika wajib angkat part dulu, mencegah double-ACCEPT sticker sama)
-                    #state.awaiting_part_removal_after_commit = False  # [TOGGLE]
-                    #state.part_absent_started_at = None               # [TOGGLE]
+                    state.awaiting_part_removal_after_commit = False  # [TOGGLE]
+                    state.part_absent_started_at = None               # [TOGGLE]
             logger.info(
                 "[inspection] PLC returned IDLE - next-part delay %dms started",
                 self._phase_next_part_delay_ms,
