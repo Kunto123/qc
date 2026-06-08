@@ -68,6 +68,12 @@ class StickerInferenceService:
         model_record = self._models_repo.find_by_path(self._resolve_model_path(vision))
         if model_record and model_record.get("meta_path"):
             return str(model_record["meta_path"]).strip()
+        # Auto-discover: look for a .json file with the same stem as the model file
+        model_path = self._resolve_model_path(vision)
+        if model_path:
+            sibling = Path(model_path).with_suffix(".json")
+            if sibling.exists():
+                return str(sibling)
         return str(self._config.default_sticker_model_meta_path or "").strip()
 
     def _load_meta(self, meta_path: str) -> dict[str, Any]:
@@ -119,9 +125,18 @@ class StickerInferenceService:
                     except TypeError:
                         interpreter = Interpreter(model_path=resolved)
             except ImportError:
-                raise ModuleNotFoundError(
-                    "tflite-runtime required: pip install tflite-runtime"
-                )
+                try:
+                    import tensorflow as tf  # type: ignore
+                    Interpreter = tf.lite.Interpreter
+                    try:
+                        interpreter = Interpreter(model_path=resolved, num_threads=num_threads)
+                    except TypeError:
+                        interpreter = Interpreter(model_path=resolved)
+                except ImportError:
+                    raise ModuleNotFoundError(
+                        "TFLite runtime not found. Install one of: "
+                        "pip install ai-edge-litert | pip install tflite-runtime | pip install tensorflow"
+                    )
         interpreter.allocate_tensors()
         with self._runtime_lock:
             self._loaded_models[cache_key] = interpreter
@@ -365,6 +380,7 @@ class StickerInferenceService:
                     candidates.append((conf, class_id, x1, y1, x2, y2))
 
                 # NMS — remove duplicate overlapping boxes
+                roi_h, roi_w = image.shape[:2]
                 if candidates:
                     boxes_cv = [[c[2], c[3], c[4] - c[2], c[5] - c[3]] for c in candidates]
                     scores_cv = [c[0] for c in candidates]
@@ -377,8 +393,13 @@ class StickerInferenceService:
                                 "confidence": round(conf, 4),
                                 "class_confidence": round(conf, 4),
                                 "class_id": class_id,
-                                "position": {"x1": round(x1, 4), "y1": round(y1, 4), "x2": round(x2, 4), "y2": round(y2, 4)},
-                                "bbox": [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)],
+                                "position": {
+                                    "x1": round(x1 * roi_w, 2),
+                                    "y1": round(y1 * roi_h, 2),
+                                    "x2": round(x2 * roi_w, 2),
+                                    "y2": round(y2 * roi_h, 2),
+                                },
+                                "bbox": [round(x1 * roi_w, 2), round(y1 * roi_h, 2), round(x2 * roi_w, 2), round(y2 * roi_h, 2)],
                             })
 
         t3 = _time.perf_counter()
@@ -403,7 +424,10 @@ class StickerInferenceService:
         for det in detections:
             label = names_map.get(det["class_id"], str(det["class_id"]))
             det["label"] = label
-            if allowed_labels is not None:
+            # Only filter by label name when class mapping is available.
+            # Without meta file names_map is empty — skip filter instead of
+            # silently discarding every detection.
+            if names_map and allowed_labels is not None:
                 if label.strip().lower() not in allowed_labels:
                     continue
             filtered.append(det)
@@ -517,6 +541,7 @@ class StickerInferenceService:
                     y2 = min(1.0, (y2_padded - _pad_top) / h_content) if h_content > 0 else 1.0
                     candidates.append((conf, class_id, x1, y1, x2, y2))
 
+        roi_h, roi_w = image.shape[:2]
         if candidates:
             boxes_cv = [[c[2], c[3], c[4] - c[2], c[5] - c[3]] for c in candidates]
             scores_cv = [c[0] for c in candidates]
@@ -529,8 +554,13 @@ class StickerInferenceService:
                         "confidence": round(conf, 4),
                         "class_confidence": round(conf, 4),
                         "class_id": class_id,
-                        "position": {"x1": round(x1, 4), "y1": round(y1, 4), "x2": round(x2, 4), "y2": round(y2, 4)},
-                        "bbox": [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)],
+                        "position": {
+                            "x1": round(x1 * roi_w, 2),
+                            "y1": round(y1 * roi_h, 2),
+                            "x2": round(x2 * roi_w, 2),
+                            "y2": round(y2 * roi_h, 2),
+                        },
+                        "bbox": [round(x1 * roi_w, 2), round(y1 * roi_h, 2), round(x2 * roi_w, 2), round(y2 * roi_h, 2)],
                     })
 
         t3 = _time.perf_counter()
@@ -549,7 +579,7 @@ class StickerInferenceService:
         for det in detections:
             label = names_map.get(det["class_id"], str(det["class_id"]))
             det["label"] = label
-            if allowed_labels is not None and label.strip().lower() not in allowed_labels:
+            if names_map and allowed_labels is not None and label.strip().lower() not in allowed_labels:
                 continue
             filtered.append(det)
 
@@ -631,6 +661,7 @@ class StickerInferenceService:
 
         # NMS
         detections = []
+        roi_h, roi_w = image.shape[:2]
         if candidates:
             boxes_cv = [[c[2], c[3], c[4] - c[2], c[5] - c[3]] for c in candidates]
             scores_cv = [c[0] for c in candidates]
@@ -643,8 +674,13 @@ class StickerInferenceService:
                         "confidence": round(conf, 4),
                         "class_confidence": round(conf, 4),
                         "class_id": class_id,
-                        "position": {"x1": round(x1, 4), "y1": round(y1, 4), "x2": round(x2, 4), "y2": round(y2, 4)},
-                        "bbox": [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)],
+                        "position": {
+                            "x1": round(x1 * roi_w, 2),
+                            "y1": round(y1 * roi_h, 2),
+                            "x2": round(x2 * roi_w, 2),
+                            "y2": round(y2 * roi_h, 2),
+                        },
+                        "bbox": [round(x1 * roi_w, 2), round(y1 * roi_h, 2), round(x2 * roi_w, 2), round(y2 * roi_h, 2)],
                     })
 
         t3 = _time.perf_counter()
@@ -669,7 +705,7 @@ class StickerInferenceService:
         for det in detections:
             label = names_map.get(det["class_id"], str(det["class_id"]))
             det["label"] = label
-            if allowed_labels is not None:
+            if names_map and allowed_labels is not None:
                 if label.strip().lower() not in allowed_labels:
                     continue
             filtered.append(det)
