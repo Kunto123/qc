@@ -137,6 +137,13 @@ class AppConfig:
     # Default 10000 = 10 seconds. Increase this on slow edge PCs where YOLO
     # inference takes >500ms per run.
     inference_cache_ttl_ms: int = max(100, int(os.getenv("QC_SUITE_INFERENCE_CACHE_TTL_MS", "10000")))
+    # Thread count for all inference backends (TFLite, ONNX, OpenVINO).
+    # 4 recommended for i3-1315U (2 P-cores × 2 HT + 2 E-cores).
+    # 0 = let backend choose (risky: OS may over-schedule).
+    inference_num_threads: int = max(1, int(os.getenv("QC_SUITE_INFERENCE_NUM_THREADS", "4")))
+    # Max seconds to wait for inference result before resetting busy flag.
+    # Prevents hung YOLO inference from silently blocking detection forever.
+    inference_timeout_s: float = max(1.0, float(os.getenv("QC_SUITE_INFERENCE_TIMEOUT_S", "5.0")))
 
     stream_port: int = max(1, int(os.getenv("QC_SUITE_STREAM_PORT", "8101")))
     stream_host: str = os.getenv("QC_SUITE_STREAM_HOST", "").strip()

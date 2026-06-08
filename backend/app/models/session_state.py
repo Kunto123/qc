@@ -61,6 +61,7 @@ class SessionState:
     inference_result_ts: float = 0.0
     inference_frame_counter: int = 0
     inference_thread_busy: bool = False
+    inference_submit_at: float = 0.0  # monotonic timestamp when last inference was submitted
     _inference_executor: concurrent.futures.ThreadPoolExecutor | None = None  # lazy-init per session
     # Inference generation counter — incremented each time a new inference result
     # is committed to the cache. Used by the accept gate to count distinct

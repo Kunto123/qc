@@ -239,6 +239,10 @@ class InspectionSessionService:
             max(100, int(app_config.inference_cache_ttl_ms))
             if app_config is not None else 10000
         )
+        self._inference_timeout_s: float = (
+            max(1.0, float(getattr(app_config, "inference_timeout_s", 5.0)))
+            if app_config is not None else 5.0
+        )
         # Register PLC state change callback
         if self._plc_worker is not None:
             self._plc_worker.set_on_state_change_callback(self._on_plc_state_change)
@@ -805,12 +809,25 @@ class InspectionSessionService:
         # Use cached result if fresh (<500ms), otherwise compose without bbox.
         if _effective_pr_ready:
             state.inference_frame_counter += 1
+            # Inference timeout guard: reset stuck busy flag
+            if (
+                state.inference_thread_busy
+                and state.inference_submit_at > 0
+                and (monotonic() - state.inference_submit_at) > self._inference_timeout_s
+            ):
+                logger.warning(
+                    "[inference] timeout after %.0fs — resetting busy flag for session %s",
+                    self._inference_timeout_s, state.session_id[:8],
+                )
+                state.inference_thread_busy = False
+                state.inference_submit_at = 0.0
             _should_submit = (
                 state.inference_frame_counter % 1 == 0
                 and not state.inference_thread_busy
             )
             if _should_submit:
                 state.inference_thread_busy = True
+                state.inference_submit_at = monotonic()
                 # Lazy-init executor per session
                 if state._inference_executor is None:
                     state._inference_executor = concurrent.futures.ThreadPoolExecutor(

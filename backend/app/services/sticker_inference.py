@@ -53,7 +53,7 @@ class StickerInferenceService:
 
     def _resolve_mode(self) -> str:
         mode = str(self._config.sticker_inference_mode or "auto").strip().lower()
-        return mode if mode in {"auto", "ultralytics", "classic", "tflite", "onnx"} else "auto"
+        return mode if mode in {"auto", "ultralytics", "classic", "tflite", "onnx", "openvino"} else "auto"
 
     def _resolve_model_path(self, vision: VisionConfig) -> str:
         direct = str(vision.model_path or "").strip()
@@ -92,17 +92,19 @@ class StickerInferenceService:
         from ultralytics import YOLO  # type: ignore
         return YOLO
 
-    def _load_tflite_interpreter(self, model_path: str):
+    def _load_tflite_interpreter(self, model_path: str, num_threads: int = 4):
         """Load TFLite model via tflite_runtime (lightweight, no tensorflow needed)."""
         resolved = str(Path(model_path).resolve())
+        # Cache key includes thread count so different configs get separate instances
+        cache_key = f"{resolved}::t{num_threads}"
         with self._runtime_lock:
-            interp = self._loaded_models.get(resolved)
+            interp = self._loaded_models.get(cache_key)
             if interp is not None:
                 return interp
         try:
             from ai_edge_litert.interpreter import Interpreter  # type: ignore
-            interpreter = Interpreter(model_path=resolved)
-        except ImportError:
+            interpreter = Interpreter(model_path=resolved, num_threads=num_threads)
+        except (ImportError, TypeError):
             try:
                 import warnings
                 with warnings.catch_warnings():
@@ -112,15 +114,17 @@ class StickerInferenceService:
                         category=UserWarning,
                     )
                     from tflite_runtime.interpreter import Interpreter  # type: ignore
-                    interpreter = Interpreter(model_path=resolved)
+                    try:
+                        interpreter = Interpreter(model_path=resolved, num_threads=num_threads)
+                    except TypeError:
+                        interpreter = Interpreter(model_path=resolved)
             except ImportError:
                 raise ModuleNotFoundError(
-                    "tflite-runtime is required for TFLite inference. "
-                    "Install it with: pip install tflite-runtime"
+                    "tflite-runtime required: pip install tflite-runtime"
                 )
         interpreter.allocate_tensors()
         with self._runtime_lock:
-            self._loaded_models[resolved] = interpreter
+            self._loaded_models[cache_key] = interpreter
         return interpreter
 
     def _load_onnx_session(self, model_path: str):
@@ -139,6 +143,9 @@ class StickerInferenceService:
             )
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        _n = getattr(self._config, "inference_num_threads", 4)
+        opts.intra_op_num_threads = _n   # threads within one op (matmul, conv)
+        opts.inter_op_num_threads = 1    # parallel between ops — 1 sufficient for small models
         sess = ort.InferenceSession(resolved, sess_options=opts, providers=["CPUExecutionProvider"])
         with self._runtime_lock:
             self._loaded_models[resolved] = sess
@@ -208,6 +215,28 @@ class StickerInferenceService:
         text = str(value or "").strip().lower()
         return "".join(ch for ch in text if ch.isalnum())
 
+    @staticmethod
+    def _letterbox(
+        image: np.ndarray,
+        target_size: tuple[int, int],
+        color: tuple[int, int, int] = (114, 114, 114),
+    ) -> tuple[np.ndarray, float, int, int]:
+        """Resize image preserving aspect ratio, pad remainder with gray.
+        Returns: (padded_image, scale, pad_left, pad_top)
+        scale: factor applied to original image to fit in target_size
+        """
+        h_orig, w_orig = image.shape[:2]
+        h_tgt, w_tgt = target_size
+        scale = min(w_tgt / w_orig, h_tgt / h_orig)
+        w_new = int(round(w_orig * scale))
+        h_new = int(round(h_orig * scale))
+        img_scaled = cv2.resize(image, (w_new, h_new), interpolation=cv2.INTER_LINEAR)
+        canvas = np.full((h_tgt, w_tgt, 3), color, dtype=np.uint8)
+        pad_top = (h_tgt - h_new) // 2
+        pad_left = (w_tgt - w_new) // 2
+        canvas[pad_top:pad_top + h_new, pad_left:pad_left + w_new] = img_scaled
+        return canvas, scale, pad_left, pad_top
+
     def _predict_ultralytics(self, image, vision: VisionConfig, device_resolution: DeviceResolution, expected_class: str | None = None) -> dict[str, Any]:
         model_path = self._resolve_model_path(vision)
         if not model_path:
@@ -275,7 +304,8 @@ class StickerInferenceService:
             raise FileNotFoundError(f"TFLite model not found: {resolved_model_path}")
 
         logger.info("[tflite] loading model: %s", resolved_model_path)
-        interpreter = self._load_tflite_interpreter(str(resolved_model_path))
+        _num_threads = getattr(self._config, "inference_num_threads", 4)
+        interpreter = self._load_tflite_interpreter(str(resolved_model_path), num_threads=_num_threads)
         input_details = interpreter.get_input_details()
         output_details = interpreter.get_output_details()
 
@@ -285,8 +315,8 @@ class StickerInferenceService:
 
         # Preprocess
         h_in, w_in = int(input_shape[1]), int(input_shape[2])
-        img_resized = cv2.resize(image, (w_in, h_in))
-        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        img_padded, _scale, _pad_left, _pad_top = self._letterbox(image, (h_in, w_in))
+        img_rgb = cv2.cvtColor(img_padded, cv2.COLOR_BGR2RGB)
         if np.issubdtype(input_dtype, np.floating):
             img_normalized = (img_rgb.astype(np.float32) / 255.0).astype(input_dtype)
         else:
@@ -320,10 +350,18 @@ class StickerInferenceService:
                         continue
                     class_id = int(np.argmax(class_scores))
                     xc, yc, w_b, h_b = float(row[0]), float(row[1]), float(row[2]), float(row[3])
-                    x1 = max(0.0, xc - w_b / 2)
-                    y1 = max(0.0, yc - h_b / 2)
-                    x2 = min(1.0, xc + w_b / 2)
-                    y2 = min(1.0, yc + h_b / 2)
+                    # Deproject from padded [0,1] space back to original ROI [0,1]
+                    # xc,yc,w_b,h_b are normalized to padded model input (w_in x h_in)
+                    w_content = w_in - 2 * _pad_left  # pixels of actual content in padded frame
+                    h_content = h_in - 2 * _pad_top
+                    x1_padded = (xc - w_b / 2) * w_in
+                    y1_padded = (yc - h_b / 2) * h_in
+                    x2_padded = (xc + w_b / 2) * w_in
+                    y2_padded = (yc + h_b / 2) * h_in
+                    x1 = max(0.0, (x1_padded - _pad_left) / w_content) if w_content > 0 else 0.0
+                    y1 = max(0.0, (y1_padded - _pad_top) / h_content) if h_content > 0 else 0.0
+                    x2 = min(1.0, (x2_padded - _pad_left) / w_content) if w_content > 0 else 1.0
+                    y2 = min(1.0, (y2_padded - _pad_top) / h_content) if h_content > 0 else 1.0
                     candidates.append((conf, class_id, x1, y1, x2, y2))
 
                 # NMS — remove duplicate overlapping boxes
@@ -383,6 +421,148 @@ class StickerInferenceService:
             "device_mode": "cpu",
             "effective_device": "cpu",
             "device_backend": "tflite",
+            "device_fallback_reason": None,
+            "gpu_available": False,
+        }
+
+    def _load_openvino_model(self, model_path: str):
+        """Load OpenVINO IR model (.xml) — cached after first load."""
+        resolved = str(Path(model_path).resolve())
+        with self._runtime_lock:
+            model = self._loaded_models.get(resolved)
+            if model is not None:
+                return model
+        try:
+            from openvino.runtime import Core  # type: ignore
+        except ImportError:
+            raise ModuleNotFoundError("openvino required: pip install openvino")
+        ie = Core()
+        ov_model = ie.read_model(model=resolved)
+        _n = getattr(self._config, "inference_num_threads", 4)
+        ie.set_property("CPU", {"INFERENCE_NUM_THREADS": str(_n)})
+        compiled = ie.compile_model(model=ov_model, device_name="CPU")
+        with self._runtime_lock:
+            self._loaded_models[resolved] = compiled
+        logger.info("[openvino] model loaded: %s", resolved)
+        return compiled
+
+    def _predict_openvino(self, image, vision: VisionConfig, expected_class: str | None = None) -> dict[str, Any]:
+        """Run inference via OpenVINO IR (optimized for Intel CPU/iGPU)."""
+        import time as _time
+        t0 = _time.perf_counter()
+
+        model_path = self._resolve_model_path(vision)
+        if not model_path:
+            raise FileNotFoundError("Sticker model path is not configured.")
+        resolved_model_path = Path(model_path)
+        if not resolved_model_path.exists():
+            raise FileNotFoundError(f"OpenVINO model not found: {resolved_model_path}")
+
+        compiled = self._load_openvino_model(str(resolved_model_path))
+        input_layer = compiled.input(0)
+        input_shape = tuple(input_layer.shape)  # e.g. (1, 3, 640, 640) NCHW or (1, 640, 640, 3) NHWC
+
+        # Determine layout: NCHW if dim[1] in {1,3}, else assume NHWC
+        if len(input_shape) == 4 and input_shape[1] in (1, 3):
+            _, _c, h_in, w_in = input_shape
+            nchw = True
+        else:
+            _, h_in, w_in, _c = input_shape
+            nchw = False
+
+        # Letterbox preprocessing (same as TFLite)
+        img_padded, _scale, _pad_left, _pad_top = self._letterbox(image, (int(h_in), int(w_in)))
+        img_rgb = cv2.cvtColor(img_padded, cv2.COLOR_BGR2RGB)
+        img_norm = img_rgb.astype(np.float32) / 255.0
+        if nchw:
+            input_data = np.transpose(img_norm, (2, 0, 1))[np.newaxis, ...]
+        else:
+            input_data = img_norm[np.newaxis, ...]
+        t1 = _time.perf_counter()
+
+        # Inference
+        results = compiled([input_data])
+        out = list(results.values())[0]
+        t2 = _time.perf_counter()
+
+        # Parse output — same YOLO format as TFLite/ONNX [1, 6, 8400]
+        candidates = []
+        raw_box_count = 0
+        detections = []
+        if out is not None and out.size > 0:
+            out_arr = out[0]
+            if out_arr.ndim == 2:
+                if out_arr.shape[0] < out_arr.shape[1]:
+                    out_arr = out_arr.T
+                raw_box_count = int(out_arr.shape[0])
+                w_content = int(w_in) - 2 * _pad_left
+                h_content = int(h_in) - 2 * _pad_top
+                for row in out_arr:
+                    class_scores = row[4:]
+                    conf = float(np.max(class_scores))
+                    if conf < float(vision.conf_threshold):
+                        continue
+                    class_id = int(np.argmax(class_scores))
+                    xc, yc, w_b, h_b = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+                    x1_padded = (xc - w_b / 2) * int(w_in)
+                    y1_padded = (yc - h_b / 2) * int(h_in)
+                    x2_padded = (xc + w_b / 2) * int(w_in)
+                    y2_padded = (yc + h_b / 2) * int(h_in)
+                    x1 = max(0.0, (x1_padded - _pad_left) / w_content) if w_content > 0 else 0.0
+                    y1 = max(0.0, (y1_padded - _pad_top) / h_content) if h_content > 0 else 0.0
+                    x2 = min(1.0, (x2_padded - _pad_left) / w_content) if w_content > 0 else 1.0
+                    y2 = min(1.0, (y2_padded - _pad_top) / h_content) if h_content > 0 else 1.0
+                    candidates.append((conf, class_id, x1, y1, x2, y2))
+
+        if candidates:
+            boxes_cv = [[c[2], c[3], c[4] - c[2], c[5] - c[3]] for c in candidates]
+            scores_cv = [c[0] for c in candidates]
+            indices = cv2.dnn.NMSBoxes(boxes_cv, scores_cv, float(vision.conf_threshold), 0.45)
+            if len(indices) > 0:
+                for idx in indices.flatten():
+                    conf, class_id, x1, y1, x2, y2 = candidates[int(idx)]
+                    detections.append({
+                        "label": str(class_id),
+                        "confidence": round(conf, 4),
+                        "class_confidence": round(conf, 4),
+                        "class_id": class_id,
+                        "position": {"x1": round(x1, 4), "y1": round(y1, 4), "x2": round(x2, 4), "y2": round(y2, 4)},
+                        "bbox": [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)],
+                    })
+
+        t3 = _time.perf_counter()
+        logger.info("[openvino] total=%.1fms parse=%.1fms raw=%d filtered=%d",
+                    (t3 - t0) * 1000, (t3 - t2) * 1000, len(candidates), len(detections))
+
+        # Class name mapping (same as TFLite)
+        meta = self._load_meta(self._resolve_meta_path(vision))
+        class_names = meta.get("class_names", [])
+        names_map = {i: name for i, name in enumerate(class_names)}
+        allowed_label_values = [str(label) for label in (vision.classes or []) if str(label).strip()]
+        if expected_class and str(expected_class).strip():
+            allowed_label_values.append(str(expected_class).strip())
+        allowed_labels = {label.strip().lower() for label in allowed_label_values} or None
+        filtered = []
+        for det in detections:
+            label = names_map.get(det["class_id"], str(det["class_id"]))
+            det["label"] = label
+            if allowed_labels is not None and label.strip().lower() not in allowed_labels:
+                continue
+            filtered.append(det)
+
+        return {
+            "backend": "openvino",
+            "mode": "openvino",
+            "model_path": str(resolved_model_path),
+            "meta_path": self._resolve_meta_path(vision) or None,
+            "class_names": class_names,
+            "detections": filtered,
+            "raw_detection_count": raw_box_count,
+            "allowed_labels_filter": sorted(allowed_labels) if allowed_labels is not None else None,
+            "fallback_reason": None,
+            "device_mode": "cpu",
+            "effective_device": "cpu",
+            "device_backend": "openvino",
             "device_fallback_reason": None,
             "gpu_available": False,
         }
@@ -1289,10 +1469,16 @@ class StickerInferenceService:
         # Auto-detect TFLite from file extension when mode is "auto"
         if mode == "auto":
             model_path = self._resolve_model_path(vision)
-            if model_path and Path(model_path).suffix.lower() == ".tflite":
-                mode = "tflite"
-            elif model_path and Path(model_path).suffix.lower() == ".onnx":
-                mode = "onnx"
+            if model_path:
+                _suffix = Path(model_path).suffix.lower()
+                if _suffix == ".tflite":
+                    mode = "tflite"
+                elif _suffix == ".onnx":
+                    mode = "onnx"
+                elif _suffix == ".xml":
+                    mode = "openvino"
+                else:
+                    mode = "ultralytics"
             else:
                 mode = "ultralytics"
 
@@ -1340,6 +1526,22 @@ class StickerInferenceService:
                     payload, image, vision,
                     expected_class=expected_class, sticker_rule=sticker_rule,
                 )
+
+        # OpenVINO mode: Intel CPU optimized
+        if mode == "openvino":
+            try:
+                payload = self._predict_openvino(image, vision, expected_class=expected_class)
+                if use_sticker_only:
+                    return self._augment_with_ocr_only(payload, image, vision,
+                        expected_class=expected_class, sticker_rule=sticker_rule)
+                return self._augment_with_anchor_ocr(payload, image, vision,
+                    expected_class=expected_class, sticker_rule=sticker_rule)
+            except Exception as exc:
+                logging.warning("OpenVINO inference failed, fallback to classic: %s", exc)
+                payload = self._predict_classic(image, vision, expected_class)
+                payload["fallback_reason"] = f"openvino_error: {exc}"
+                return self._augment_with_anchor_ocr(payload, image, vision,
+                    expected_class=expected_class, sticker_rule=sticker_rule)
 
         # Ultralytics mode (auto/ultralytics)
         device_resolution = self._resolve_device()
