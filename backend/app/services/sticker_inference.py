@@ -343,6 +343,8 @@ class StickerInferenceService:
                 if out.shape[0] < out.shape[1]:
                     out = out.T
                 raw_box_count = int(out.shape[0])
+                w_content = w_in - 2 * _pad_left  # pixels of actual content in padded frame
+                h_content = h_in - 2 * _pad_top
                 for row in out:
                     class_scores = row[4:]
                     conf = float(np.max(class_scores))
@@ -352,8 +354,6 @@ class StickerInferenceService:
                     xc, yc, w_b, h_b = float(row[0]), float(row[1]), float(row[2]), float(row[3])
                     # Deproject from padded [0,1] space back to original ROI [0,1]
                     # xc,yc,w_b,h_b are normalized to padded model input (w_in x h_in)
-                    w_content = w_in - 2 * _pad_left  # pixels of actual content in padded frame
-                    h_content = h_in - 2 * _pad_top
                     x1_padded = (xc - w_b / 2) * w_in
                     y1_padded = (yc - h_b / 2) * h_in
                     x2_padded = (xc + w_b / 2) * w_in
@@ -586,10 +586,10 @@ class StickerInferenceService:
         input_name = sess.get_inputs()[0].name
         logger.info("[onnx] input_name=%s", input_name)
 
-        # Preprocess: resize to 640x640, BGR→RGB, normalize /255, float32
+        # Preprocess: letterbox → BGR→RGB → normalize /255 → float32
         # Model expects NHWC [1, 640, 640, 3] (TFLite-origin ONNX, channel-last)
-        img_resized = cv2.resize(image, (640, 640))
-        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        _onnx_pad, _onnx_scale, _onnx_pad_left, _onnx_pad_top = self._letterbox(image, (640, 640))
+        img_rgb = cv2.cvtColor(_onnx_pad, cv2.COLOR_BGR2RGB)
         img_norm = img_rgb.astype(np.float32) / 255.0
         input_data = img_norm[np.newaxis, ...]  # [1, 640, 640, 3]
         t1 = _time.perf_counter()
@@ -607,6 +607,8 @@ class StickerInferenceService:
             out = out.T  # → [N, C]
 
         candidates = []
+        _onnx_w_content = 640 - 2 * _onnx_pad_left
+        _onnx_h_content = 640 - 2 * _onnx_pad_top
         for row in out:
             class_scores = row[4:]
             conf = float(np.max(class_scores))
@@ -614,10 +616,14 @@ class StickerInferenceService:
                 continue
             class_id = int(np.argmax(class_scores))
             xc, yc, w_b, h_b = float(row[0]), float(row[1]), float(row[2]), float(row[3])
-            x1 = max(0.0, xc - w_b / 2)
-            y1 = max(0.0, yc - h_b / 2)
-            x2 = min(1.0, xc + w_b / 2)
-            y2 = min(1.0, yc + h_b / 2)
+            x1_padded = (xc - w_b / 2) * 640
+            y1_padded = (yc - h_b / 2) * 640
+            x2_padded = (xc + w_b / 2) * 640
+            y2_padded = (yc + h_b / 2) * 640
+            x1 = max(0.0, (x1_padded - _onnx_pad_left) / _onnx_w_content) if _onnx_w_content > 0 else 0.0
+            y1 = max(0.0, (y1_padded - _onnx_pad_top) / _onnx_h_content) if _onnx_h_content > 0 else 0.0
+            x2 = min(1.0, (x2_padded - _onnx_pad_left) / _onnx_w_content) if _onnx_w_content > 0 else 1.0
+            y2 = min(1.0, (y2_padded - _onnx_pad_top) / _onnx_h_content) if _onnx_h_content > 0 else 1.0
             candidates.append((conf, class_id, x1, y1, x2, y2))
 
         # NMS

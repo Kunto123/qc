@@ -635,6 +635,18 @@ def upload_model():
     dest = MODELS_DIR / file_name
     dest.write_bytes(content)
 
+    # Optional companion file (e.g., OpenVINO .bin paired with .xml)
+    # Written to disk only — not registered in model DB.
+    companion_file_name = str(payload.get("companion_file_name") or "").strip()
+    companion_b64_str = str(payload.get("companion_b64") or "").strip()
+    if companion_file_name and companion_b64_str:
+        try:
+            companion_content = base64.b64decode(companion_b64_str)
+            companion_dest = MODELS_DIR / companion_file_name
+            companion_dest.write_bytes(companion_content)
+        except Exception as exc:
+            return jsonify({"error": f"Invalid companion file: {exc}"}), 400
+
     model = models_repo.add_model(
         name,
         str(dest),

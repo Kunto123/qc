@@ -167,6 +167,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_model_choice_var = tk.StringVar()
         self.preset_model_path_var = tk.StringVar()
         self.preset_model_meta_path_var = tk.StringVar()
+        self.preset_runtime_var = tk.StringVar(value="auto")
         self.preset_conf_threshold_var = tk.StringVar(value="0.25")
         self.preset_expected_code_var = tk.StringVar()
         self.preset_expected_class_var = tk.StringVar()
@@ -381,26 +382,35 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_model_selector = ttk.Combobox(wizard, textvariable=self.preset_model_choice_var, state="readonly")
         self.preset_model_selector.grid(row=5, column=1, columnspan=3, sticky="ew", padx=(0, 12), pady=5)
         self.preset_model_selector.bind("<<ComboboxSelected>>", self._on_preset_model_selected)
-        self._entry(wizard, 6, 0, "Confidence Threshold", self.preset_conf_threshold_var, columnspan=3)
-        self._entry(wizard, 7, 0, "Expected Class", self.preset_expected_class_var, columnspan=3)
-        self._entry(wizard, 8, 0, "Sticker Code", self.preset_expected_code_var, columnspan=3)
-        ttk.Checkbutton(wizard, text="Use OCR verification", variable=self.preset_use_ocr_var).grid(row=9, column=1, sticky="w", padx=(0, 12), pady=5)
-        ttk.Checkbutton(wizard, text="Try 180 flip fallback", variable=self.preset_ocr_flip_fallback_var).grid(row=9, column=2, columnspan=2, sticky="w", padx=(0, 12), pady=5)
-        self._entry(wizard, 10, 0, "Max Tilt Degrees", self.preset_max_tilt_var, columnspan=2)
-        ttk.Checkbutton(wizard, text="Aktifkan cek miring", variable=self.preset_tilt_gate_var).grid(row=10, column=2, sticky="w", padx=(0, 12), pady=5)
-        self._entry(wizard, 11, 0, "Gap Threshold (0-1)", self.preset_gap_threshold_var, columnspan=2)
+        ttk.Label(wizard, text="Runtime").grid(row=6, column=0, sticky="w", padx=(12, 8), pady=5)
+        runtime_combo = ttk.Combobox(
+            wizard,
+            textvariable=self.preset_runtime_var,
+            values=["auto", "ultralytics", "tflite", "onnx", "openvino"],
+            width=14,
+            state="readonly",
+        )
+        runtime_combo.grid(row=6, column=1, columnspan=3, sticky="w", padx=(0, 12), pady=5)
+        self._entry(wizard, 7, 0, "Confidence Threshold", self.preset_conf_threshold_var, columnspan=3)
+        self._entry(wizard, 8, 0, "Expected Class", self.preset_expected_class_var, columnspan=3)
+        self._entry(wizard, 9, 0, "Sticker Code", self.preset_expected_code_var, columnspan=3)
+        ttk.Checkbutton(wizard, text="Use OCR verification", variable=self.preset_use_ocr_var).grid(row=10, column=1, sticky="w", padx=(0, 12), pady=5)
+        ttk.Checkbutton(wizard, text="Try 180 flip fallback", variable=self.preset_ocr_flip_fallback_var).grid(row=10, column=2, columnspan=2, sticky="w", padx=(0, 12), pady=5)
+        self._entry(wizard, 11, 0, "Max Tilt Degrees", self.preset_max_tilt_var, columnspan=2)
+        ttk.Checkbutton(wizard, text="Aktifkan cek miring", variable=self.preset_tilt_gate_var).grid(row=11, column=2, sticky="w", padx=(0, 12), pady=5)
+        self._entry(wizard, 12, 0, "Gap Threshold (0-1)", self.preset_gap_threshold_var, columnspan=2)
         # Reference patch buttons
         ref_btn_row = ttk.Frame(wizard)
-        ref_btn_row.grid(row=12, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 4))
+        ref_btn_row.grid(row=13, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 4))
         ttk.Button(ref_btn_row, text="Capture Reference", command=self._capture_part_ready_ref).pack(side="left", padx=(0, 6))
         ttk.Button(ref_btn_row, text="Upload Reference", command=self._upload_part_ready_ref).pack(side="left")
         self.gap_ref_status_label = ttk.Label(wizard, text="Referensi: belum dikonfigurasi", foreground="gray")
-        self.gap_ref_status_label.grid(row=13, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 6))
-        self._entry(wizard, 14, 0, "Camera Index", self.preset_camera_index_var, columnspan=1)
+        self.gap_ref_status_label.grid(row=14, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 6))
+        self._entry(wizard, 15, 0, "Camera Index", self.preset_camera_index_var, columnspan=1)
         # Rotation field + hint inline
-        ttk.Label(wizard, text="Rotation°\n(0/90/180/270)", foreground="gray").grid(row=11, column=2, sticky="w", padx=(12, 4), pady=5)
+        ttk.Label(wizard, text="Rotation°\n(0/90/180/270)", foreground="gray").grid(row=12, column=2, sticky="w", padx=(12, 4), pady=5)
         rot_entry = ttk.Entry(wizard, textvariable=self.preset_camera_rotation_var, width=8)
-        rot_entry.grid(row=11, column=3, sticky="w", padx=(0, 12), pady=5)
+        rot_entry.grid(row=12, column=3, sticky="w", padx=(0, 12), pady=5)
 
         # Visual ROI picker. Values are kept in StringVars for payload compatibility,
         # but production users edit them through the image overlay only.
@@ -1341,6 +1351,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_model_path_var.set(model_path)
         self.preset_model_meta_path_var.set(str(vision.get("model_meta_path") or ""))
         self.preset_conf_threshold_var.set(str(vision.get("conf_threshold", 0.25)))
+        self.preset_runtime_var.set(str(vision.get("runtime") or "auto"))
         self._select_model_label_for_path(model_path)
 
     def _on_preset_model_selected(self, _event=None) -> None:
@@ -1349,6 +1360,7 @@ class AdminScreen(ctk.CTkFrame):
             return
         self.preset_model_path_var.set(str(item.get("path") or ""))
         self.preset_model_meta_path_var.set(str(item.get("meta_path") or ""))
+        self.preset_runtime_var.set(str(item.get("runtime") or "auto"))
 
     def _select_model_label_for_path(self, model_path: str) -> None:
         normalized = str(model_path or "").strip().lower()
@@ -1784,7 +1796,7 @@ class AdminScreen(ctk.CTkFrame):
             "vision": {
                 "model_path": model_path,
                 "model_meta_path": self.preset_model_meta_path_var.get().strip() or None,
-                "runtime": "ultralytics",
+                "runtime": self.preset_runtime_var.get().strip() or "auto",
                 "conf_threshold": _float_or_default(self.preset_conf_threshold_var.get(), 0.15),
                 "stream_fps": 10.0,
                 "inference_fps": 4.0,
@@ -1977,6 +1989,7 @@ class AdminScreen(ctk.CTkFrame):
             return
         self.preset_model_path_var.set(str(item.get("path") or ""))
         self.preset_model_meta_path_var.set(str(item.get("meta_path") or ""))
+        self.preset_runtime_var.set(str(item.get("runtime") or "auto"))
         self._select_model_label_for_path(str(item.get("path") or ""))
         self._notebook.set("Templates")
         self._set_status("Selected model copied into the template wizard.")
@@ -3043,7 +3056,7 @@ class AdminScreen(ctk.CTkFrame):
         right = ttk.LabelFrame(shell, text="Import / Detail", padding=8)
         right.grid(row=0, column=1, sticky="nsew")
 
-        import_frame = ttk.LabelFrame(right, text="Upload Model (.pt / .tflite / .onnx)", padding=6)
+        import_frame = ttk.LabelFrame(right, text="Upload Model (.pt / .tflite / .onnx / .xml)", padding=6)
         import_frame.pack(fill="x")
         self._admin_import_path_var = tk.StringVar(value="No file selected")
         self._admin_import_name_var = tk.StringVar()
@@ -3057,6 +3070,7 @@ class AdminScreen(ctk.CTkFrame):
         ttk.Radiobutton(fmt_row, text="PyTorch (.pt)", variable=self._admin_import_format_var, value="pt").pack(side="left", padx=(4, 0))
         ttk.Radiobutton(fmt_row, text="TFLite (.tflite)", variable=self._admin_import_format_var, value="tflite").pack(side="left", padx=(4, 0))
         ttk.Radiobutton(fmt_row, text="ONNX (.onnx)", variable=self._admin_import_format_var, value="onnx").pack(side="left", padx=(4, 0))
+        ttk.Radiobutton(fmt_row, text="OpenVINO (.xml)", variable=self._admin_import_format_var, value="openvino").pack(side="left", padx=(4, 0))
         ttk.Button(import_frame, text="Choose File", command=self._admin_choose_import_file).pack(anchor="w")
         ttk.Label(import_frame, textvariable=self._admin_import_path_var, wraplength=300).pack(anchor="w", pady=(2, 0))
         ttk.Button(import_frame, text="Upload", command=self._admin_import_model).pack(anchor="w", pady=(4, 0))
@@ -3078,10 +3092,11 @@ class AdminScreen(ctk.CTkFrame):
     def _admin_choose_import_file(self) -> None:
         path = filedialog.askopenfilename(
             filetypes=[
-                ("All Model Files", "*.pt *.tflite *.onnx"),
+                ("All Model Files", "*.pt *.tflite *.onnx *.xml"),
                 ("PyTorch Model", "*.pt"),
                 ("TFLite Model", "*.tflite"),
                 ("ONNX Model", "*.onnx"),
+                ("OpenVINO IR Model", "*.xml"),
             ]
         )
         if path:
@@ -3093,6 +3108,8 @@ class AdminScreen(ctk.CTkFrame):
                 self._admin_import_format_var.set("tflite")
             elif ext == ".onnx":
                 self._admin_import_format_var.set("onnx")
+            elif ext == ".xml":
+                self._admin_import_format_var.set("openvino")
             elif ext == ".pt":
                 self._admin_import_format_var.set("pt")
             # Auto-fill model name if empty
@@ -3115,23 +3132,44 @@ class AdminScreen(ctk.CTkFrame):
                 runtime = "tflite"
             elif ext == ".onnx":
                 runtime = "onnx"
+            elif ext == ".xml":
+                runtime = "openvino"
             else:
                 runtime = "ultralytics"
         elif fmt == "tflite":
             runtime = "tflite"
         elif fmt == "onnx":
             runtime = "onnx"
+        elif fmt == "openvino":
+            runtime = "openvino"
         else:
             runtime = "ultralytics"
+        # OpenVINO: upload .bin companion file alongside .xml
+        companion_b64: str | None = None
+        companion_file_name: str | None = None
+        if runtime == "openvino":
+            bin_path = Path(self._admin_import_path).with_suffix(".bin")
+            if bin_path.exists():
+                companion_file_name = bin_path.name
+                companion_b64 = base64.b64encode(bin_path.read_bytes()).decode("ascii")
+            else:
+                messagebox.showwarning(
+                    "OpenVINO Upload",
+                    f"File .bin companion tidak ditemukan di:\n{bin_path}\n\n"
+                    "Model .xml tetap diupload, tapi inference akan gagal tanpa .bin. "
+                    "Pastikan file .bin ada di folder models.",
+                )
         try:
-            self.api.upload_model_file(
-                {
-                    "name": name,
-                    "file_name": Path(self._admin_import_path).name,
-                    "content_b64": base64.b64encode(Path(self._admin_import_path).read_bytes()).decode("ascii"),
-                    "runtime": runtime,
-                }
-            )
+            payload = {
+                "name": name,
+                "file_name": Path(self._admin_import_path).name,
+                "content_b64": base64.b64encode(Path(self._admin_import_path).read_bytes()).decode("ascii"),
+                "runtime": runtime,
+            }
+            if companion_b64:
+                payload["companion_file_name"] = companion_file_name
+                payload["companion_b64"] = companion_b64
+            self.api.upload_model_file(payload)
         except Exception as exc:
             messagebox.showerror("Upload", str(exc))
             return
