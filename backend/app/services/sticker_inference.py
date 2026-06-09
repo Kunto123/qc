@@ -64,6 +64,7 @@ class StickerInferenceService:
     def _resolve_meta_path(self, vision: VisionConfig) -> str:
         direct = str(vision.model_meta_path or "").strip()
         if direct:
+            logger.debug("[inference] meta_path from template: %s", direct)
             return direct
         model_record = self._models_repo.find_by_path(self._resolve_model_path(vision))
         if model_record and model_record.get("meta_path"):
@@ -72,9 +73,12 @@ class StickerInferenceService:
         model_path = self._resolve_model_path(vision)
         if model_path:
             sibling = Path(model_path).with_suffix(".json")
+            logger.debug("[inference] auto-discover meta: %s (exists=%s)", sibling, sibling.exists())
             if sibling.exists():
                 return str(sibling)
-        return str(self._config.default_sticker_model_meta_path or "").strip()
+        default = str(self._config.default_sticker_model_meta_path or "").strip()
+        logger.debug("[inference] meta_path fallback to default: %r", default)
+        return default
 
     def _load_meta(self, meta_path: str) -> dict[str, Any]:
         if not meta_path:
@@ -85,11 +89,13 @@ class StickerInferenceService:
                 return cached
             path = Path(meta_path)
             if not path.exists():
-                self._meta_cache[meta_path] = {}
+                logger.warning("[inference] meta file not found: %s", meta_path)
+                # Jangan cache file yang tidak ditemukan — file bisa dibuat setelah startup
                 return {}
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as exc:
+                logger.warning("[inference] meta file parse error %s: %s", meta_path, exc)
                 payload = {}
             self._meta_cache[meta_path] = payload
             return payload
