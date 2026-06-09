@@ -287,17 +287,20 @@ class InspectionSessionService:
                     state.inference_accept_count = 0
                     state.inference_last_counted_generation = -1
                     state.inference_accept_first_ts = 0.0
-                    # [TOGGLE] Part-removal fence bypass saat PLC → IDLE.
-                    # AKTIF   : siklus berikutnya langsung diizinkan meski part masih di ROI
-                    #           (cocok jika operator tidak wajib angkat part sebelum re-clamp)
-                    # NON-AKTIF: comment 2 baris di bawah → sistem tetap tunggu part pergi dari kamera
-                    #           (cocok jika wajib angkat part dulu, mencegah double-ACCEPT sticker sama)
-                    state.awaiting_part_removal_after_commit = False  # [TOGGLE]
-                    state.part_absent_started_at = None               # [TOGGLE]
             logger.info(
                 "[inspection] PLC returned IDLE - next-part delay %dms started",
                 self._phase_next_part_delay_ms,
             )
+
+        # Saat PLC mulai clamp baru (IDLE → CLAMPING): ini adalah siklus fisik baru.
+        # Aman untuk reset fence di sini — operator sudah memicu clamp baru,
+        # bukan sekadar clamp lepas. Mencegah double-ACCEPT tanpa memblok cycle berikutnya.
+        if new_state == "CLAMPING" and old_state == "IDLE":
+            with self._lock:
+                for state in self._sessions.values():
+                    state.awaiting_part_removal_after_commit = False
+                    state.part_absent_started_at = None
+            logger.info("[inspection] PLC CLAMPING — part-removal fence cleared for new cycle")
 
     def _reset_clamp_gate(self, state: SessionState) -> None:
         state.plc_part_ready_triggered = False
