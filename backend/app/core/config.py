@@ -14,10 +14,6 @@ DEFAULT_STICKER_MODEL_PATH = os.getenv(
     "QC_SUITE_DEFAULT_STICKER_MODEL_PATH",
     r"D:\ProjectMagang\akh.pt",
 ).strip()
-DEFAULT_STICKER_MODEL_META_PATH = os.getenv(
-    "QC_SUITE_DEFAULT_STICKER_MODEL_META_PATH",
-    r"D:\ProjectMagang\ds-43598c556c__yolov5mu__20260402-085412.meta.json",
-).strip()
 
 
 @dataclass(slots=True)
@@ -51,7 +47,6 @@ class AppConfig:
     default_ocr_engine: str = os.getenv("QC_SUITE_OCR_ENGINE", "disabled").strip().lower() or "disabled"
     default_ocr_min_confidence: float = max(0.0, min(1.0, float(os.getenv("QC_SUITE_OCR_MIN_CONFIDENCE", "0.70"))))
     default_sticker_model_path: str = DEFAULT_STICKER_MODEL_PATH
-    default_sticker_model_meta_path: str = DEFAULT_STICKER_MODEL_META_PATH
     training_engine_mode: str = os.getenv("QC_SUITE_TRAINING_ENGINE_MODE", "real").strip().lower() or "real"
     training_timeout_minutes: int = max(1, int(os.getenv("QC_SUITE_TRAINING_TIMEOUT_MINUTES", "30")))
     training_default_epochs: int = max(1, int(os.getenv("QC_SUITE_TRAINING_DEFAULT_EPOCHS", "1")))

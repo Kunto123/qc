@@ -62,28 +62,16 @@ class StickerInferenceService:
         return str(self._config.default_sticker_model_path or "").strip()
 
     def _resolve_meta_path(self, vision: VisionConfig) -> str:
-        direct = str(vision.model_meta_path or "").strip()
-        if direct:
-            if Path(direct).exists():
-                logger.debug("[inference] meta_path from template: %s", direct)
-                return direct
-            logger.debug("[inference] meta_path from template not found, auto-discovering: %s", direct)
-        model_record = self._models_repo.find_by_path(self._resolve_model_path(vision))
-        if model_record and model_record.get("meta_path"):
-            record_path = str(model_record["meta_path"]).strip()
-            if record_path and Path(record_path).exists():
-                return record_path
-        # Auto-discover: try <stem>.meta.json first (admin UI convention), then <stem>.json
         model_path = self._resolve_model_path(vision)
         if model_path:
             p = Path(model_path)
             for candidate in (p.parent / (p.stem + ".meta.json"), p.with_suffix(".json")):
                 logger.debug("[inference] auto-discover meta: %s (exists=%s)", candidate, candidate.exists())
                 if candidate.exists():
+                    logger.info("[inference] meta found: %s", candidate)
                     return str(candidate)
-        default = str(self._config.default_sticker_model_meta_path or "").strip()
-        logger.debug("[inference] meta_path fallback to default: %r", default)
-        return default
+        logger.info("[inference] meta not found for model: %s", model_path)
+        return ""
 
     def _load_meta(self, meta_path: str) -> dict[str, Any]:
         if not meta_path:
