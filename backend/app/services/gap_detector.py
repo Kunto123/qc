@@ -24,13 +24,17 @@ DEFAULT_HSV_UPPER = np.array([130, 255, 255])
 # Reference storage directory
 PART_READY_REF_DIR = "backend/app/assets/part_ready_refs"
 
+_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
 def _auto_canny(gray: np.ndarray, sigma: float = 0.5) -> np.ndarray:
     """Auto-tune Canny thresholds from image median — robust terhadap perubahan cahaya."""
+    gray = _clahe.apply(gray)   # normalkan brightness lokal sebelum hitung threshold
     median = float(np.median(gray))
     low = int(max(0, (1.0 - sigma) * median))
     high = int(min(255, (1.0 + sigma) * median))
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     return cv2.Canny(blurred, low, high)
+
 
 def get_ref_path(template_id: int) -> Path:
     """Get the file path for a template's reference patch."""
