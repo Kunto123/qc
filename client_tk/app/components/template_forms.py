@@ -218,8 +218,6 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.sticker_enabled_var = tk.BooleanVar(value=True)
         self.sticker_part_name_var = tk.StringVar()
         self.sticker_expected_class_var = tk.StringVar()
-        self.sticker_line_var = tk.StringVar()
-        self.sticker_station_var = tk.StringVar()
         self.sticker_validator_mode_var = tk.StringVar(value="ml_detection")
         self.sticker_min_roi_conf_var = tk.StringVar(value="0.0")
         self.sticker_min_class_conf_var = tk.StringVar()
@@ -343,10 +341,8 @@ class TemplateEditorForm(ctk.CTkFrame):
         )
         self._entry(sticker_config, 2, 0, "Part Name", self.sticker_part_name_var)
         self._entry(sticker_config, 2, 2, "Expected Class", self.sticker_expected_class_var)
-        self._entry(sticker_config, 3, 0, "Line", self.sticker_line_var)
-        self._entry(sticker_config, 3, 2, "Station", self.sticker_station_var)
-        self._entry(sticker_config, 4, 0, "Validator Mode", self.sticker_validator_mode_var)
-        self._entry(sticker_config, 4, 2, "Min ROI Conf", self.sticker_min_roi_conf_var)
+        self._entry(sticker_config, 3, 0, "Validator Mode", self.sticker_validator_mode_var)
+        self._entry(sticker_config, 3, 2, "Min ROI Conf", self.sticker_min_roi_conf_var)
         self._entry(sticker_config, 5, 0, "Min Class Conf", self.sticker_min_class_conf_var)
         self._entry(sticker_config, 5, 2, "Max Offset X", self.sticker_max_offset_x_var)
         self._entry(sticker_config, 6, 0, "Max Offset Y", self.sticker_max_offset_y_var)
@@ -814,8 +810,6 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.sticker_enabled_var.set(bool(sticker.get("enabled", True)))
         self.sticker_part_name_var.set(str(sticker.get("part_name") or ""))
         self.sticker_expected_class_var.set(str(sticker.get("expected_class") or ""))
-        self.sticker_line_var.set(str(sticker.get("line") or ""))
-        self.sticker_station_var.set(str(sticker.get("station") or ""))
         self.sticker_validator_mode_var.set(str(sticker.get("validator_mode") or "ml_detection"))
         self.sticker_min_roi_conf_var.set(str(sticker.get("min_roi_confidence", 0.0)))
         self.sticker_min_class_conf_var.set("" if sticker.get("min_class_confidence") is None else str(sticker.get("min_class_confidence")))
@@ -919,8 +913,6 @@ class TemplateEditorForm(ctk.CTkFrame):
             "sticker": {
                 "part_name": self.sticker_part_name_var.get().strip() or "Sample Part",
                 "expected_class": self.sticker_expected_class_var.get().strip() or (classes[0] if classes else "sample-sticker"),
-                "line": self.sticker_line_var.get().strip() or "LINE-A",
-                "station": self.sticker_station_var.get().strip(),
                 "enabled": bool(self.sticker_enabled_var.get()),
                 "validator_mode": self.sticker_validator_mode_var.get().strip() or "ml_detection",
                 "min_roi_confidence": _float_or_none(self.sticker_min_roi_conf_var.get()) or 0.0,
@@ -991,9 +983,7 @@ class TemplateEditorForm(ctk.CTkFrame):
                 },
                 "sticker": {
                     "part_name": "",
-                    "expected_class": "",
-                    "line": "",
-                    "station": "",
+                "expected_class": "",
                     "enabled": True,
                     "validator_mode": "ml_detection",
                     "min_roi_confidence": 0.0,

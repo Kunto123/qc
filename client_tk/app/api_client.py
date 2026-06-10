@@ -185,8 +185,8 @@ class ApiClient:
     def deploy_template(self, payload: dict) -> dict:
         return self._post("/deployments", payload)
 
-    def get_active_deployment(self, line_id: str, station_id: str) -> dict:
-        return self._get("/deployments/active", {"line_id": line_id, "station_id": station_id})
+    def get_active_deployment(self) -> dict:
+        return self._get("/deployments/active")
 
     def update_deployment(self, deployment_id: int, payload: dict) -> dict:
         return self._put(f"/deployments/{deployment_id}", payload)

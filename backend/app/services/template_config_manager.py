@@ -15,8 +15,6 @@ class TemplateConfigManager:
             "schema_version": 1,
             "template_id": f"template-{template.id or 'draft'}-v{template.version_id or template.version_number}",
             "name": template.name,
-            "line_id": sticker.line,
-            "station_id": sticker.station,
             "camera": {
                 "camera_index": template.camera.camera_index,
                 "width": template.camera.width,
@@ -79,6 +77,6 @@ class TemplateConfigManager:
     def validate_runtime_template(payload: dict[str, Any]) -> None:
         if not isinstance(payload, dict):
             raise ValueError("template.json payload must be an object.")
-        for key in ("schema_version", "name", "line_id", "station_id", "rois", "part_ready", "inspection"):
+        for key in ("schema_version", "name", "rois", "part_ready", "inspection"):
             if key not in payload:
                 raise ValueError(f"template.json missing required field: {key}")

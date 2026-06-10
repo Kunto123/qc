@@ -26,8 +26,6 @@ class DeploymentsRepository(JsonRepository):
         *,
         template_id: int,
         template_version_id: int,
-        line_id: str,
-        station_id: str,
         deployed_by: int | None,
         template_name: str,
         version_number: int,
@@ -39,8 +37,6 @@ class DeploymentsRepository(JsonRepository):
             "id": self.next_id(items),
             "template_id": int(template_id),
             "template_version_id": int(template_version_id),
-            "line_id": line_id,
-            "station_id": station_id,
             "is_active": True,
             "deployed_by": deployed_by,
             "effective_from": now,
@@ -53,14 +49,12 @@ class DeploymentsRepository(JsonRepository):
         self.save(payload)
         return record
 
-    def get_active(self, line_id: str, station_id: str) -> dict | None:
+    def get_active(self) -> dict | None:
         return next(
             (
                 item
                 for item in reversed(self.list_deployments())
-                if item["line_id"] == line_id
-                and item["station_id"] == station_id
-                and item["is_active"]
+                if item["is_active"]
             ),
             None,
         )
@@ -80,17 +74,13 @@ class DeploymentsRepository(JsonRepository):
         self,
         deployment_id: int,
         *,
-        line_id: object = _UNSET,
-        station_id: object = _UNSET,
         template_version_id: object = _UNSET,
         template_name: object = _UNSET,
         version_number: object = _UNSET,
         deployed_by: object = _UNSET,
     ) -> dict:
         if (
-            line_id is _UNSET
-            and station_id is _UNSET
-            and template_version_id is _UNSET
+            template_version_id is _UNSET
             and template_name is _UNSET
             and version_number is _UNSET
             and deployed_by is _UNSET
@@ -106,20 +96,6 @@ class DeploymentsRepository(JsonRepository):
                 continue
             if not bool(item.get("is_active")):
                 raise ValueError("Inactive deployment cannot be updated.")
-
-            next_line_id = str(item.get("line_id") or "").strip()
-            if line_id is not _UNSET:
-                next_line_id = str(line_id or "").strip()
-
-            next_station_id = str(item.get("station_id") or "").strip()
-            if station_id is not _UNSET:
-                next_station_id = str(station_id or "").strip()
-
-            if not next_line_id or not next_station_id:
-                raise ValueError("line_id and station_id must not be empty")
-
-            item["line_id"] = next_line_id
-            item["station_id"] = next_station_id
 
             if template_version_id is not _UNSET:
                 item["template_version_id"] = int(template_version_id)
@@ -141,7 +117,7 @@ class DeploymentsRepository(JsonRepository):
         raise ValueError(f"Deployment {deployment_id} not found.")
 
     def rollback(self, deployment_id: int, *, rolled_back_by: int | None = None) -> dict:
-        """Deactivate deployment_id and re-deploy the previous version for the same line/station."""
+        """Deactivate deployment_id and re-deploy the previous version."""
         payload = self.load()
         items = payload["deployments"]
         now = datetime.now(UTC).isoformat()
@@ -150,16 +126,11 @@ class DeploymentsRepository(JsonRepository):
         if target is None:
             raise ValueError(f"Deployment {deployment_id} not found.")
 
-        line_id = target["line_id"]
-        station_id = target["station_id"]
-
-        # Find the most recent *other* deployment for the same line/station
+        # Find the most recent *other* deployment
         previous = next(
             (
                 d for d in reversed(items)
-                if d["line_id"] == line_id
-                and d["station_id"] == station_id
-                and int(d["id"]) != int(deployment_id)
+                if int(d["id"]) != int(deployment_id)
             ),
             None,
         )
@@ -174,8 +145,6 @@ class DeploymentsRepository(JsonRepository):
             "id": self.next_id(items),
             "template_id": previous["template_id"],
             "template_version_id": previous["template_version_id"],
-            "line_id": line_id,
-            "station_id": station_id,
             "is_active": True,
             "deployed_by": rolled_back_by,
             "effective_from": now,

@@ -100,9 +100,8 @@ class OperatorScreen(ctk.CTkFrame):
         self._inference_running = False
         self._inference_thread: threading.Thread | None = None
 
-        self.line_value = tk.StringVar()
-        self.station_value = tk.StringVar()
-        self.camera_value = tk.StringVar(value="0")
+<longcat_arg_value>
+
         self.camera_rotation_value = tk.StringVar(value="0")
         self.template_version_value = tk.StringVar()
         self.part_ready_roi_x_value = tk.StringVar(value="0.2")
@@ -119,8 +118,6 @@ class OperatorScreen(ctk.CTkFrame):
         self.display_source = tk.StringVar(value="Right View: Live Camera + ROIs")
 
         self.operator_context = tk.StringVar(value=f"Operator: {self.state.user.get('username') if self.state.user else '-'}")
-        self.line_context = tk.StringVar(value="Line: -")
-        self.station_context = tk.StringVar(value="Station: -")
         self.template_context = tk.StringVar(value="Template: -")
         self.info_var = tk.StringVar(value="Idle. Pilih template atau deployment, lalu start camera.")
 
@@ -169,8 +166,6 @@ class OperatorScreen(ctk.CTkFrame):
         self.context_bar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         self.context_labels = {
             "operator": ctk.CTkLabel(self.context_bar, textvariable=self.operator_context, font=("Segoe UI", 13, "bold"), text_color=TEXT_PRIMARY),
-            "line": ctk.CTkLabel(self.context_bar, textvariable=self.line_context, font=("Segoe UI", 11), text_color=TEXT_SECONDARY),
-            "station": ctk.CTkLabel(self.context_bar, textvariable=self.station_context, font=("Segoe UI", 11), text_color=TEXT_SECONDARY),
             "template": ctk.CTkLabel(self.context_bar, textvariable=self.template_context, font=("Segoe UI", 11), text_color=TEXT_SECONDARY),
         }
         self._layout_context_bar(compact=False)
@@ -488,8 +483,6 @@ class OperatorScreen(ctk.CTkFrame):
         general.grid(row=0, column=0, columnspan=2, sticky="ew")
         general.columnconfigure(1, weight=1)
         general.columnconfigure(3, weight=1)
-        self._settings_entry(general, 0, 0, "Line", self.line_value)
-        self._settings_entry(general, 0, 2, "Station", self.station_value)
         self._settings_entry(general, 1, 0, "Camera", self.camera_value)
         # Rotation field inline sebelah Camera Index
         ttk.Label(general, text="Rotation°").grid(row=1, column=2, sticky="w", padx=(12, 4), pady=5)
@@ -1254,11 +1247,6 @@ class OperatorScreen(ctk.CTkFrame):
         _rot = camera_config.get("rotation_degrees")
         self.camera_rotation_value.set(str(_rot if _rot is not None else "0"))
         sticker_config = detail.get("sticker") or {}
-        if not keep_line_station:
-            if sticker_config.get("line"):
-                self.line_value.set(str(sticker_config["line"]))
-            if sticker_config.get("station"):
-                self.station_value.set(str(sticker_config["station"]))
         self.state.cache["selected_template_detail"] = detail
         self._refresh_context_summary()
 
@@ -1384,8 +1372,6 @@ class OperatorScreen(ctk.CTkFrame):
     def _refresh_context_summary(self) -> None:
         username = self.state.user.get("username") if self.state.user else "-"
         self.operator_context.set(f"Operator: {username}")
-        line = self.line_value.get().strip() or (self.state.active_session or {}).get("line_id") or "-"
-        station = self.station_value.get().strip() or (self.state.active_session or {}).get("station_id") or "-"
         selected_detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
         template_name = (
             (self.state.active_session or {}).get("template_name")
@@ -1395,8 +1381,6 @@ class OperatorScreen(ctk.CTkFrame):
             or "-"
         )
         template_version = self.template_version_value.get().strip() or (self.state.active_session or {}).get("template_version_id") or "-"
-        self.line_context.set(f"Line: {line}")
-        self.station_context.set(f"Station: {station}")
         self.template_context.set(f"Template: {template_name} v{template_version}")
         self._sync_template_selector()
 
@@ -1455,12 +1439,11 @@ class OperatorScreen(ctk.CTkFrame):
             self.recent_list.insert("end", f"{timestamp} | {decision} | {part_name} | {reason}")
 
     def _load_deployment(self) -> None:
-        line_id = self.line_value.get().strip()
-        station_id = self.station_value.get().strip()
-        if not line_id or not station_id:
-            messagebox.showerror("Deployment", "Line dan Station wajib diisi.")
+        try:
+            response = self.api.get_active_deployment()
+        except Exception as exc:
+            messagebox.showerror("Deployment", f"Failed to load deployment: {exc}")
             return
-        response = self.api.get_active_deployment(line_id, station_id)
         deployment = response.get("deployment") if isinstance(response, dict) else None
         if not deployment:
             messagebox.showwarning("Deployment", "Tidak ada deployment aktif.")
@@ -1473,8 +1456,7 @@ class OperatorScreen(ctk.CTkFrame):
         if session_was_running:
             self._stop_session()
         self.state.active_deployment = deployment
-        self.line_value.set(str(deployment.get("line_id") or self.line_value.get().strip()))
-        self.station_value.set(str(deployment.get("station_id") or self.station_value.get().strip()))
+
         deployment_version_id = int(deployment.get("template_version_id") or 0)
         self.template_version_value.set(str(deployment_version_id or ""))
         detail = None
@@ -1575,8 +1557,6 @@ class OperatorScreen(ctk.CTkFrame):
                 "camera_index": int(self.camera_value.get() or 0),
                 "camera_rotation_degrees": _rot,
                 "template_version_id": template_version_id,
-                "line_id": self.line_value.get().strip(),
-                "station_id": self.station_value.get().strip(),
             }
         )
         self.state.active_session = payload
@@ -1942,15 +1922,10 @@ class OperatorScreen(ctk.CTkFrame):
             self._schedule_heartbeat()
             return
 
-        line_id = self.line_value.get().strip() or None
-        station_id = self.station_value.get().strip() or None
-
         def _load():
             return self.api.heartbeat(
                 self._machine_id,
                 client_version="client_tk",
-                line_id=line_id,
-                station_id=station_id,
             )
 
         run_async(self, _load, callback=lambda _result, _error: None)

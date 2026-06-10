@@ -11,8 +11,6 @@ class TemplateDeployment:
     id: int
     template_id: int
     template_version_id: int
-    line_id: str
-    station_id: str
     is_active: bool
     deployed_by: int | None
     effective_from: str | None

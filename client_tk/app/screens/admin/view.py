@@ -162,8 +162,6 @@ class AdminScreen(ctk.CTkFrame):
 
         self.preset_name_var = tk.StringVar()
         self.preset_description_var = tk.StringVar()
-        self.preset_line_var = tk.StringVar()
-        self.preset_station_var = tk.StringVar()
         self.preset_model_choice_var = tk.StringVar()
         self.preset_model_path_var = tk.StringVar()
         self.preset_model_meta_path_var = tk.StringVar()
@@ -207,8 +205,6 @@ class AdminScreen(ctk.CTkFrame):
         self.augment_dataset_var = tk.StringVar()
         self.model_import_path_var = tk.StringVar()
 
-        self.monitor_line_var = tk.StringVar()
-        self.monitor_station_var = tk.StringVar()
         self.monitor_context_var = tk.StringVar(value="Recent production activity.")
 
         self.columnconfigure(0, weight=1)
@@ -346,8 +342,6 @@ class AdminScreen(ctk.CTkFrame):
             listing,
             [
                 ("id", "ID", 55, "center"),
-                ("line", "Line", 110, "w"),
-                ("station", "Station", 100, "w"),
                 ("preset", "Preset", 220, "w"),
                 ("version", "Version", 80, "center"),
                 ("status", "Status", 90, "center"),
@@ -375,8 +369,6 @@ class AdminScreen(ctk.CTkFrame):
 
         self._entry(wizard, 2, 0, "Preset Name", self.preset_name_var, columnspan=3)
         self._entry(wizard, 3, 0, "Description", self.preset_description_var, columnspan=3)
-        self._entry(wizard, 4, 0, "Line", self.preset_line_var)
-        self._entry(wizard, 4, 2, "Station", self.preset_station_var)
 
         ttk.Label(wizard, text="Model").grid(row=5, column=0, sticky="w", padx=(12, 8), pady=5)
         self.preset_model_selector = ttk.Combobox(wizard, textvariable=self.preset_model_choice_var, state="readonly")
@@ -641,8 +633,6 @@ class AdminScreen(ctk.CTkFrame):
         for index in range(6):
             filters.columnconfigure(index, weight=1 if index % 2 else 0)
         ctk.CTkLabel(filters, text="Production Monitor", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=6, sticky="w", padx=10, pady=(10, 0))
-        self._entry(filters, 1, 0, "Line", self.monitor_line_var)
-        self._entry(filters, 1, 2, "Station", self.monitor_station_var)
         ctk.CTkButton(filters, text="Refresh", command=self.refresh_monitor, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).grid(row=1, column=4, sticky="e", padx=(8, 4), pady=(4, 10))
         ctk.CTkButton(filters, text="Export CSV", command=self.export_monitor_csv, fg_color=SUCCESS_HOVER, hover_color=SUCCESS, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).grid(row=1, column=5, sticky="e", padx=(4, 10), pady=(4, 10))
 
@@ -683,8 +673,6 @@ class AdminScreen(ctk.CTkFrame):
                 ("time", "Time", 145, "w"),
                 ("decision", "Decision", 90, "center"),
                 ("part", "Part", 150, "w"),
-                ("line", "Line", 90, "w"),
-                ("station", "Station", 90, "w"),
                 ("push", "Push", 90, "center"),
                 ("reason", "Reason", 130, "w"),
             ],
@@ -717,8 +705,6 @@ class AdminScreen(ctk.CTkFrame):
                 ("decision", "Decision"),
                 ("reason", "Reason"),
                 ("push_status", "Push"),
-                ("line_id", "Line"),
-                ("station_id", "Station"),
             ],
             columns=1,
         )
@@ -945,7 +931,7 @@ class AdminScreen(ctk.CTkFrame):
             if int(item.get("template_id") or 0) > 0
         }
         if not active_items and not self._templates_cache:
-            self.preset_table.insert("", "end", iid="__empty__", values=("-", "No presets.", "", "", "", ""))
+            self.preset_table.insert("", "end", iid="__empty__", values=("-", "No presets.", "", ""))
             return
         for item in active_items:
             self.preset_table.insert(
@@ -954,8 +940,6 @@ class AdminScreen(ctk.CTkFrame):
                 iid=f"dep:{item.get('id')}",
                 values=(
                     f"D{item.get('id')}",
-                    _safe_text(item.get("line_id")),
-                    _safe_text(item.get("station_id")),
                     _safe_text(item.get("template_name")),
                     _safe_text(item.get("template_version_id")),
                     "ACTIVE",
@@ -971,8 +955,6 @@ class AdminScreen(ctk.CTkFrame):
                 iid=f"tpl:{template_id}",
                 values=(
                     f"T{template_id}",
-                    "-",
-                    "-",
                     _safe_text(item.get("name")),
                     _safe_text(item.get("version_id") or item.get("current_version_id")),
                     _safe_text(item.get("lifecycle_status") or _format_status(item.get("is_active", True))),
@@ -1224,8 +1206,6 @@ class AdminScreen(ctk.CTkFrame):
             self.preset_table.focus("")
         self.preset_name_var.set("")
         self.preset_description_var.set("")
-        self.preset_line_var.set("")
-        self.preset_station_var.set("")
         self.preset_conf_threshold_var.set("0.25")
         self.preset_expected_code_var.set("")
         self.preset_use_ocr_var.set(False)
@@ -1268,8 +1248,6 @@ class AdminScreen(ctk.CTkFrame):
         if not deployment:
             return
         self._editing_deployment_id = selected_id
-        self.preset_line_var.set(str(deployment.get("line_id") or ""))
-        self.preset_station_var.set(str(deployment.get("station_id") or ""))
 
         version_id = int(deployment.get("template_version_id") or 0)
         template_id = int(deployment.get("template_id") or 0)
@@ -1297,12 +1275,6 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_description_var.set(str(detail.get("description") or ""))
         sticker = detail.get("sticker") or {}
         part_ready = detail.get("part_ready") or {}
-        if deployment:
-            self.preset_line_var.set(str(deployment.get("line_id") or ""))
-            self.preset_station_var.set(str(deployment.get("station_id") or ""))
-        else:
-            self.preset_line_var.set(str(sticker.get("line") or ""))
-            self.preset_station_var.set(str(sticker.get("station") or ""))
         self.preset_expected_code_var.set(str(sticker.get("ocr_expected_code") or sticker.get("ocr_expected_text") or ""))
         self.preset_expected_class_var.set(str(sticker.get("expected_class") or ""))
         self.preset_use_ocr_var.set(bool(sticker.get("use_ocr", False)))
@@ -1599,8 +1571,6 @@ class AdminScreen(ctk.CTkFrame):
                 {
                     "template_id": template_id,
                     "template_version_id": version_id,
-                    "line_id": self.preset_line_var.get().strip(),
-                    "station_id": self.preset_station_var.get().strip(),
                 }
             )
         except Exception as exc:
@@ -1610,7 +1580,7 @@ class AdminScreen(ctk.CTkFrame):
         self.current_template_version_id = version_id
         self._editing_deployment_id = int(deployment.get("id") or 0) or self._editing_deployment_id
         self.refresh_presets()
-        self._set_status(f"Preset deployed to {self.preset_line_var.get().strip()}/{self.preset_station_var.get().strip()}.")
+        self._set_status("Preset deployed.")
         messagebox.showinfo("Preset", "Preset saved and deployed.")
 
 
@@ -1748,15 +1718,11 @@ class AdminScreen(ctk.CTkFrame):
 
     def _preset_payload(self) -> dict:
         name = self.preset_name_var.get().strip()
-        line = self.preset_line_var.get().strip()
-        station = self.preset_station_var.get().strip()
         expected_code = self.preset_expected_code_var.get().strip()
         expected_class = self.preset_expected_class_var.get().strip()
         model_path = self.preset_model_path_var.get().strip()
         if not name:
             raise ValueError("Preset name is required.")
-        if not line or not station:
-            raise ValueError("Line and station are required.")
         if not model_path:
             raise ValueError("Model is required.")
         if not expected_code:
@@ -1825,8 +1791,6 @@ class AdminScreen(ctk.CTkFrame):
             "sticker": {
                 "part_name": expected_code,
                 "expected_class": expected_class,
-                "line": line,
-                "station": station,
                 "enabled": True,
                 "validator_mode": "sticker_only" if self.preset_use_ocr_var.get() else "ml_detection",
                 "min_roi_confidence": 0.0,
@@ -2014,10 +1978,6 @@ class AdminScreen(ctk.CTkFrame):
     # Monitor behavior
     def _monitor_filters(self) -> dict[str, object]:
         params: dict[str, object] = {"limit": 100}
-        if self.monitor_line_var.get().strip():
-            params["line_id"] = self.monitor_line_var.get().strip()
-        if self.monitor_station_var.get().strip():
-            params["station_id"] = self.monitor_station_var.get().strip()
         return params
 
     def export_monitor_csv(self) -> None:
@@ -2070,8 +2030,6 @@ class AdminScreen(ctk.CTkFrame):
                 "decision": decision,
                 "reason": item.get("reject_reason_code") or ("OK" if decision == "ACCEPT" else "-"),
                 "push_status": item.get("push_status"),
-                "line_id": item.get("line_id"),
-                "station_id": item.get("station_id"),
             }
         )
 

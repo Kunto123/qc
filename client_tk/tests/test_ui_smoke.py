@@ -80,18 +80,16 @@ class _StubApi:
         payload["version_id"] = int(version_id)
         payload["version_number"] = int(version_id)
         payload["camera"]["camera_index"] = 1
-        payload["sticker"]["line"] = "LINE-TEMPLATE"
+        payload["sticker"]["part_name"] = "TEST_PART"
         return payload
 
-    def get_active_deployment(self, line_id: str, station_id: str):
+    def get_active_deployment(self):
         return {
             "deployment": {
                 "id": 1,
                 "template_id": 1,
                 "template_name": "QC Line A",
                 "template_version_id": 2,
-                "line_id": line_id,
-                "station_id": station_id,
                 "is_active": True,
             }
         }
@@ -101,8 +99,6 @@ class _StubApi:
             "session_id": "sess-ui-smoke",
             "template_name": "QC Line A",
             "template_version_id": int(payload.get("template_version_id") or 0),
-            "line_id": payload.get("line_id"),
-            "station_id": payload.get("station_id"),
         }
 
     def update_rois(self, _session_id: str, *, part_ready_roi=None, sticker_roi=None):
