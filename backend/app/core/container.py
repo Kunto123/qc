@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from backend.app.core.config import AppConfig
 from backend.app.core.device_runtime import DeviceRuntimeResolver
 from backend.app.repositories.auth_audit_repository import AuthAuditRepository
@@ -153,8 +155,6 @@ def _log_startup_config() -> None:
     for _line in _lines:
         _logger.info("[config] %s", _line)
 
-
-import logging
 
 _log_startup_config()
 

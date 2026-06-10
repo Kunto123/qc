@@ -16,9 +16,11 @@ from backend.app.core.config import AppConfig
 from backend.app.core.device_runtime import DeviceResolution, DeviceRuntimeResolver
 from backend.app.repositories.models_repository import ModelsRepository
 from backend.app.services.inference_backend import (
-    _apply_names_map,
-    _apply_nms,
-    _parse_yolo_output,
+    InferenceBackend,
+    ONNXBackend,
+    OpenVINOBackend,
+    TFLiteBackend,
+    UltralyticsBackend,
 )
 from backend.app.services.text_tilt import estimate_white_text_tilt
 from shared.contracts.templates import StickerRule
@@ -55,6 +57,7 @@ class StickerInferenceService:
         self._runtime_lock = threading.RLock()
         self._loaded_models: dict[str, Any] = {}
         self._meta_cache: dict[str, tuple[dict, float]] = {}
+        self._backend_cache: dict[str, InferenceBackend] = {}
 
     def _resolve_mode(self) -> str:
         mode = str(self._config.sticker_inference_mode or "auto").strip().lower()
@@ -101,78 +104,6 @@ class StickerInferenceService:
             self._meta_cache[meta_path] = (payload, now)
             return payload
 
-    def _load_yolo_class(self):
-        from ultralytics import YOLO  # type: ignore
-        return YOLO
-
-    def _load_tflite_interpreter(self, model_path: str, num_threads: int = 4):
-        """Load TFLite model via tflite_runtime (lightweight, no tensorflow needed)."""
-        resolved = str(Path(model_path).resolve())
-        # Cache key includes thread count so different configs get separate instances
-        cache_key = f"{resolved}::t{num_threads}"
-        with self._runtime_lock:
-            interp = self._loaded_models.get(cache_key)
-            if interp is not None:
-                return interp
-        try:
-            from ai_edge_litert.interpreter import Interpreter  # type: ignore
-            interpreter = Interpreter(model_path=resolved, num_threads=num_threads)
-        except (ImportError, TypeError):
-            try:
-                import warnings
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        "ignore",
-                        message=".*tf.lite.Interpreter.*",
-                        category=UserWarning,
-                    )
-                    from tflite_runtime.interpreter import Interpreter  # type: ignore
-                    try:
-                        interpreter = Interpreter(model_path=resolved, num_threads=num_threads)
-                    except TypeError:
-                        interpreter = Interpreter(model_path=resolved)
-            except ImportError:
-                try:
-                    import tensorflow as tf  # type: ignore
-                    Interpreter = tf.lite.Interpreter
-                    try:
-                        interpreter = Interpreter(model_path=resolved, num_threads=num_threads)
-                    except TypeError:
-                        interpreter = Interpreter(model_path=resolved)
-                except ImportError:
-                    raise ModuleNotFoundError(
-                        "TFLite runtime not found. Install one of: "
-                        "pip install ai-edge-litert | pip install tflite-runtime | pip install tensorflow"
-                    )
-        interpreter.allocate_tensors()
-        with self._runtime_lock:
-            self._loaded_models[cache_key] = interpreter
-        return interpreter
-
-    def _load_onnx_session(self, model_path: str):
-        """Load ONNX model via onnxruntime (CPU-friendly)."""
-        resolved = str(Path(model_path).resolve())
-        with self._runtime_lock:
-            sess = self._loaded_models.get(resolved)
-            if sess is not None:
-                return sess
-        try:
-            import onnxruntime as ort  # type: ignore
-        except ImportError:
-            raise ModuleNotFoundError(
-                "onnxruntime is required for ONNX inference. "
-                "Install it with: pip install onnxruntime"
-            )
-        opts = ort.SessionOptions()
-        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        _n = getattr(self._config, "inference_num_threads", 4)
-        opts.intra_op_num_threads = _n   # threads within one op (matmul, conv)
-        opts.inter_op_num_threads = 1    # parallel between ops — 1 sufficient for small models
-        sess = ort.InferenceSession(resolved, sess_options=opts, providers=["CPUExecutionProvider"])
-        with self._runtime_lock:
-            self._loaded_models[resolved] = sess
-        return sess
-
     def _resolve_device(self) -> DeviceResolution:
         return self._device_runtime.resolve()
 
@@ -182,16 +113,69 @@ class StickerInferenceService:
             engine = str(self._config.default_ocr_engine or "disabled").strip().lower()
         return engine or "disabled"
 
-    def _get_ultralytics_model(self, model_path: str):
-        resolved = str(Path(model_path).resolve())
-        with self._runtime_lock:
-            model = self._loaded_models.get(resolved)
-            if model is not None:
-                return model
-            YOLO = self._load_yolo_class()
-            model = YOLO(resolved, task="detect")
-            self._loaded_models[resolved] = model
-            return model
+    @staticmethod
+    def _letterbox(
+        image: np.ndarray,
+        target_size: tuple[int, int],
+        color: tuple[int, int, int] = (114, 114, 114),
+    ) -> tuple[np.ndarray, float, int, int]:
+        """Resize image preserving aspect ratio, pad remainder with gray.
+        Returns: (padded_image, scale, pad_left, pad_top)
+        scale: factor applied to original image to fit in target_size
+        """
+        h_orig, w_orig = image.shape[:2]
+        h_tgt, w_tgt = target_size
+        scale = min(w_tgt / w_orig, h_tgt / h_orig)
+        w_new = int(round(w_orig * scale))
+        h_new = int(round(h_orig * scale))
+        img_scaled = cv2.resize(image, (w_new, h_new), interpolation=cv2.INTER_LINEAR)
+        canvas = np.full((h_tgt, w_tgt, 3), color, dtype=np.uint8)
+        pad_top = (h_tgt - h_new) // 2
+        pad_left = (w_tgt - w_new) // 2
+        canvas[pad_top:pad_top + h_new, pad_left:pad_left + w_new] = img_scaled
+        return canvas, scale, pad_left, pad_top
+
+    def _get_backend(self, mode: str) -> InferenceBackend:
+        """Create and cache backend instances."""
+        if mode in self._backend_cache:
+            return self._backend_cache[mode]
+
+        backend: InferenceBackend
+        if mode == "tflite":
+            backend = TFLiteBackend(
+                config=self._config,
+                loaded_models=self._loaded_models,
+                meta_cache=self._meta_cache,
+                runtime_lock=self._runtime_lock,
+            )
+        elif mode == "openvino":
+            backend = OpenVINOBackend(
+                config=self._config,
+                loaded_models=self._loaded_models,
+                meta_cache=self._meta_cache,
+                runtime_lock=self._runtime_lock,
+            )
+        elif mode == "onnx":
+            backend = ONNXBackend(
+                config=self._config,
+                loaded_models=self._loaded_models,
+                meta_cache=self._meta_cache,
+                runtime_lock=self._runtime_lock,
+            )
+        elif mode == "ultralytics":
+            device_resolution = self._resolve_device()
+            backend = UltralyticsBackend(
+                config=self._config,
+                loaded_models=self._loaded_models,
+                meta_cache=self._meta_cache,
+                runtime_lock=self._runtime_lock,
+                device_resolution=device_resolution,
+            )
+        else:
+            raise ValueError(f"Unknown backend mode: {mode}")
+
+        self._backend_cache[mode] = backend
+        return backend
 
     def _normalize_detections(
         self,
@@ -236,416 +220,6 @@ class StickerInferenceService:
     def _normalize_label_key(value: Any) -> str:
         text = str(value or "").strip().lower()
         return "".join(ch for ch in text if ch.isalnum())
-
-    @staticmethod
-    def _letterbox(
-        image: np.ndarray,
-        target_size: tuple[int, int],
-        color: tuple[int, int, int] = (114, 114, 114),
-    ) -> tuple[np.ndarray, float, int, int]:
-        """Resize image preserving aspect ratio, pad remainder with gray.
-        Returns: (padded_image, scale, pad_left, pad_top)
-        scale: factor applied to original image to fit in target_size
-        """
-        h_orig, w_orig = image.shape[:2]
-        h_tgt, w_tgt = target_size
-        scale = min(w_tgt / w_orig, h_tgt / h_orig)
-        w_new = int(round(w_orig * scale))
-        h_new = int(round(h_orig * scale))
-        img_scaled = cv2.resize(image, (w_new, h_new), interpolation=cv2.INTER_LINEAR)
-        canvas = np.full((h_tgt, w_tgt, 3), color, dtype=np.uint8)
-        pad_top = (h_tgt - h_new) // 2
-        pad_left = (w_tgt - w_new) // 2
-        canvas[pad_top:pad_top + h_new, pad_left:pad_left + w_new] = img_scaled
-        return canvas, scale, pad_left, pad_top
-
-    def _predict_ultralytics(self, image, vision: VisionConfig, device_resolution: DeviceResolution, expected_class: str | None = None) -> dict[str, Any]:
-        model_path = self._resolve_model_path(vision)
-        if not model_path:
-            raise FileNotFoundError("Sticker model path is not configured.")
-        resolved_model_path = Path(model_path)
-        if not resolved_model_path.exists():
-            raise FileNotFoundError(f"Sticker model not found: {resolved_model_path}")
-
-        model = self._get_ultralytics_model(str(resolved_model_path))
-        kwargs: dict[str, Any] = {
-            "verbose": False,
-            "conf": float(vision.conf_threshold),
-            "device": device_resolution.effective_device,
-        }
-        if int(vision.imgsz or 0) > 0:
-            kwargs["imgsz"] = int(vision.imgsz)
-        result = model.predict(image, **kwargs)[0]
-        names = result.names or {}
-        raw_box_count = int(len(result.boxes)) if result.boxes is not None else 0
-        # Build allowed labels from vision.classes + anchor classes + expected_class
-        allowed_label_values = [str(label) for label in (vision.classes or []) if str(label).strip()]
-        # Always include expected_class (from template sticker.expected_class)
-        if expected_class and str(expected_class).strip():
-            allowed_label_values.append(str(expected_class).strip())
-        if allowed_label_values:
-            for label in (getattr(vision, "text_anchor_class", ""), getattr(vision, "center_dot_class", "")):
-                if str(label or "").strip():
-                    allowed_label_values.append(str(label))
-        # Normalize to lowercase for case-insensitive matching
-        allowed_labels = {label.strip().lower() for label in allowed_label_values} or None
-        allowed_label_keys = ({self._normalize_label_key(label) for label in allowed_label_values if self._normalize_label_key(label)} or None)
-        detections = self._normalize_detections(
-            result=result,
-            names=names,
-            allowed_labels=allowed_labels,
-            allowed_label_keys=allowed_label_keys,
-        )
-        return {
-            "backend": "ultralytics",
-            "mode": "ultralytics",
-            "model_path": str(resolved_model_path),
-            "meta_path": self._resolve_meta_path(vision) or None,
-            "class_names": list(self._load_meta(self._resolve_meta_path(vision)).get("class_names") or []),
-            "detections": detections,
-            "raw_detection_count": raw_box_count,
-            "allowed_labels_filter": sorted(allowed_labels) if allowed_labels is not None else None,
-            "fallback_reason": None,
-            "device_mode": device_resolution.requested_mode,
-            "effective_device": device_resolution.effective_device,
-            "device_backend": device_resolution.backend,
-            "device_fallback_reason": device_resolution.fallback_reason,
-            "gpu_available": device_resolution.gpu_available,
-        }
-
-    def _predict_tflite(self, image, vision: VisionConfig, expected_class: str | None = None) -> dict[str, Any]:
-        """Run inference via TFLite interpreter (CPU-friendly)."""
-        import time as _time
-        t0 = _time.perf_counter()
-
-        model_path = self._resolve_model_path(vision)
-        if not model_path:
-            raise FileNotFoundError("Sticker model path is not configured.")
-        resolved_model_path = Path(model_path)
-        if not resolved_model_path.exists():
-            raise FileNotFoundError(f"TFLite model not found: {resolved_model_path}")
-
-        logger.debug("[tflite] loading model: %s", resolved_model_path)
-        _num_threads = getattr(self._config, "inference_num_threads", 4)
-        interpreter = self._load_tflite_interpreter(str(resolved_model_path), num_threads=_num_threads)
-        input_details = interpreter.get_input_details()
-        output_details = interpreter.get_output_details()
-
-        input_shape = input_details[0]["shape"]
-        input_dtype = input_details[0]["dtype"]
-        logger.debug("[tflite] input_shape=%s dtype=%s", input_shape, input_dtype)
-
-        # Preprocess
-        h_in, w_in = int(input_shape[1]), int(input_shape[2])
-        img_padded, _scale, _pad_left, _pad_top = self._letterbox(image, (h_in, w_in))
-        img_rgb = cv2.cvtColor(img_padded, cv2.COLOR_BGR2RGB)
-        if np.issubdtype(input_dtype, np.floating):
-            img_normalized = (img_rgb.astype(np.float32) / 255.0).astype(input_dtype)
-        else:
-            img_normalized = img_rgb.astype(input_dtype)
-        input_data = np.expand_dims(img_normalized, axis=0)
-        t1 = _time.perf_counter()
-        logger.debug("[tflite] preprocess=%.1fms", (t1 - t0) * 1000)
-
-        # Run inference
-        interpreter.set_tensor(input_details[0]["index"], input_data)
-        interpreter.invoke()
-        output_data = interpreter.get_tensor(output_details[0]["index"])
-        t2 = _time.perf_counter()
-        logger.debug("[tflite] invoke=%.1fms", (t2 - t1) * 1000)
-
-        # Parse output — use shared helper
-        candidates = []
-        raw_box_count = 0
-        roi_h, roi_w = image.shape[:2]
-        if output_data is not None and output_data.size > 0:
-            raw_out = output_data[0]
-            logger.debug("[tflite] output_shape=%s", raw_out.shape)
-            if raw_out.ndim == 2:
-                if raw_out.shape[0] < raw_out.shape[1]:
-                    raw_out = raw_out.T
-                raw_box_count = int(raw_out.shape[0])
-                candidates = _parse_yolo_output(
-                    raw_out,
-                    float(vision.conf_threshold),
-                    _pad_left,
-                    _pad_top,
-                    w_in,
-                    h_in,
-                )
-
-        detections = _apply_nms(candidates, float(vision.conf_threshold))
-        # Scale normalized coords to pixel space
-        for det in detections:
-            px = det["position"]
-            px["x1"] = round(px["x1"] * roi_w, 2)
-            px["y1"] = round(px["y1"] * roi_h, 2)
-            px["x2"] = round(px["x2"] * roi_w, 2)
-            px["y2"] = round(px["y2"] * roi_h, 2)
-            det["bbox"] = [px["x1"], px["y1"], px["x2"], px["y2"]]
-
-        t3 = _time.perf_counter()
-        logger.info("[tflite] total=%.1fms parse=%.1fms raw=%d filtered=%d",
-                     (t3 - t0) * 1000, (t3 - t2) * 1000, len(candidates), len(detections))
-
-        # Load class names and filter — use shared helper
-        meta = self._load_meta(self._resolve_meta_path(vision))
-        class_names = meta.get("class_names", [])
-        names_map = {i: name for i, name in enumerate(class_names)}
-
-        if not names_map:
-            logger.warning(
-                "[inference] class_names kosong — label akan tampil sebagai angka. "
-                "Pastikan file JSON dengan key 'class_names' ada di folder model."
-            )
-
-        allowed_label_values = [str(label) for label in (vision.classes or []) if str(label).strip()]
-        if expected_class and str(expected_class).strip():
-            allowed_label_values.append(str(expected_class).strip())
-        if allowed_label_values:
-            for label in (getattr(vision, "text_anchor_class", ""), getattr(vision, "center_dot_class", "")):
-                if str(label or "").strip():
-                    allowed_label_values.append(str(label))
-        allowed_labels = {label.strip().lower() for label in allowed_label_values} or None
-
-        filtered = _apply_names_map(detections, names_map, allowed_labels)
-
-        return {
-            "backend": "tflite",
-            "mode": "tflite",
-            "model_path": str(resolved_model_path),
-            "meta_path": self._resolve_meta_path(vision) or None,
-            "class_names": class_names,
-            "detections": filtered,
-            "raw_detection_count": raw_box_count,
-            "allowed_labels_filter": sorted(allowed_labels) if allowed_labels is not None else None,
-            "fallback_reason": None,
-            "device_mode": "cpu",
-            "effective_device": "cpu",
-            "device_backend": "tflite",
-            "device_fallback_reason": None,
-            "gpu_available": False,
-        }
-
-    def _load_openvino_model(self, model_path: str):
-        """Load OpenVINO IR model (.xml) — cached after first load."""
-        resolved = str(Path(model_path).resolve())
-        with self._runtime_lock:
-            model = self._loaded_models.get(resolved)
-            if model is not None:
-                return model
-        try:
-            from openvino import Core  # type: ignore  # OpenVINO 2024.x+
-        except ImportError:
-            try:
-                from openvino.runtime import Core  # type: ignore  # Legacy 2022.x–2023.x
-            except ImportError:
-                raise ModuleNotFoundError("openvino required: pip install openvino")
-        ie = Core()
-        ov_model = ie.read_model(model=resolved)
-        _n = getattr(self._config, "inference_num_threads", 4)
-        ie.set_property("CPU", {"INFERENCE_NUM_THREADS": str(_n)})
-        compiled = ie.compile_model(model=ov_model, device_name="CPU")
-        with self._runtime_lock:
-            self._loaded_models[resolved] = compiled
-        logger.debug("[openvino] model loaded: %s", resolved)
-        return compiled
-
-    def _predict_openvino(self, image, vision: VisionConfig, expected_class: str | None = None) -> dict[str, Any]:
-        """Run inference via OpenVINO IR (optimized for Intel CPU/iGPU)."""
-        import time as _time
-        t0 = _time.perf_counter()
-
-        model_path = self._resolve_model_path(vision)
-        if not model_path:
-            raise FileNotFoundError("Sticker model path is not configured.")
-        resolved_model_path = Path(model_path)
-        if not resolved_model_path.exists():
-            raise FileNotFoundError(f"OpenVINO model not found: {resolved_model_path}")
-
-        compiled = self._load_openvino_model(str(resolved_model_path))
-        input_layer = compiled.input(0)
-        input_shape = tuple(input_layer.shape)  # e.g. (1, 3, 640, 640) NCHW or (1, 640, 640, 3) NHWC
-
-        # Determine layout: NCHW if dim[1] in {1,3}, else assume NHWC
-        if len(input_shape) == 4 and input_shape[1] in (1, 3):
-            _, _c, h_in, w_in = input_shape
-            nchw = True
-        else:
-            _, h_in, w_in, _c = input_shape
-            nchw = False
-
-        # Letterbox preprocessing (same as TFLite)
-        img_padded, _scale, _pad_left, _pad_top = self._letterbox(image, (int(h_in), int(w_in)))
-        img_rgb = cv2.cvtColor(img_padded, cv2.COLOR_BGR2RGB)
-        img_norm = img_rgb.astype(np.float32) / 255.0
-        if nchw:
-            input_data = np.transpose(img_norm, (2, 0, 1))[np.newaxis, ...]
-        else:
-            input_data = img_norm[np.newaxis, ...]
-        t1 = _time.perf_counter()
-
-        # Inference
-        results = compiled([input_data])
-        out = list(results.values())[0]
-        t2 = _time.perf_counter()
-
-        # Parse output — same YOLO format as TFLite/ONNX [1, 6, 8400] — use shared helper
-        candidates = []
-        raw_box_count = 0
-        roi_h, roi_w = image.shape[:2]
-        if out is not None and out.size > 0:
-            raw_out = out[0]
-            if raw_out.ndim == 2:
-                if raw_out.shape[0] < raw_out.shape[1]:
-                    raw_out = raw_out.T
-                raw_box_count = int(raw_out.shape[0])
-                candidates = _parse_yolo_output(
-                    raw_out,
-                    float(vision.conf_threshold),
-                    _pad_left,
-                    _pad_top,
-                    int(w_in),
-                    int(h_in),
-                )
-
-        detections = _apply_nms(candidates, float(vision.conf_threshold))
-        # Scale normalized coords to pixel space
-        for det in detections:
-            px = det["position"]
-            px["x1"] = round(px["x1"] * roi_w, 2)
-            px["y1"] = round(px["y1"] * roi_h, 2)
-            px["x2"] = round(px["x2"] * roi_w, 2)
-            px["y2"] = round(px["y2"] * roi_h, 2)
-            det["bbox"] = [px["x1"], px["y1"], px["x2"], px["y2"]]
-
-        t3 = _time.perf_counter()
-        logger.info("[openvino] total=%.1fms parse=%.1fms raw=%d filtered=%d",
-                    (t3 - t0) * 1000, (t3 - t2) * 1000, len(candidates), len(detections))
-
-        # Class name mapping (same as TFLite) — use shared helper
-        meta = self._load_meta(self._resolve_meta_path(vision))
-        class_names = meta.get("class_names", [])
-        names_map = {i: name for i, name in enumerate(class_names)}
-        allowed_label_values = [str(label) for label in (vision.classes or []) if str(label).strip()]
-        if expected_class and str(expected_class).strip():
-            allowed_label_values.append(str(expected_class).strip())
-        allowed_labels = {label.strip().lower() for label in allowed_label_values} or None
-        filtered = _apply_names_map(detections, names_map, allowed_labels)
-
-        return {
-            "backend": "openvino",
-            "mode": "openvino",
-            "model_path": str(resolved_model_path),
-            "meta_path": self._resolve_meta_path(vision) or None,
-            "class_names": class_names,
-            "detections": filtered,
-            "raw_detection_count": raw_box_count,
-            "allowed_labels_filter": sorted(allowed_labels) if allowed_labels is not None else None,
-            "fallback_reason": None,
-            "device_mode": "cpu",
-            "effective_device": "cpu",
-            "device_backend": "openvino",
-            "device_fallback_reason": None,
-            "gpu_available": False,
-        }
-
-    def _predict_onnx(
-        self, image, vision: VisionConfig, device_resolution: DeviceResolution, expected_class: str | None = None,
-    ) -> dict[str, Any]:
-        """Run inference via ONNX Runtime (CPU-friendly, no GPU needed)."""
-        import time as _time
-        t0 = _time.perf_counter()
-
-        model_path = self._resolve_model_path(vision)
-        if not model_path:
-            raise FileNotFoundError("Sticker model path is not configured.")
-        resolved_model_path = Path(model_path)
-        if not resolved_model_path.exists():
-            raise FileNotFoundError(f"ONNX model not found: {resolved_model_path}")
-
-        logger.info("[onnx] loading model: %s", resolved_model_path)
-        sess = self._load_onnx_session(str(resolved_model_path))
-        input_name = sess.get_inputs()[0].name
-        logger.info("[onnx] input_name=%s", input_name)
-
-        # Preprocess: letterbox → BGR→RGB → normalize /255 → float32
-        # Model expects NHWC [1, 640, 640, 3] (TFLite-origin ONNX, channel-last)
-        _onnx_pad, _onnx_scale, _onnx_pad_left, _onnx_pad_top = self._letterbox(image, (640, 640))
-        img_rgb = cv2.cvtColor(_onnx_pad, cv2.COLOR_BGR2RGB)
-        img_norm = img_rgb.astype(np.float32) / 255.0
-        input_data = img_norm[np.newaxis, ...]  # [1, 640, 640, 3]
-        t1 = _time.perf_counter()
-        logger.info("[onnx] preprocess=%.1fms", (t1 - t0) * 1000)
-
-        # Inference
-        out = sess.run(None, {input_name: input_data})[0]  # [1, 6, 8400] or similar
-        t2 = _time.perf_counter()
-        logger.info("[onnx] invoke=%.1fms", (t2 - t1) * 1000)
-
-        # Parse output — YOLOv11 format: rows are [cx, cy, w, h, cls0_score, cls1_score, ...]
-        # No separate objectness score; class_probs ARE the confidence.
-        # Use shared helper.
-        out_raw = out[0]  # → [6, 8400] or [8400, 6]
-        if out_raw.ndim == 2 and out_raw.shape[0] < out_raw.shape[1]:
-            out_raw = out_raw.T  # → [N, C]
-
-        candidates = _parse_yolo_output(
-            out_raw,
-            float(vision.conf_threshold),
-            _onnx_pad_left,
-            _onnx_pad_top,
-            640,
-            640,
-        )
-
-        detections = _apply_nms(candidates, float(vision.conf_threshold))
-        # Scale normalized coords to pixel space
-        roi_h, roi_w = image.shape[:2]
-        for det in detections:
-            px = det["position"]
-            px["x1"] = round(px["x1"] * roi_w, 2)
-            px["y1"] = round(px["y1"] * roi_h, 2)
-            px["x2"] = round(px["x2"] * roi_w, 2)
-            px["y2"] = round(px["y2"] * roi_h, 2)
-            det["bbox"] = [px["x1"], px["y1"], px["x2"], px["y2"]]
-
-        t3 = _time.perf_counter()
-        logger.info("[onnx] total=%.1fms parse=%.1fms raw=%d filtered=%d",
-                     (t3 - t0) * 1000, (t3 - t2) * 1000, len(candidates), len(detections))
-
-        # Load class names — use shared helper
-        meta = self._load_meta(self._resolve_meta_path(vision))
-        class_names = meta.get("class_names", [])
-        names_map = {i: name for i, name in enumerate(class_names)}
-
-        allowed_label_values = [str(label) for label in (vision.classes or []) if str(label).strip()]
-        if expected_class and str(expected_class).strip():
-            allowed_label_values.append(str(expected_class).strip())
-        if allowed_label_values:
-            for label in (getattr(vision, "text_anchor_class", ""), getattr(vision, "center_dot_class", "")):
-                if str(label or "").strip():
-                    allowed_label_values.append(str(label))
-        allowed_labels = {label.strip().lower() for label in allowed_label_values} or None
-
-        filtered = _apply_names_map(detections, names_map, allowed_labels)
-
-        return {
-            "backend": "onnx",
-            "mode": "onnx",
-            "model_path": str(resolved_model_path),
-            "meta_path": self._resolve_meta_path(vision) or None,
-            "class_names": class_names,
-            "detections": filtered,
-            "raw_detection_count": len(candidates),
-            "allowed_labels_filter": sorted(allowed_labels) if allowed_labels is not None else None,
-            "fallback_reason": None,
-            "device_mode": "cpu",
-            "effective_device": "cpu",
-            "device_backend": "onnx",
-            "device_fallback_reason": None,
-            "gpu_available": False,
-        }
 
     def _select_anchor_detection(
         self,
@@ -1406,9 +980,9 @@ class StickerInferenceService:
                 "detections": [],
                 "anchor": {},
                 "ocr": {"status": "skipped", "engine": self._resolve_ocr_engine(vision)},
-            "geometry": {},
-            "fallback_reason": "empty_roi",
-        }
+                "geometry": {},
+                "fallback_reason": "empty_roi",
+            }
 
         validator_mode = str(getattr(sticker_rule, "validator_mode", "") or "").strip().lower() if sticker_rule is not None else ""
         use_sticker_only = bool(getattr(sticker_rule, "use_ocr", False)) or validator_mode in {
@@ -1450,7 +1024,7 @@ class StickerInferenceService:
         # TFLite mode: CPU-only, no GPU device resolution needed
         if mode == "tflite":
             try:
-                payload = self._predict_tflite(image, vision, expected_class=expected_class)
+                payload = self._get_backend("tflite").predict(image, vision, expected_class=expected_class)
                 if use_sticker_only:
                     return self._augment_with_ocr_only(
                         payload, image, vision,
@@ -1472,8 +1046,7 @@ class StickerInferenceService:
         # ONNX mode: CPU-only via onnxruntime
         if mode == "onnx":
             try:
-                device_resolution = self._resolve_device()
-                payload = self._predict_onnx(image, vision, device_resolution, expected_class=expected_class)
+                payload = self._get_backend("onnx").predict(image, vision, expected_class=expected_class)
                 if use_sticker_only:
                     return self._augment_with_ocr_only(
                         payload, image, vision,
@@ -1495,7 +1068,7 @@ class StickerInferenceService:
         # OpenVINO mode: Intel CPU optimized
         if mode == "openvino":
             try:
-                payload = self._predict_openvino(image, vision, expected_class=expected_class)
+                payload = self._get_backend("openvino").predict(image, vision, expected_class=expected_class)
                 if use_sticker_only:
                     return self._augment_with_ocr_only(payload, image, vision,
                         expected_class=expected_class, sticker_rule=sticker_rule)
@@ -1509,9 +1082,8 @@ class StickerInferenceService:
                     expected_class=expected_class, sticker_rule=sticker_rule)
 
         # Ultralytics mode (auto/ultralytics)
-        device_resolution = self._resolve_device()
         try:
-            payload = self._predict_ultralytics(image, vision, device_resolution, expected_class=expected_class)
+            payload = self._get_backend("ultralytics").predict(image, vision, expected_class=expected_class)
             if use_sticker_only:
                 return self._augment_with_ocr_only(
                     payload, image, vision,
@@ -1525,6 +1097,7 @@ class StickerInferenceService:
             if mode == "ultralytics":
                 raise
             logging.warning("Sticker inference fallback to classic mode: %s", exc)
+            device_resolution = self._resolve_device()
             payload = self._predict_classic(image, vision, expected_class)
             payload["fallback_reason"] = str(exc)
             payload["device_mode"] = device_resolution.requested_mode
