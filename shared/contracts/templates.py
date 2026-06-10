@@ -178,9 +178,26 @@ def _pick_roi_payload(payload: dict[str, Any], *keys: str) -> dict[str, Any]:
     return {}
 
 
+_VALID_STICKER_FIELDS = {
+    "part_name", "expected_class", "enabled", "validator_mode", "min_roi_confidence",
+    "min_class_confidence", "max_offset_x", "max_offset_y", "expected_center_x",
+    "expected_center_y", "expected_tilt_degrees", "max_tilt_degrees", "use_ocr",
+    "ocr_expected_code", "ocr_flip_fallback", "ocr_mode", "ocr_expected_text",
+    "ocr_min_confidence", "ocr_regex", "ocr_canonical_map", "anchor_min_confidence",
+    "dot_min_confidence", "expected_dot_x", "expected_dot_y", "max_anchor_offset_x",
+    "max_anchor_offset_y", "tilt_gate_enabled", "edge_roi_tolerance_px",
+    "edge_search_padding_ratio", "morph_kernel_width", "morph_kernel_height",
+    "min_text_aspect_ratio", "commit_stable_frames", "part_ready_settle_ms",
+    "part_ready_settle_frames", "white_hsv_lower", "white_hsv_upper",
+    "min_text_contour_area_ratio",
+}
+
+
 def template_from_dict(payload: dict[str, Any]) -> InspectionTemplate:
     part_ready_roi_payload = _pick_roi_payload(payload, "part_ready_roi", "roi", "sticker_roi")
     sticker_roi_payload = _pick_roi_payload(payload, "sticker_roi", "roi", "part_ready_roi")
+    _sticker_raw = dict(payload.get("sticker") or {})
+    _sticker_filtered = {k: v for k, v in _sticker_raw.items() if k in _VALID_STICKER_FIELDS}
     return InspectionTemplate(
         id=payload.get("id"),
         version_id=payload.get("version_id"),
@@ -193,7 +210,7 @@ def template_from_dict(payload: dict[str, Any]) -> InspectionTemplate:
         sticker_roi=RoiGeometry(**sticker_roi_payload),
         vision=VisionConfig(**(payload.get("vision") or {})),
         part_ready=PartReadyConfig(**(payload.get("part_ready") or {})),
-        sticker=StickerRule(**(payload.get("sticker") or {})),
+        sticker=StickerRule(**_sticker_filtered),
         persistence=PersistenceConfig(**(payload.get("persistence") or {})),
         metadata=dict(payload.get("metadata") or {}),
     )

@@ -425,16 +425,13 @@ class OperatorScreen(ctk.CTkFrame):
             self.context_bar.columnconfigure(0, weight=1)
             self.context_bar.columnconfigure(1, weight=1)
             self.context_labels["operator"].grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
-            self.context_labels["line"].grid(row=1, column=0, sticky="w", padx=(0, 8))
-            self.context_labels["station"].grid(row=1, column=1, sticky="w")
+            self.context_labels["template"].grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
             self.context_labels["template"].grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
         else:
             for index in range(4):
                 self.context_bar.columnconfigure(index, weight=1)
-            self.context_labels["operator"].grid(row=0, column=0, sticky="w")
-            self.context_labels["line"].grid(row=0, column=1, sticky="w", padx=8)
-            self.context_labels["station"].grid(row=0, column=2, sticky="w", padx=8)
-            self.context_labels["template"].grid(row=0, column=3, sticky="w", padx=8)
+            self.context_labels["operator"].grid(row=0, column=0, sticky="w", padx=(0, 8))
+            self.context_labels["template"].grid(row=0, column=1, columnspan=3, sticky="w")
 
     def _layout_status_strip(self, *, compact: bool) -> None:
         for widget in self.status_badges_container.grid_slaves():
@@ -1319,6 +1316,8 @@ class OperatorScreen(ctk.CTkFrame):
         return str(selected.get("name") or "").strip() or None
 
     def _set_badge(self, key: str, value: str, tone: str = "neutral") -> None:
+        if not hasattr(self, "badges") or key not in self.badges:
+            return
         bg, fg = BADGE_COLORS.get(tone, BADGE_COLORS["neutral"])
         self.badges[key].configure(text=f"{key}: {value}", fg_color=bg, text_color=fg)
 
