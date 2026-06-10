@@ -2142,7 +2142,7 @@ class InspectionSessionService:
         sticker = state.template.sticker
         validator_mode = str(getattr(sticker, "validator_mode", "ml_detection") or "ml_detection").strip().lower()
         position_gate_enabled = validator_mode not in ROI_CLASS_VALIDATOR_MODES
-        line_id = state.line_id or sticker.line
+        line_id = state.line_id
         expected_tilt_degrees = float(getattr(sticker, "expected_tilt_degrees", 0.0) or 0.0)
         max_tilt_degrees = getattr(sticker, "max_tilt_degrees", None)
         max_tilt_degrees_value = None if max_tilt_degrees is None else float(max_tilt_degrees)
