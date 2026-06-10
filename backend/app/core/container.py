@@ -133,7 +133,7 @@ def _log_startup_config() -> None:
         f"hard_reject_stable_ms: {_cfg.hard_reject_stable_ms}",
         f"hard_reject_stable_frames: {_cfg.hard_reject_stable_frames}",
         f"part_ready_settle_ms_default: {_cfg.part_ready_settle_ms_default}",
-        f"part_ready_release_ms_default: {_cfg.part_ready_release_ms_default_default if hasattr(_cfg, 'part_ready_release_ms_default') else '(inherited per template)'}",
+        f"part_ready_release_ms_default: {_cfg.part_ready_release_ms_default}",
         f"inspect_hard_reject_reasons: {_cfg.inspect_hard_reject_reasons}",
         f"plc_enabled: {_cfg.plc_enabled}",
         f"plc_dry_run: {_cfg.plc_dry_run}",
