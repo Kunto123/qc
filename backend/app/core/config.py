@@ -10,10 +10,8 @@ DATA_ROOT = Path(os.getenv("QC_SUITE_DATA_ROOT", PROJECT_ROOT / "data")).resolve
 JSON_STORE_DIR = DATA_ROOT / "json_store"
 DATASETS_DIR = DATA_ROOT / "datasets"
 MODELS_DIR = DATA_ROOT / "models"
-DEFAULT_STICKER_MODEL_PATH = os.getenv(
-    "QC_SUITE_DEFAULT_STICKER_MODEL_PATH",
-    r"D:\ProjectMagang\akh.pt",
-).strip()
+DEFAULT_STICKER_MODEL_PATH = os.getenv("QC_SUITE_DEFAULT_STICKER_MODEL_PATH", "").strip()
+DEFAULT_STICKER_MODEL_META_PATH = os.getenv("QC_SUITE_DEFAULT_STICKER_MODEL_META_PATH", "").strip()
 
 
 @dataclass(slots=True)

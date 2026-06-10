@@ -100,8 +100,7 @@ class OperatorScreen(ctk.CTkFrame):
         self._inference_running = False
         self._inference_thread: threading.Thread | None = None
 
-<longcat_arg_value>
-
+        self.camera_value = tk.StringVar(value="0")
         self.camera_rotation_value = tk.StringVar(value="0")
         self.template_version_value = tk.StringVar()
         self.part_ready_roi_x_value = tk.StringVar(value="0.2")

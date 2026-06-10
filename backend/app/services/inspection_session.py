@@ -300,6 +300,8 @@ class InspectionSessionService:
                 for state in self._sessions.values():
                     state.awaiting_part_removal_after_commit = False
                     state.part_absent_started_at = None
+                    state.inference_result_cache = None  # flush stale cache
+                    state.inference_result_ts = 0.0       # paksa re-infer
             logger.info("[inspection] PLC CLAMPING — part-removal fence cleared for new cycle")
 
     def _reset_clamp_gate(self, state: SessionState) -> None:

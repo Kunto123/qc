@@ -112,6 +112,52 @@ workstation_registry_repo = WorkstationRegistryRepository()
 augment_repo = AugmentRepository()
 
 from backend.app.workers.augment_worker import AugmentWorker  # noqa: E402
+
+
+def _log_startup_config() -> None:
+    """Log semua config kritis satu blok saat service start."""
+    _cfg = app_config
+    _logger = logging.getLogger("backend.startup")
+    _lines = [
+        "=== QC Suite Config ===",
+        f"host: {_cfg.host}",
+        f"port: {_cfg.port}",
+        f"debug: {_cfg.debug}",
+        f"database_backend: {_cfg.database_backend}",
+        f"sticker_inference_mode: {_cfg.sticker_inference_mode}",
+        f"sticker_ocr_mode: {_cfg.sticker_ocr_mode}",
+        f"default_sticker_model_path: {_cfg.default_sticker_model_path or '(empty — auto-discover from template)'}",
+        f"commit_grace_ms: {_cfg.commit_grace_ms}",
+        f"accept_stable_ms: {_cfg.accept_stable_ms}",
+        f"accept_stable_frames: {_cfg.accept_stable_frames}",
+        f"hard_reject_stable_ms: {_cfg.hard_reject_stable_ms}",
+        f"hard_reject_stable_frames: {_cfg.hard_reject_stable_frames}",
+        f"part_ready_settle_ms_default: {_cfg.part_ready_settle_ms_default}",
+        f"part_ready_release_ms_default: {_cfg.part_ready_release_ms_default_default if hasattr(_cfg, 'part_ready_release_ms_default') else '(inherited per template)'}",
+        f"inspect_hard_reject_reasons: {_cfg.inspect_hard_reject_reasons}",
+        f"plc_enabled: {_cfg.plc_enabled}",
+        f"plc_dry_run: {_cfg.plc_dry_run}",
+        f"plc_transport: {_cfg.plc_transport}",
+        f"plc_min_reclamp_interval_ms: {_cfg.plc_min_reclamp_interval_ms}",
+        f"inference_num_threads: {_cfg.inference_num_threads}",
+        f"inference_timeout_s: {_cfg.inference_timeout_s}",
+        f"inference_cache_ttl_ms: {_cfg.inference_cache_ttl_ms}",
+        f"inference_interval_ms: {_cfg.inference_interval_ms}",
+        f"session_idle_timeout_s: {_cfg.session_idle_timeout_s}",
+        f"device_mode: {_cfg.device_mode}",
+        f"cuda_device_id: {_cfg.cuda_device_id}",
+        f"local_only: {_cfg.local_only}",
+        f"access_logs_enabled: {_cfg.access_logs_enabled}",
+        "=======================",
+    ]
+    for _line in _lines:
+        _logger.info("[config] %s", _line)
+
+
+import logging
+
+_log_startup_config()
+
 _augment_worker = AugmentWorker(augment_repo, datasets_repo)
 _augment_worker.start()
 

@@ -146,4 +146,5 @@ def match_gap(frame_bgr: np.ndarray, roi: dict, ref_patch: np.ndarray,
             "location": (int(max_loc[0]), int(max_loc[1])),
         }
     except Exception:
+        _logger.warning("[gap] match_gap error", exc_info=True)
         return {"match": False, "score": 0.0, "location": (0, 0)}

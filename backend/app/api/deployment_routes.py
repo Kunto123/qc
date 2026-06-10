@@ -3,6 +3,8 @@ from __future__ import annotations
 from flask import Blueprint, g, jsonify, request
 
 from backend.app.core.container import deployments_repo, templates_repo
+from pathlib import Path as _Path
+import json as _json
 from backend.app.core.http import require_auth, require_roles
 from shared.contracts.enums import UserRole
 
@@ -22,6 +24,26 @@ def deploy_template():
     version = templates_repo.get_version(template_version_id)
     if template is None or version is None:
         return jsonify({"error": "Template or version not found"}), 404
+    # Fail-fast: validate model has meta JSON with class_names
+    _model_path = (version.get("vision") or {}).get("model_path", "")
+    if _model_path:
+        _p = _Path(_model_path)
+        _meta_candidates = [
+            _p.parent / (_p.stem + ".meta.json"),
+            _p.with_suffix(".json"),
+        ]
+        _meta_path = None
+        for _c in _meta_candidates:
+            if _c.exists():
+                _meta_path = str(_c)
+                break
+        if _meta_path:
+            try:
+                _meta = _json.loads(_Path(_meta_path).read_text(encoding="utf-8"))
+                if not _meta.get("class_names"):
+                    return jsonify({"error": f"Meta JSON tidak memiliki class_names: {_meta_path}"}), 400
+            except Exception as _exc:
+                return jsonify({"error": f"Meta JSON parse error: {_exc}"}), 400
     record = deployments_repo.deploy(
         template_id=template_id,
         template_version_id=template_version_id,

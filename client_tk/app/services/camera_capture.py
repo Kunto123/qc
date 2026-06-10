@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -72,6 +73,17 @@ class CameraCaptureService:
             raise RuntimeError(f"Cannot open camera index {self._camera_index}")
         if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
             self._capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # Configurable exposure: QC_SUITE_CAMERA_AUTO_EXPOSURE=0 → manual mode
+        _auto_exp = int(os.getenv("QC_SUITE_CAMERA_AUTO_EXPOSURE", "1"))
+        if _auto_exp == 0:
+            _exp_val = int(os.getenv("QC_SUITE_CAMERA_EXPOSURE_VALUE", "-6"))
+            try:
+                if hasattr(cv2, "CAP_PROP_AUTO_EXPOSURE"):
+                    self._capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # 1 = manual
+                if hasattr(cv2, "CAP_PROP_EXPOSURE"):
+                    self._capture.set(cv2.CAP_PROP_EXPOSURE, _exp_val)
+            except Exception:
+                pass
         if width is not None and int(width) > 0:
             self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
         if height is not None and int(height) > 0:

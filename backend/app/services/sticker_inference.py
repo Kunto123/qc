@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 from backend.app.core.config import AppConfig
 from backend.app.core.device_runtime import DeviceResolution, DeviceRuntimeResolver
 from backend.app.repositories.models_repository import ModelsRepository
+from backend.app.services.inference_backend import (
+    _apply_names_map,
+    _apply_nms,
+    _parse_yolo_output,
+)
 from backend.app.services.text_tilt import estimate_white_text_tilt
 from shared.contracts.templates import StickerRule
 from shared.contracts.templates import VisionConfig
@@ -49,7 +54,7 @@ class StickerInferenceService:
         self._device_runtime = device_runtime or DeviceRuntimeResolver(app_config)
         self._runtime_lock = threading.RLock()
         self._loaded_models: dict[str, Any] = {}
-        self._meta_cache: dict[str, dict[str, Any]] = {}
+        self._meta_cache: dict[str, tuple[dict, float]] = {}
 
     def _resolve_mode(self) -> str:
         mode = str(self._config.sticker_inference_mode or "auto").strip().lower()
@@ -76,10 +81,13 @@ class StickerInferenceService:
     def _load_meta(self, meta_path: str) -> dict[str, Any]:
         if not meta_path:
             return {}
+        now = time.monotonic()
         with self._runtime_lock:
             cached = self._meta_cache.get(meta_path)
             if cached is not None:
-                return cached
+                payload, loaded_at = cached
+                if now - loaded_at < 30.0:  # TTL 30 detik
+                    return payload
             path = Path(meta_path)
             if not path.exists():
                 logger.warning("[inference] meta file not found: %s", meta_path)
@@ -90,7 +98,7 @@ class StickerInferenceService:
             except Exception as exc:
                 logger.warning("[inference] meta file parse error %s: %s", meta_path, exc)
                 payload = {}
-            self._meta_cache[meta_path] = payload
+            self._meta_cache[meta_path] = (payload, now)
             return payload
 
     def _load_yolo_class(self):
@@ -317,7 +325,7 @@ class StickerInferenceService:
         if not resolved_model_path.exists():
             raise FileNotFoundError(f"TFLite model not found: {resolved_model_path}")
 
-        logger.info("[tflite] loading model: %s", resolved_model_path)
+        logger.debug("[tflite] loading model: %s", resolved_model_path)
         _num_threads = getattr(self._config, "inference_num_threads", 4)
         interpreter = self._load_tflite_interpreter(str(resolved_model_path), num_threads=_num_threads)
         input_details = interpreter.get_input_details()
@@ -325,7 +333,7 @@ class StickerInferenceService:
 
         input_shape = input_details[0]["shape"]
         input_dtype = input_details[0]["dtype"]
-        logger.info("[tflite] input_shape=%s dtype=%s", input_shape, input_dtype)
+        logger.debug("[tflite] input_shape=%s dtype=%s", input_shape, input_dtype)
 
         # Preprocess
         h_in, w_in = int(input_shape[1]), int(input_shape[2])
@@ -337,78 +345,59 @@ class StickerInferenceService:
             img_normalized = img_rgb.astype(input_dtype)
         input_data = np.expand_dims(img_normalized, axis=0)
         t1 = _time.perf_counter()
-        logger.info("[tflite] preprocess=%.1fms", (t1 - t0) * 1000)
+        logger.debug("[tflite] preprocess=%.1fms", (t1 - t0) * 1000)
 
         # Run inference
         interpreter.set_tensor(input_details[0]["index"], input_data)
         interpreter.invoke()
         output_data = interpreter.get_tensor(output_details[0]["index"])
         t2 = _time.perf_counter()
-        logger.info("[tflite] invoke=%.1fms", (t2 - t1) * 1000)
+        logger.debug("[tflite] invoke=%.1fms", (t2 - t1) * 1000)
 
-        # Parse output
+        # Parse output — use shared helper
         candidates = []
         raw_box_count = 0
-        detections = []
+        roi_h, roi_w = image.shape[:2]
         if output_data is not None and output_data.size > 0:
-            out = output_data[0]
-            logger.info("[tflite] output_shape=%s", out.shape)
-            if out.ndim == 2:
-                if out.shape[0] < out.shape[1]:
-                    out = out.T
-                raw_box_count = int(out.shape[0])
-                w_content = w_in - 2 * _pad_left  # pixels of actual content in padded frame
-                h_content = h_in - 2 * _pad_top
-                for row in out:
-                    class_scores = row[4:]
-                    conf = float(np.max(class_scores))
-                    if conf < float(vision.conf_threshold):
-                        continue
-                    class_id = int(np.argmax(class_scores))
-                    xc, yc, w_b, h_b = float(row[0]), float(row[1]), float(row[2]), float(row[3])
-                    # Deproject from padded [0,1] space back to original ROI [0,1]
-                    # xc,yc,w_b,h_b are normalized to padded model input (w_in x h_in)
-                    x1_padded = (xc - w_b / 2) * w_in
-                    y1_padded = (yc - h_b / 2) * h_in
-                    x2_padded = (xc + w_b / 2) * w_in
-                    y2_padded = (yc + h_b / 2) * h_in
-                    x1 = max(0.0, (x1_padded - _pad_left) / w_content) if w_content > 0 else 0.0
-                    y1 = max(0.0, (y1_padded - _pad_top) / h_content) if h_content > 0 else 0.0
-                    x2 = min(1.0, (x2_padded - _pad_left) / w_content) if w_content > 0 else 1.0
-                    y2 = min(1.0, (y2_padded - _pad_top) / h_content) if h_content > 0 else 1.0
-                    candidates.append((conf, class_id, x1, y1, x2, y2))
+            raw_out = output_data[0]
+            logger.debug("[tflite] output_shape=%s", raw_out.shape)
+            if raw_out.ndim == 2:
+                if raw_out.shape[0] < raw_out.shape[1]:
+                    raw_out = raw_out.T
+                raw_box_count = int(raw_out.shape[0])
+                candidates = _parse_yolo_output(
+                    raw_out,
+                    float(vision.conf_threshold),
+                    _pad_left,
+                    _pad_top,
+                    w_in,
+                    h_in,
+                )
 
-                # NMS — remove duplicate overlapping boxes
-                roi_h, roi_w = image.shape[:2]
-                if candidates:
-                    boxes_cv = [[c[2], c[3], c[4] - c[2], c[5] - c[3]] for c in candidates]
-                    scores_cv = [c[0] for c in candidates]
-                    indices = cv2.dnn.NMSBoxes(boxes_cv, scores_cv, float(vision.conf_threshold), 0.45)
-                    if len(indices) > 0:
-                        for idx in indices.flatten():
-                            conf, class_id, x1, y1, x2, y2 = candidates[int(idx)]
-                            detections.append({
-                                "label": str(class_id),
-                                "confidence": round(conf, 4),
-                                "class_confidence": round(conf, 4),
-                                "class_id": class_id,
-                                "position": {
-                                    "x1": round(x1 * roi_w, 2),
-                                    "y1": round(y1 * roi_h, 2),
-                                    "x2": round(x2 * roi_w, 2),
-                                    "y2": round(y2 * roi_h, 2),
-                                },
-                                "bbox": [round(x1 * roi_w, 2), round(y1 * roi_h, 2), round(x2 * roi_w, 2), round(y2 * roi_h, 2)],
-                            })
+        detections = _apply_nms(candidates, float(vision.conf_threshold))
+        # Scale normalized coords to pixel space
+        for det in detections:
+            px = det["position"]
+            px["x1"] = round(px["x1"] * roi_w, 2)
+            px["y1"] = round(px["y1"] * roi_h, 2)
+            px["x2"] = round(px["x2"] * roi_w, 2)
+            px["y2"] = round(px["y2"] * roi_h, 2)
+            det["bbox"] = [px["x1"], px["y1"], px["x2"], px["y2"]]
 
         t3 = _time.perf_counter()
         logger.info("[tflite] total=%.1fms parse=%.1fms raw=%d filtered=%d",
                      (t3 - t0) * 1000, (t3 - t2) * 1000, len(candidates), len(detections))
 
-        # Load class names and filter
+        # Load class names and filter — use shared helper
         meta = self._load_meta(self._resolve_meta_path(vision))
         class_names = meta.get("class_names", [])
         names_map = {i: name for i, name in enumerate(class_names)}
+
+        if not names_map:
+            logger.warning(
+                "[inference] class_names kosong — label akan tampil sebagai angka. "
+                "Pastikan file JSON dengan key 'class_names' ada di folder model."
+            )
 
         allowed_label_values = [str(label) for label in (vision.classes or []) if str(label).strip()]
         if expected_class and str(expected_class).strip():
@@ -419,17 +408,7 @@ class StickerInferenceService:
                     allowed_label_values.append(str(label))
         allowed_labels = {label.strip().lower() for label in allowed_label_values} or None
 
-        filtered = []
-        for det in detections:
-            label = names_map.get(det["class_id"], str(det["class_id"]))
-            det["label"] = label
-            # Only filter by label name when class mapping is available.
-            # Without meta file names_map is empty — skip filter instead of
-            # silently discarding every detection.
-            if names_map and allowed_labels is not None:
-                if label.strip().lower() not in allowed_labels:
-                    continue
-            filtered.append(det)
+        filtered = _apply_names_map(detections, names_map, allowed_labels)
 
         return {
             "backend": "tflite",
@@ -469,7 +448,7 @@ class StickerInferenceService:
         compiled = ie.compile_model(model=ov_model, device_name="CPU")
         with self._runtime_lock:
             self._loaded_models[resolved] = compiled
-        logger.info("[openvino] model loaded: %s", resolved)
+        logger.debug("[openvino] model loaded: %s", resolved)
         return compiled
 
     def _predict_openvino(self, image, vision: VisionConfig, expected_class: str | None = None) -> dict[str, Any]:
@@ -511,62 +490,40 @@ class StickerInferenceService:
         out = list(results.values())[0]
         t2 = _time.perf_counter()
 
-        # Parse output — same YOLO format as TFLite/ONNX [1, 6, 8400]
+        # Parse output — same YOLO format as TFLite/ONNX [1, 6, 8400] — use shared helper
         candidates = []
         raw_box_count = 0
-        detections = []
-        if out is not None and out.size > 0:
-            out_arr = out[0]
-            if out_arr.ndim == 2:
-                if out_arr.shape[0] < out_arr.shape[1]:
-                    out_arr = out_arr.T
-                raw_box_count = int(out_arr.shape[0])
-                w_content = int(w_in) - 2 * _pad_left
-                h_content = int(h_in) - 2 * _pad_top
-                for row in out_arr:
-                    class_scores = row[4:]
-                    conf = float(np.max(class_scores))
-                    if conf < float(vision.conf_threshold):
-                        continue
-                    class_id = int(np.argmax(class_scores))
-                    xc, yc, w_b, h_b = float(row[0]), float(row[1]), float(row[2]), float(row[3])
-                    x1_padded = (xc - w_b / 2) * int(w_in)
-                    y1_padded = (yc - h_b / 2) * int(h_in)
-                    x2_padded = (xc + w_b / 2) * int(w_in)
-                    y2_padded = (yc + h_b / 2) * int(h_in)
-                    x1 = max(0.0, (x1_padded - _pad_left) / w_content) if w_content > 0 else 0.0
-                    y1 = max(0.0, (y1_padded - _pad_top) / h_content) if h_content > 0 else 0.0
-                    x2 = min(1.0, (x2_padded - _pad_left) / w_content) if w_content > 0 else 1.0
-                    y2 = min(1.0, (y2_padded - _pad_top) / h_content) if h_content > 0 else 1.0
-                    candidates.append((conf, class_id, x1, y1, x2, y2))
-
         roi_h, roi_w = image.shape[:2]
-        if candidates:
-            boxes_cv = [[c[2], c[3], c[4] - c[2], c[5] - c[3]] for c in candidates]
-            scores_cv = [c[0] for c in candidates]
-            indices = cv2.dnn.NMSBoxes(boxes_cv, scores_cv, float(vision.conf_threshold), 0.45)
-            if len(indices) > 0:
-                for idx in indices.flatten():
-                    conf, class_id, x1, y1, x2, y2 = candidates[int(idx)]
-                    detections.append({
-                        "label": str(class_id),
-                        "confidence": round(conf, 4),
-                        "class_confidence": round(conf, 4),
-                        "class_id": class_id,
-                        "position": {
-                            "x1": round(x1 * roi_w, 2),
-                            "y1": round(y1 * roi_h, 2),
-                            "x2": round(x2 * roi_w, 2),
-                            "y2": round(y2 * roi_h, 2),
-                        },
-                        "bbox": [round(x1 * roi_w, 2), round(y1 * roi_h, 2), round(x2 * roi_w, 2), round(y2 * roi_h, 2)],
-                    })
+        if out is not None and out.size > 0:
+            raw_out = out[0]
+            if raw_out.ndim == 2:
+                if raw_out.shape[0] < raw_out.shape[1]:
+                    raw_out = raw_out.T
+                raw_box_count = int(raw_out.shape[0])
+                candidates = _parse_yolo_output(
+                    raw_out,
+                    float(vision.conf_threshold),
+                    _pad_left,
+                    _pad_top,
+                    int(w_in),
+                    int(h_in),
+                )
+
+        detections = _apply_nms(candidates, float(vision.conf_threshold))
+        # Scale normalized coords to pixel space
+        for det in detections:
+            px = det["position"]
+            px["x1"] = round(px["x1"] * roi_w, 2)
+            px["y1"] = round(px["y1"] * roi_h, 2)
+            px["x2"] = round(px["x2"] * roi_w, 2)
+            px["y2"] = round(px["y2"] * roi_h, 2)
+            det["bbox"] = [px["x1"], px["y1"], px["x2"], px["y2"]]
 
         t3 = _time.perf_counter()
         logger.info("[openvino] total=%.1fms parse=%.1fms raw=%d filtered=%d",
                     (t3 - t0) * 1000, (t3 - t2) * 1000, len(candidates), len(detections))
 
-        # Class name mapping (same as TFLite)
+        # Class name mapping (same as TFLite) — use shared helper
         meta = self._load_meta(self._resolve_meta_path(vision))
         class_names = meta.get("class_names", [])
         names_map = {i: name for i, name in enumerate(class_names)}
@@ -574,13 +531,7 @@ class StickerInferenceService:
         if expected_class and str(expected_class).strip():
             allowed_label_values.append(str(expected_class).strip())
         allowed_labels = {label.strip().lower() for label in allowed_label_values} or None
-        filtered = []
-        for det in detections:
-            label = names_map.get(det["class_id"], str(det["class_id"]))
-            det["label"] = label
-            if names_map and allowed_labels is not None and label.strip().lower() not in allowed_labels:
-                continue
-            filtered.append(det)
+        filtered = _apply_names_map(detections, names_map, allowed_labels)
 
         return {
             "backend": "openvino",
@@ -634,59 +585,36 @@ class StickerInferenceService:
 
         # Parse output — YOLOv11 format: rows are [cx, cy, w, h, cls0_score, cls1_score, ...]
         # No separate objectness score; class_probs ARE the confidence.
-        out = out[0]  # → [6, 8400] or [8400, 6]
-        if out.ndim == 2 and out.shape[0] < out.shape[1]:
-            out = out.T  # → [N, C]
+        # Use shared helper.
+        out_raw = out[0]  # → [6, 8400] or [8400, 6]
+        if out_raw.ndim == 2 and out_raw.shape[0] < out_raw.shape[1]:
+            out_raw = out_raw.T  # → [N, C]
 
-        candidates = []
-        _onnx_w_content = 640 - 2 * _onnx_pad_left
-        _onnx_h_content = 640 - 2 * _onnx_pad_top
-        for row in out:
-            class_scores = row[4:]
-            conf = float(np.max(class_scores))
-            if conf < float(vision.conf_threshold):
-                continue
-            class_id = int(np.argmax(class_scores))
-            xc, yc, w_b, h_b = float(row[0]), float(row[1]), float(row[2]), float(row[3])
-            x1_padded = (xc - w_b / 2) * 640
-            y1_padded = (yc - h_b / 2) * 640
-            x2_padded = (xc + w_b / 2) * 640
-            y2_padded = (yc + h_b / 2) * 640
-            x1 = max(0.0, (x1_padded - _onnx_pad_left) / _onnx_w_content) if _onnx_w_content > 0 else 0.0
-            y1 = max(0.0, (y1_padded - _onnx_pad_top) / _onnx_h_content) if _onnx_h_content > 0 else 0.0
-            x2 = min(1.0, (x2_padded - _onnx_pad_left) / _onnx_w_content) if _onnx_w_content > 0 else 1.0
-            y2 = min(1.0, (y2_padded - _onnx_pad_top) / _onnx_h_content) if _onnx_h_content > 0 else 1.0
-            candidates.append((conf, class_id, x1, y1, x2, y2))
+        candidates = _parse_yolo_output(
+            out_raw,
+            float(vision.conf_threshold),
+            _onnx_pad_left,
+            _onnx_pad_top,
+            640,
+            640,
+        )
 
-        # NMS
-        detections = []
+        detections = _apply_nms(candidates, float(vision.conf_threshold))
+        # Scale normalized coords to pixel space
         roi_h, roi_w = image.shape[:2]
-        if candidates:
-            boxes_cv = [[c[2], c[3], c[4] - c[2], c[5] - c[3]] for c in candidates]
-            scores_cv = [c[0] for c in candidates]
-            indices = cv2.dnn.NMSBoxes(boxes_cv, scores_cv, float(vision.conf_threshold), 0.45)
-            if len(indices) > 0:
-                for idx in indices.flatten():
-                    conf, class_id, x1, y1, x2, y2 = candidates[int(idx)]
-                    detections.append({
-                        "label": str(class_id),
-                        "confidence": round(conf, 4),
-                        "class_confidence": round(conf, 4),
-                        "class_id": class_id,
-                        "position": {
-                            "x1": round(x1 * roi_w, 2),
-                            "y1": round(y1 * roi_h, 2),
-                            "x2": round(x2 * roi_w, 2),
-                            "y2": round(y2 * roi_h, 2),
-                        },
-                        "bbox": [round(x1 * roi_w, 2), round(y1 * roi_h, 2), round(x2 * roi_w, 2), round(y2 * roi_h, 2)],
-                    })
+        for det in detections:
+            px = det["position"]
+            px["x1"] = round(px["x1"] * roi_w, 2)
+            px["y1"] = round(px["y1"] * roi_h, 2)
+            px["x2"] = round(px["x2"] * roi_w, 2)
+            px["y2"] = round(px["y2"] * roi_h, 2)
+            det["bbox"] = [px["x1"], px["y1"], px["x2"], px["y2"]]
 
         t3 = _time.perf_counter()
         logger.info("[onnx] total=%.1fms parse=%.1fms raw=%d filtered=%d",
                      (t3 - t0) * 1000, (t3 - t2) * 1000, len(candidates), len(detections))
 
-        # Load class names
+        # Load class names — use shared helper
         meta = self._load_meta(self._resolve_meta_path(vision))
         class_names = meta.get("class_names", [])
         names_map = {i: name for i, name in enumerate(class_names)}
@@ -700,14 +628,7 @@ class StickerInferenceService:
                     allowed_label_values.append(str(label))
         allowed_labels = {label.strip().lower() for label in allowed_label_values} or None
 
-        filtered = []
-        for det in detections:
-            label = names_map.get(det["class_id"], str(det["class_id"]))
-            det["label"] = label
-            if names_map and allowed_labels is not None:
-                if label.strip().lower() not in allowed_labels:
-                    continue
-            filtered.append(det)
+        filtered = _apply_names_map(detections, names_map, allowed_labels)
 
         return {
             "backend": "onnx",
