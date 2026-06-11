@@ -653,44 +653,55 @@ class InspectionSessionService:
             # Force all cycle state to idle
             state.part_ready_latched = False
             state.consecutive_part_ready_frames = 0
-            state.part_ready_settled = False
             state.plc_part_ready_triggered = False
-            # Build minimal "part not found" payload — skip inference, skip commit
-            part_ready["status"] = "part_not_ready"
-            part_ready["part_ready"] = False
-            part_ready["reject_reason_code"] = None
-            part_ready["effective_part_ready"] = False
-            part_ready["part_ready_latched"] = False
-            part_ready["latch_status"] = "inactive"
-            event_state = InspectionEventState.IDLE.value
-            event_id = None
-            count_committed = False
-            timings["event_state_ms"] = 0.0
-            persistence_started = time.perf_counter()
-            db_write = {"written": False, "reason": "not_committed"}
+            # Build and return minimal "part not found" response — skip all processing
             phase_remaining_ms = round((_blackout_until - _now_s) * 1000.0, 1)
-            phase_payload = {
-                "status": "post_commit_reset",
-                "remaining_ms": phase_remaining_ms,
-                "ready": False,
+            return {
+                "session": self._session_payload(state),
+                "presence": presence,
+                "part_ready": {
+                    **part_ready,
+                    "status": "part_not_ready",
+                    "part_ready": False,
+                    "reject_reason_code": None,
+                    "effective_part_ready": False,
+                    "part_ready_latched": False,
+                    "latch_status": "inactive",
+                },
+                "event_state": InspectionEventState.IDLE.value,
+                "operator_state": "blackout_reset",
+                "clamp": {
+                    "enabled": True,
+                    "feedback_enabled": False,
+                    "status": "idle",
+                    "ready": True,
+                },
+                "phase": {
+                    "status": "post_commit_reset",
+                    "remaining_ms": phase_remaining_ms,
+                    "ready": False,
+                },
+                "inference_gate": {
+                    "raw_part_ready": False,
+                    "raw_status": "part_not_ready",
+                    "raw_match_ratio": 0.0,
+                    "part_ready_latched": False,
+                    "effective_part_ready": False,
+                    "clamp_ready": True,
+                    "phase_ready": False,
+                    "can_infer": False,
+                    "block_reason": "blackout_reset",
+                },
+                "sticker_detection": {},
+                "validation": {"decision": "NOT_FOUND", "reject_reason_code": None},
+                "inspection_policy": {"action": "pending", "commit_allowed": False},
+                "count_committed": False,
+                "count_source": None,
+                "counters": self._counter_payload(state),
+                "last_committed_result": state.last_committed_result,
+                "recent_events": list(state.recent_events),
+                "timings": {**timings, "event_state_ms": 0.0, "total_ms": _elapsed_ms(total_started)},
             }
-            clamp_payload = {
-                "enabled": True,
-                "feedback_enabled": False,
-                "status": "idle",
-                "ready": True,
-            }
-            sticker_detection: dict[str, Any] = {}
-            sticker_tilt: dict[str, Any] = {}
-            ocr_result: dict[str, Any] = {}
-            poses: list[dict[str, Any]] = []
-            detections = []
-            _skip_inference = True
-        else:
-            _skip_inference = False
-
-
-        if not _skip_inference:
             # ------------------------------------------------------------------
             # Settle — frame-count based
             # Tunggu N frame berturut-turut di atas threshold sebelum clamp engage.
