@@ -811,7 +811,7 @@ class InspectionSessionService:
             settled=bool(part_ready_settled and clamp_ready_for_inference and phase_ready_for_inference),
         )
 
-        if operator_state_decision.use_cached_result and state.inspection_result_cache:
+        if not _skip_inference and operator_state_decision.use_cached_result and state.inspection_result_cache:
             cached_payload = dict(state.inspection_result_cache)
             cached_timings = dict(cached_payload.get("timings") or {})
             cached_timings.update(
@@ -851,7 +851,7 @@ class InspectionSessionService:
         # ── Async background inference (frame skip + TTL cache) ──
         # Submit inference every 3rd frame when not busy.
         # Use cached result if fresh (<500ms), otherwise compose without bbox.
-        if _effective_pr_ready:
+        if _effective_pr_ready and not _skip_inference:
             state.inference_frame_counter += 1
             # Inference timeout guard: reset stuck busy flag
             if (
@@ -1227,6 +1227,25 @@ class InspectionSessionService:
                     float(getattr(state, "manual_release_cooldown_until", 0.0) or 0.0),
                     time.time() + (self._phase_next_part_delay_ms / 1000.0),
                 )
+            # Full cycle reset — deterministic, does not depend on presence gap
+            state.part_ready_latched = False
+            state.part_ready_latched_at = None
+            state.part_ready_unsettled_at = None
+            state.consecutive_part_ready_frames = 0
+            state.plc_part_ready_triggered = False
+            state.current_event_committed = False
+            state.current_event_id = None
+            state.current_event_key = None
+            state.current_presence = False
+            state.current_event_started_at = None
+            state.current_event_stable_frames = 0
+            state.cooldown_until = None
+            state.policy_stable_frames = 0
+            state.policy_stable_started_at = None
+            state.accept_cycle_started_at = None
+            state.inference_accept_count = 0
+            state.inference_last_counted_generation = -1
+            state.inference_accept_first_ts = 0.0
             # Notify PLC worker of inspection decision
             # Only commit to PLC for accept or hard reject (not non-hard reject)
             decision = validation.get("decision", "")
@@ -2447,7 +2466,7 @@ class InspectionSessionService:
         part_ready_payload: dict[str, Any],
         presence: dict[str, Any],
         now: datetime,
-        settle_ms: int = 0,
+        commit_allowed: bool = False,
     ) -> tuple[str, str | None, bool]:
         if not presence.get("present", False):
             state.current_presence = False
