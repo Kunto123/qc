@@ -297,16 +297,14 @@ class InspectionSessionService:
             )
 
         # Saat PLC mulai clamp baru (IDLE → CLAMPING): ini adalah siklus fisik baru.
-        # Aman untuk reset fence di sini — operator sudah memicu clamp baru,
-        # bukan sekadar clamp lepas. Mencegah double-ACCEPT tanpa memblok cycle berikutnya.
+        # Clear inference cache only — do NOT touch awaiting_part_removal_after_commit
+        # because latch release + presence-gap should be the sole owner of removal reset.
         if new_state == "CLAMPING" and old_state == "IDLE":
             with self._lock:
                 for state in self._sessions.values():
-                    state.awaiting_part_removal_after_commit = False
-                    state.part_absent_started_at = None
                     state.inference_result_cache = None  # flush stale cache
                     state.inference_result_ts = 0.0       # paksa re-infer
-            logger.info("[inspection] PLC CLAMPING — part-removal fence cleared for new cycle")
+            logger.info("[inspection] PLC CLAMPING — inference cache cleared for new cycle")
 
     def _reset_clamp_gate(self, state: SessionState) -> None:
         state.plc_part_ready_triggered = False
@@ -678,15 +676,31 @@ class InspectionSessionService:
 
         # ------------------------------------------------------------------
         # Part-Ready Latch Logic
-        # Sekali latched, TIDAK pernah release karena part_ready drop atau
-        # presence hilang. Latch hanya direset oleh _on_plc_state_change
-        # ketika PLC kembali ke IDLE (ACCEPT otomatis atau IN1 manual).
+        # Latch protects inference gate from brief part_ready drops during
+        # inspection.  It MUST release when presence is truly gone for
+        # _part_ready_release_ms so that the next cycle can start clean.
         # ------------------------------------------------------------------
         _now_dt = _settle_now
 
         if part_ready_settled and not state.part_ready_latched:
             state.part_ready_latched = True
             state.part_ready_latched_at = _now_dt
+            state.part_ready_unsettled_at = None
+
+        # Release latch when presence is gone long enough
+        if state.part_ready_latched and not presence.get("present", False):
+            if state.part_ready_unsettled_at is None:
+                state.part_ready_unsettled_at = _now_dt
+            _unsettled_ms = (
+                (_now_dt - state.part_ready_unsettled_at).total_seconds() * 1000.0
+            )
+            if _unsettled_ms >= self._part_ready_release_ms:
+                state.part_ready_latched = False
+                state.part_ready_latched_at = None
+                state.part_ready_unsettled_at = None
+                self._reset_clamp_gate(state)
+        elif state.part_ready_latched and presence.get("present", False):
+            # Presence back — reset unsettled timer
             state.part_ready_unsettled_at = None
 
         # Trigger PLC clamp hold on the first frame where part is settled.
@@ -787,9 +801,9 @@ class InspectionSessionService:
             else "inactive"
         )
 
-        _effective_present = (
-            bool(presence.get("present", False)) or state.part_ready_latched
-        )
+        # Effective presence for operator state machine: use raw presence.
+        # Latch only protects the inference gate, not removal detection.
+        _effective_present = bool(presence.get("present", False))
         operator_state_decision = self._operator_state_machine.update(
             state,
             part_ready=bool(effective_part_ready_val),
@@ -1200,8 +1214,8 @@ class InspectionSessionService:
             settle_ms=self._commit_grace_ms,
         )
 
-        # Policy commit gate overrides count_committed
-        count_committed = _commit_allowed
+        # Policy commit gate + event dedup: both must agree
+        count_committed = _commit_allowed and count_committed
 
         timings["event_state_ms"] = _elapsed_ms(event_state_started)
 
