@@ -645,171 +645,217 @@ class InspectionSessionService:
             state.sticker_roi_override,
         )
         timings["sticker_roi_crop_ms"] = _elapsed_ms(roi_crop_started)
-
-        # ------------------------------------------------------------------
-        # Settle — frame-count based
-        # Tunggu N frame berturut-turut di atas threshold sebelum clamp engage.
-        # Jika sudah latched, abaikan raw state — tetap settled.
-        # ------------------------------------------------------------------
-        _settle_frames = int(
-            getattr(state.template.sticker, "part_ready_settle_frames", 2) or 2
-        )
-        _settle_now = datetime.now(UTC)
-        _raw_part_ready = part_ready.get("part_ready", False)
-
-        if state.part_ready_latched:
-            # Sudah engaged — tetap settled tanpa melihat raw part_ready
-            part_ready_settled = True
-            settle_remaining_ms = 0.0
-        elif _raw_part_ready and presence.get("present", False):
-            state.consecutive_part_ready_frames += 1
-            part_ready_settled = state.consecutive_part_ready_frames >= _settle_frames
-            settle_remaining_ms = (
-                max(0.0, float(_settle_frames - state.consecutive_part_ready_frames) * 100.0)
-                if not part_ready_settled else 0.0
-            )
-        else:
-            state.consecutive_part_ready_frames = 0
-            part_ready_settled = False
-            settle_remaining_ms = 0.0
-            self._reset_clamp_gate(state)
-
-        # ------------------------------------------------------------------
-        # Part-Ready Latch Logic
-        # Latch protects inference gate from brief part_ready drops during
-        # inspection.  It MUST release when presence is truly gone for
-        # _part_ready_release_ms so that the next cycle can start clean.
-        # ------------------------------------------------------------------
-        _now_dt = _settle_now
-
-        if part_ready_settled and not state.part_ready_latched:
-            state.part_ready_latched = True
-            state.part_ready_latched_at = _now_dt
-            state.part_ready_unsettled_at = None
-
-        # Release latch when presence is gone long enough
-        if state.part_ready_latched and not presence.get("present", False):
-            if state.part_ready_unsettled_at is None:
-                state.part_ready_unsettled_at = _now_dt
-            _unsettled_ms = (
-                (_now_dt - state.part_ready_unsettled_at).total_seconds() * 1000.0
-            )
-            if _unsettled_ms >= self._part_ready_release_ms:
-                state.part_ready_latched = False
-                state.part_ready_latched_at = None
-                state.part_ready_unsettled_at = None
-                self._reset_clamp_gate(state)
-        elif state.part_ready_latched and presence.get("present", False):
-            # Presence back — reset unsettled timer
-            state.part_ready_unsettled_at = None
-
-        # Trigger PLC clamp hold on the first frame where part is settled.
-        # But check release/next-part cooldown before re-clamping.
-        _cooldown_until = float(getattr(state, "manual_release_cooldown_until", 0.0))
+        # Blackout gate: after commit, force "part not found" for phase_next_part_delay_ms
+        # to give operator time to swap part. Re-arms automatically when timer expires.
         _now_s = time.time()
-        if part_ready_settled and not state.plc_part_ready_triggered:
-            if _cooldown_until > 0 and _now_s < _cooldown_until:
-                logger.debug("[inspection] cooldown active, skip clamp re-trigger")
+        _blackout_until = float(getattr(state, "manual_release_cooldown_until", 0.0) or 0.0)
+        _in_blackout = _now_s < _blackout_until
+        if _in_blackout:
+            # Force all cycle state to idle
+            state.part_ready_latched = False
+            state.consecutive_part_ready_frames = 0
+            state.part_ready_settled = False
+            state.plc_part_ready_triggered = False
+            # Build minimal "part not found" payload — skip inference, skip commit
+            part_ready["status"] = "part_not_ready"
+            part_ready["part_ready"] = False
+            part_ready["reject_reason_code"] = None
+            part_ready["effective_part_ready"] = False
+            part_ready["part_ready_latched"] = False
+            part_ready["latch_status"] = "inactive"
+            event_state = InspectionEventState.IDLE.value
+            event_id = None
+            count_committed = False
+            timings["event_state_ms"] = 0.0
+            persistence_started = time.perf_counter()
+            db_write = {"written": False, "reason": "not_committed"}
+            phase_remaining_ms = round((_blackout_until - _now_s) * 1000.0, 1)
+            phase_payload = {
+                "status": "post_commit_reset",
+                "remaining_ms": phase_remaining_ms,
+                "ready": False,
+            }
+            clamp_payload = {
+                "enabled": True,
+                "feedback_enabled": False,
+                "status": "idle",
+                "ready": True,
+            }
+            sticker_detection: dict[str, Any] = {}
+            sticker_tilt: dict[str, Any] = {}
+            ocr_result: dict[str, Any] = {}
+            poses: list[dict[str, Any]] = []
+            detections = []
+            _skip_inference = True
+        else:
+            _skip_inference = False
+
+
+        if not _skip_inference:
+            # ------------------------------------------------------------------
+            # Settle — frame-count based
+            # Tunggu N frame berturut-turut di atas threshold sebelum clamp engage.
+            # Jika sudah latched, abaikan raw state — tetap settled.
+            # ------------------------------------------------------------------
+            _settle_frames = int(
+                getattr(state.template.sticker, "part_ready_settle_frames", 2) or 2
+            )
+            _settle_now = datetime.now(UTC)
+            _raw_part_ready = part_ready.get("part_ready", False)
+
+            if state.part_ready_latched:
+                # Sudah engaged — tetap settled tanpa melihat raw part_ready
+                part_ready_settled = True
+                settle_remaining_ms = 0.0
+            elif _raw_part_ready and presence.get("present", False):
+                state.consecutive_part_ready_frames += 1
+                part_ready_settled = state.consecutive_part_ready_frames >= _settle_frames
+                settle_remaining_ms = (
+                    max(0.0, float(_settle_frames - state.consecutive_part_ready_frames) * 100.0)
+                    if not part_ready_settled else 0.0
+                )
             else:
-                state.plc_part_ready_triggered = True
-                state.plc_clamp_requested_at = _now_s
-                state.plc_clamp_ready_at = 0.0
-                state.plc_clamp_timeout = False
-                state.plc_clamp_event_id = state.current_event_id
-                if self._plc_worker is not None:
-                    try:
-                        self._plc_worker.enqueue_part_ready(event_id=state.current_event_id)
-                    except Exception as exc:
-                        logger.warning("[inspection] enqueue_part_ready failed: %s", exc)
-        clamp_ready_for_inference, clamp_payload = self._clamp_gate_status(
-            state,
-            part_ready_settled=bool(part_ready_settled),
-            now_s=_now_s,
-        )
-        phase_ready_for_inference, phase_payload = self._operator_phase_status(
-            state,
-            raw_part_ready=bool(_raw_part_ready or state.part_ready_latched),
-            part_ready_settled=bool(part_ready_settled),
-            clamp_ready=bool(clamp_ready_for_inference),
-            now_s=_now_s,
-        )
+                state.consecutive_part_ready_frames = 0
+                part_ready_settled = False
+                settle_remaining_ms = 0.0
+                self._reset_clamp_gate(state)
 
-        # effective_part_ready gate for downstream logic / UI.
-        # When latch is active, we report effective_part_ready=True even if raw
-        # briefly dropped, so sticker inference is not blocked by noise.
-        _latch_ready = state.part_ready_latched and part_ready_settled
-        if _raw_part_ready and part_ready_settled:
-            effective_part_ready_val = True
-            _effective_block_reason = None
-        elif _latch_ready:
-            # Latched + settled but raw briefly down — still allow inference
-            effective_part_ready_val = True
-            _effective_block_reason = None
-        elif _raw_part_ready and not part_ready_settled:
-            effective_part_ready_val = False
-            _effective_block_reason = "settling"
-        elif not _raw_part_ready and presence.get("present", False):
-            effective_part_ready_val = False
-            _effective_block_reason = "part_not_ready"
-        else:
-            effective_part_ready_val = False
-            _effective_block_reason = "no_part"
+            # ------------------------------------------------------------------
+            # Part-Ready Latch Logic
+            # Latch protects inference gate from brief part_ready drops during
+            # inspection.  It MUST release when presence is truly gone for
+            # _part_ready_release_ms so that the next cycle can start clean.
+            # ------------------------------------------------------------------
+            _now_dt = _settle_now
 
-        # Build effective_part_ready dict for backward compatibility
-        if effective_part_ready_val:
-            effective_part_ready = {**part_ready, "part_ready": True}
-        else:
-            effective_part_ready = {
-                **part_ready,
-                "part_ready": False,
-                "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
-                "status": _effective_block_reason or "part_not_ready",
+            if part_ready_settled and not state.part_ready_latched:
+                state.part_ready_latched = True
+                state.part_ready_latched_at = _now_dt
+                state.part_ready_unsettled_at = None
+
+            # Release latch when presence is gone long enough
+            if state.part_ready_latched and not presence.get("present", False):
+                if state.part_ready_unsettled_at is None:
+                    state.part_ready_unsettled_at = _now_dt
+                _unsettled_ms = (
+                    (_now_dt - state.part_ready_unsettled_at).total_seconds() * 1000.0
+                )
+                if _unsettled_ms >= self._part_ready_release_ms:
+                    state.part_ready_latched = False
+                    state.part_ready_latched_at = None
+                    state.part_ready_unsettled_at = None
+                    self._reset_clamp_gate(state)
+            elif state.part_ready_latched and presence.get("present", False):
+                # Presence back — reset unsettled timer
+                state.part_ready_unsettled_at = None
+
+            # Trigger PLC clamp hold on the first frame where part is settled.
+            # But check release/next-part cooldown before re-clamping.
+            _cooldown_until = float(getattr(state, "manual_release_cooldown_until", 0.0))
+            _now_s = time.time()
+            if part_ready_settled and not state.plc_part_ready_triggered:
+                if _cooldown_until > 0 and _now_s < _cooldown_until:
+                    logger.debug("[inspection] cooldown active, skip clamp re-trigger")
+                else:
+                    state.plc_part_ready_triggered = True
+                    state.plc_clamp_requested_at = _now_s
+                    state.plc_clamp_ready_at = 0.0
+                    state.plc_clamp_timeout = False
+                    state.plc_clamp_event_id = state.current_event_id
+                    if self._plc_worker is not None:
+                        try:
+                            self._plc_worker.enqueue_part_ready(event_id=state.current_event_id)
+                        except Exception as exc:
+                            logger.warning("[inspection] enqueue_part_ready failed: %s", exc)
+            clamp_ready_for_inference, clamp_payload = self._clamp_gate_status(
+                state,
+                part_ready_settled=bool(part_ready_settled),
+                now_s=_now_s,
+            )
+            phase_ready_for_inference, phase_payload = self._operator_phase_status(
+                state,
+                raw_part_ready=bool(_raw_part_ready or state.part_ready_latched),
+                part_ready_settled=bool(part_ready_settled),
+                clamp_ready=bool(clamp_ready_for_inference),
+                now_s=_now_s,
+            )
+
+            # effective_part_ready gate for downstream logic / UI.
+            # When latch is active, we report effective_part_ready=True even if raw
+            # briefly dropped, so sticker inference is not blocked by noise.
+            _latch_ready = state.part_ready_latched and part_ready_settled
+            if _raw_part_ready and part_ready_settled:
+                effective_part_ready_val = True
+                _effective_block_reason = None
+            elif _latch_ready:
+                # Latched + settled but raw briefly down — still allow inference
+                effective_part_ready_val = True
+                _effective_block_reason = None
+            elif _raw_part_ready and not part_ready_settled:
+                effective_part_ready_val = False
+                _effective_block_reason = "settling"
+            elif not _raw_part_ready and presence.get("present", False):
+                effective_part_ready_val = False
+                _effective_block_reason = "part_not_ready"
+            else:
+                effective_part_ready_val = False
+                _effective_block_reason = "no_part"
+
+            # Build effective_part_ready dict for backward compatibility
+            if effective_part_ready_val:
+                effective_part_ready = {**part_ready, "part_ready": True}
+            else:
+                effective_part_ready = {
+                    **part_ready,
+                    "part_ready": False,
+                    "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
+                    "status": _effective_block_reason or "part_not_ready",
+                }
+
+            # ── Build inference_gate top-level response ──
+            _can_infer = (
+                effective_part_ready_val
+                and clamp_ready_for_inference
+                and phase_ready_for_inference
+            )
+            _gate_block_reason = None
+            if not effective_part_ready_val:
+                _gate_block_reason = _effective_block_reason or "part_not_ready"
+            elif not clamp_ready_for_inference:
+                _gate_block_reason = str(clamp_payload.get("status") or "clamping")
+            elif not phase_ready_for_inference:
+                _gate_block_reason = str(phase_payload.get("status") or "operator_phase_delay")
+
+            inference_gate = {
+                "raw_part_ready": _raw_part_ready,
+                "raw_status": str(part_ready.get("status") or "unknown"),
+                "raw_match_ratio": part_ready.get("match_ratio"),
+                "part_ready_latched": state.part_ready_latched,
+                "effective_part_ready": effective_part_ready_val,
+                "clamp_ready": clamp_ready_for_inference,
+                "phase_ready": phase_ready_for_inference,
+                "can_infer": _can_infer,
+                "block_reason": _gate_block_reason,
             }
 
-        # ── Build inference_gate top-level response ──
-        _can_infer = (
-            effective_part_ready_val
-            and clamp_ready_for_inference
-            and phase_ready_for_inference
-        )
-        _gate_block_reason = None
-        if not effective_part_ready_val:
-            _gate_block_reason = _effective_block_reason or "part_not_ready"
-        elif not clamp_ready_for_inference:
-            _gate_block_reason = str(clamp_payload.get("status") or "clamping")
-        elif not phase_ready_for_inference:
-            _gate_block_reason = str(phase_payload.get("status") or "operator_phase_delay")
+            # Augment part_ready dict with latch + gate info for UI
+            part_ready["effective_part_ready"] = effective_part_ready_val
+            part_ready["part_ready_latched"] = state.part_ready_latched
+            part_ready["latch_status"] = (
+                "latched" if state.part_ready_latched
+                else "released" if not state.part_ready_latched and state.part_ready_latched_at is not None
+                else "inactive"
+            )
 
-        inference_gate = {
-            "raw_part_ready": _raw_part_ready,
-            "raw_status": str(part_ready.get("status") or "unknown"),
-            "raw_match_ratio": part_ready.get("match_ratio"),
-            "part_ready_latched": state.part_ready_latched,
-            "effective_part_ready": effective_part_ready_val,
-            "clamp_ready": clamp_ready_for_inference,
-            "phase_ready": phase_ready_for_inference,
-            "can_infer": _can_infer,
-            "block_reason": _gate_block_reason,
-        }
-
-        # Augment part_ready dict with latch + gate info for UI
-        part_ready["effective_part_ready"] = effective_part_ready_val
-        part_ready["part_ready_latched"] = state.part_ready_latched
-        part_ready["latch_status"] = (
-            "latched" if state.part_ready_latched
-            else "released" if not state.part_ready_latched and state.part_ready_latched_at is not None
-            else "inactive"
-        )
-
-        # Effective presence for operator state machine: use raw presence.
-        # Latch only protects the inference gate, not removal detection.
-        _effective_present = bool(presence.get("present", False))
-        operator_state_decision = self._operator_state_machine.update(
-            state,
-            part_ready=bool(effective_part_ready_val),
-            present=_effective_present,          # ← ganti dari presence.get("present", False)
-            settled=bool(part_ready_settled and clamp_ready_for_inference and phase_ready_for_inference),
-        )
+            # Effective presence for operator state machine: use raw presence.
+            # Latch only protects the inference gate, not removal detection.
+            _effective_present = bool(presence.get("present", False))
+            operator_state_decision = self._operator_state_machine.update(
+                state,
+                part_ready=bool(effective_part_ready_val),
+                present=_effective_present,          # ← ganti dari presence.get("present", False)
+                settled=bool(part_ready_settled and clamp_ready_for_inference and phase_ready_for_inference),
+            )
 
         if not _skip_inference and operator_state_decision.use_cached_result and state.inspection_result_cache:
             cached_payload = dict(state.inspection_result_cache)
