@@ -12,11 +12,11 @@ DATASETS_DIR = DATA_ROOT / "datasets"
 MODELS_DIR = DATA_ROOT / "models"
 DEFAULT_STICKER_MODEL_PATH = os.getenv(
     "QC_SUITE_DEFAULT_STICKER_MODEL_PATH",
-    r"D:\ProjectMagang\akh.pt",
+    r"C:\QC_Sticker\qc\data\models\openVino\modelkecil\openvino_model.xml",
 ).strip()
 DEFAULT_STICKER_MODEL_META_PATH = os.getenv(
     "QC_SUITE_DEFAULT_STICKER_MODEL_META_PATH",
-    r"D:\ProjectMagang\ds-43598c556c__yolov5mu__20260402-085412.meta.json",
+    r"C:\QC_Sticker\qc\data\models\openVino\modelkecil\openvino_model.json",
 ).strip()
 
 
