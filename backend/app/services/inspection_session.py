@@ -1203,19 +1203,19 @@ class InspectionSessionService:
             state.policy_holdover_expires_at = None
             state.accept_cycle_started_at = None
 
-        # Event state advance — always use original validation for event tracking.
-        # Policy commit gate overrides count_committed afterwards.
+        # Event state advance — policy gate is the sole commit authority.
+        # Event machine provides dedup (anti-double-count) + event_id.
         event_state, event_id, count_committed = self._advance_event_state(
             state=state,
             validation=validation,
             part_ready_payload=effective_part_ready,
             presence=presence,
             now=_now_policy,
-            settle_ms=self._commit_grace_ms,
+            commit_allowed=_commit_allowed,
         )
 
-        # Policy commit gate + event dedup: both must agree
-        count_committed = _commit_allowed and count_committed
+        # count_committed is already authoritative: only True when policy allows
+        # AND event is fresh (not already committed / COOLDOWN).
 
         timings["event_state_ms"] = _elapsed_ms(event_state_started)
 
@@ -2454,28 +2454,33 @@ class InspectionSessionService:
             state.current_event_id = None
             state.current_event_key = None
             state.current_event_started_at = None
+    def _advance_event_state(
+        self,
+        *,
+        state: SessionState,
+        validation: dict[str, Any],
+        part_ready_payload: dict[str, Any],
+        presence: dict[str, Any],
+        now: datetime,
+        commit_allowed: bool = False,
+    ) -> tuple[str, str | None, bool]:
+        if not presence.get("present", False):
+            state.current_presence = False
+            state.current_event_id = None
+            state.current_event_key = ""
+            state.current_event_started_at = None
             state.current_event_stable_frames = 0
             state.current_event_committed = False
-            state.cooldown_until = None
-            state.part_ready_ratio_history.clear()
             return InspectionEventState.IDLE.value, None, False
 
-        event_key = (
+        _event_key = (
             f"{part_ready_payload.get('part_ready')}::"
             f"{validation.get('decision')}::"
             f"{validation.get('reject_reason_code') or 'OK'}::"
             f"{validation.get('part_name') or '-'}"
         )
-        if not state.current_presence or state.current_event_id is None:
-            state.event_sequence += 1
-            state.current_presence = True
-            state.current_event_id = f"evt-{state.event_sequence:05d}"
-            state.current_event_key = event_key
-            state.current_event_started_at = now
-            state.current_event_stable_frames = 1
-            state.current_event_committed = False
-        elif state.current_event_key == event_key:
-            # Same outcome: honour cooldown to prevent double-counting.
+        if _event_key == state.current_event_key and state.current_event_id is not None:
+            # Same event continuing
             if state.current_event_committed:
                 return InspectionEventState.COOLDOWN.value, state.current_event_id, False
             state.current_event_stable_frames += 1
@@ -2483,7 +2488,7 @@ class InspectionSessionService:
             # Outcome changed (e.g. REJECT → ACCEPT after config fix) → new event.
             state.event_sequence += 1
             state.current_event_id = f"evt-{state.event_sequence:05d}"
-            state.current_event_key = event_key
+            state.current_event_key = _event_key
             state.current_event_started_at = now
             state.current_event_stable_frames = 1
             state.current_event_committed = False
@@ -2491,15 +2496,9 @@ class InspectionSessionService:
         if not part_ready_payload.get("part_ready", False):
             return InspectionEventState.PART_DETECTED.value, state.current_event_id, False
 
-        # Time-based commit driven by settle_ms (the same value that gates inference).
-        # settle_ms=0 → commit immediately on the first stable post-ready frame.
-        # settle_ms>0 → commit only after the current event has been continuously
-        # stable for at least settle_ms milliseconds since current_event_started_at.
-        if settle_ms > 0 and state.current_event_started_at is not None:
-            elapsed_event_ms = (now - state.current_event_started_at).total_seconds() * 1000.0
-            commit_ready = elapsed_event_ms >= settle_ms
-        else:
-            commit_ready = True
+        # Commit authority: policy gate is the sole timing authority.
+        # commit_allowed=True means grace + stable_frames + inference count all passed.
+        commit_ready = commit_allowed
 
         if commit_ready:
             # Check consecutive reject threshold
