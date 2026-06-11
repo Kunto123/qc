@@ -867,7 +867,7 @@ class InspectionSessionService:
                 settled=bool(part_ready_settled and clamp_ready_for_inference and phase_ready_for_inference),
             )
 
-        if not _skip_inference and operator_state_decision.use_cached_result and state.inspection_result_cache:
+        if operator_state_decision.use_cached_result and state.inspection_result_cache:
             cached_payload = dict(state.inspection_result_cache)
             cached_timings = dict(cached_payload.get("timings") or {})
             cached_timings.update(
@@ -907,7 +907,7 @@ class InspectionSessionService:
         # ── Async background inference (frame skip + TTL cache) ──
         # Submit inference every 3rd frame when not busy.
         # Use cached result if fresh (<500ms), otherwise compose without bbox.
-        if _effective_pr_ready and not _skip_inference:
+        if _effective_pr_ready:
             state.inference_frame_counter += 1
             # Inference timeout guard: reset stuck busy flag
             if (
