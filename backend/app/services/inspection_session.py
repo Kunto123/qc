@@ -297,8 +297,7 @@ class InspectionSessionService:
             )
 
         # Saat PLC mulai clamp baru (IDLE → CLAMPING): ini adalah siklus fisik baru.
-        # Clear inference cache only — do NOT touch awaiting_part_removal_after_commit
-        # because latch release + presence-gap should be the sole owner of removal reset.
+        # Clear inference cache only
         if new_state == "CLAMPING" and old_state == "IDLE":
             with self._lock:
                 for state in self._sessions.values():
@@ -1154,33 +1153,7 @@ class InspectionSessionService:
         _policy_action = "pending"
         _pending_reason = ""
 
-        if state.awaiting_part_removal_after_commit:
-            # After ACCEPT, wait for part to leave before allowing next cycle
-            if not presence.get("present", False):
-                if state.part_absent_started_at is None:
-                    state.part_absent_started_at = _now_policy
-                _absent_elapsed_ms = (
-                    (_now_policy - state.part_absent_started_at).total_seconds() * 1000.0
-                )
-                if _absent_elapsed_ms >= self._part_ready_release_ms:
-                    # Part gone long enough — reset for next cycle
-                    state.awaiting_part_removal_after_commit = False
-                    state.part_absent_started_at = None
-                    self._reset_clamp_gate(state)
-                    state.part_ready_latched = False
-                    state.part_ready_latched_at = None
-                else:
-                    _pending_reason = "waiting_part_removed"
-            else:
-                # Part still present — reset absent timer
-                state.part_absent_started_at = None
-                _pending_reason = "waiting_part_removed"
-
-            _policy_action = "pending"
-            if not _pending_reason:
-                _pending_reason = "waiting_part_removed"
-
-        elif _effective_is_accept:
+        if _effective_is_accept:
             # Accept: commit only after grace period + stability
             # Both policy_stable_frames AND inference_accept_count must meet thresholds.
             # inference_accept_count only increments when a NEW inference result arrives,
@@ -1192,8 +1165,6 @@ class InspectionSessionService:
             if _grace_ok and _frames_ok and _inference_ok and _ms_ok:
                 _commit_allowed = True
                 _policy_action = "accept_commit"
-                state.awaiting_part_removal_after_commit = True
-                state.part_absent_started_at = None
             else:
                 _policy_action = "pending"
                 _parts = []
