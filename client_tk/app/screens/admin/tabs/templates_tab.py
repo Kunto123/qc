@@ -142,19 +142,20 @@ class TemplatesTab:
         a.gap_ref_status_label = ttk.Label(wizard, text="Referensi: belum dikonfigurasi", foreground="gray")
         a.gap_ref_status_label.grid(row=14, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 6))
 
-        a._entry(wizard, 15, 0, "Camera Index", a.preset_camera_index_var, columnspan=1)
         ttk.Label(wizard, text="Rotation\xB0\n(0/90/180/270)", foreground="gray").grid(
             row=12, column=2, sticky="w", padx=(12, 4), pady=5,
         )
         rot_entry = ttk.Entry(wizard, textvariable=a.preset_camera_rotation_var, width=8)
         rot_entry.grid(row=12, column=3, sticky="w", padx=(0, 12), pady=5)
 
-        # Visual ROI picker
+        a._entry(wizard, 15, 0, "Camera Index", a.preset_camera_index_var, columnspan=1)
+
+        # Visual ROI picker — dimulai dari row 16 agar tidak tabrakan dengan Camera Index
         self._build_roi_picker(a, wizard)
 
         # Action buttons
         btn_row = ttk.Frame(wizard)
-        btn_row.grid(row=18, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 6))
+        btn_row.grid(row=19, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 6))
         btn_row.columnconfigure(0, weight=1)
         btn_row.columnconfigure(0, weight=1)
 
@@ -183,7 +184,7 @@ class TemplatesTab:
 
     def _build_roi_picker(self, a, wizard) -> None:
         roi_panel = ctk.CTkFrame(wizard, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        roi_panel.grid(row=15, column=0, columnspan=4, sticky="ew", padx=12, pady=(12, 2))
+        roi_panel.grid(row=16, column=0, columnspan=4, sticky="ew", padx=12, pady=(12, 2))
         roi_panel.columnconfigure(0, weight=1)
 
         ctk.CTkLabel(roi_panel, text="Visual ROI Picker", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
