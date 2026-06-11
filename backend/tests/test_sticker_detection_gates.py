@@ -112,10 +112,18 @@ class StickerDetectionObservabilityTest(unittest.TestCase):
 
 
 class StickerInferenceRawCountTest(unittest.TestCase):
-    """_predict_ultralytics must include raw_detection_count in its return value."""
+    """UltralyticsBackend.predict must include raw_detection_count in its return value."""
 
     def setUp(self) -> None:
-        self.service = StickerInferenceService(AppConfig(), MagicMock())
+        import threading
+        from backend.app.services.inference_backend import UltralyticsBackend
+        self.backend = UltralyticsBackend(
+            config=AppConfig(),
+            loaded_models={},
+            meta_cache={},
+            runtime_lock=threading.RLock(),
+            device_resolution=self._fake_device(),
+        )
 
     def _fake_vision(self, *, classes=None):
         from shared.contracts.templates import VisionConfig
@@ -139,7 +147,7 @@ class StickerInferenceRawCountTest(unittest.TestCase):
         )
 
     def test_raw_detection_count_field_exists(self) -> None:
-        """_predict_ultralytics result always contains raw_detection_count."""
+        """UltralyticsBackend.predict result always contains raw_detection_count."""
         fake_box = MagicMock()
         fake_box.xyxy = [MagicMock(tolist=lambda: [1.0, 2.0, 3.0, 4.0])]
         fake_box.cls = [MagicMock(item=lambda: 0)]
@@ -154,18 +162,17 @@ class StickerInferenceRawCountTest(unittest.TestCase):
 
         image = np.zeros((100, 100, 3), dtype=np.uint8)
         vision = self._fake_vision(classes=["sticker"])
-        device = self._fake_device()
 
-        with patch.object(self.service, "_get_ultralytics_model", return_value=fake_model), \
-             patch.object(self.service, "_resolve_model_path", return_value="dummy.pt"), \
+        with patch.object(self.backend, "_get_ultralytics_model", return_value=fake_model), \
+             patch.object(self.backend, "_resolve_model_path", return_value="dummy.pt"), \
              patch("pathlib.Path.exists", return_value=True):
-            result = self.service._predict_ultralytics(image, vision, device)
+            result = self.backend.predict(image, vision)
 
         self.assertIn("raw_detection_count", result)
         self.assertEqual(result["raw_detection_count"], 1)
 
     def test_allowed_labels_filter_field_in_result(self) -> None:
-        """_predict_ultralytics includes allowed_labels_filter matching vision.classes."""
+        """UltralyticsBackend.predict includes allowed_labels_filter matching vision.classes."""
         fake_result = MagicMock()
         fake_result.boxes = []
         fake_result.names = {}
@@ -175,12 +182,11 @@ class StickerInferenceRawCountTest(unittest.TestCase):
 
         image = np.zeros((100, 100, 3), dtype=np.uint8)
         vision = self._fake_vision(classes=["sticker", "label"])
-        device = self._fake_device()
 
-        with patch.object(self.service, "_get_ultralytics_model", return_value=fake_model), \
-             patch.object(self.service, "_resolve_model_path", return_value="dummy.pt"), \
+        with patch.object(self.backend, "_get_ultralytics_model", return_value=fake_model), \
+             patch.object(self.backend, "_resolve_model_path", return_value="dummy.pt"), \
              patch("pathlib.Path.exists", return_value=True):
-            result = self.service._predict_ultralytics(image, vision, device)
+            result = self.backend.predict(image, vision)
 
         self.assertIn("allowed_labels_filter", result)
         # The filter list contains normalized lowercase class names
@@ -390,7 +396,6 @@ class TiltGateToggleTest(unittest.TestCase):
         sticker = StickerRule(
             part_name="P1",
             expected_class="sticker",
-            line="L1",
             enabled=True,
             validator_mode="ml_detection",
             min_roi_confidence=0.0,
@@ -478,14 +483,14 @@ class TiltGateToggleTest(unittest.TestCase):
 
     def test_tilt_gate_enabled_round_trips_in_to_dict(self) -> None:
         from shared.contracts.templates import StickerRule
-        rule = StickerRule(part_name="P", expected_class="C", line="L", tilt_gate_enabled=True)
+        rule = StickerRule(part_name="P", expected_class="C", tilt_gate_enabled=True)
         from dataclasses import asdict
         d = asdict(rule)
         self.assertTrue(d["tilt_gate_enabled"])
 
     def test_tilt_gate_disabled_default_in_to_dict(self) -> None:
         from shared.contracts.templates import StickerRule
-        rule = StickerRule(part_name="P", expected_class="C", line="L")
+        rule = StickerRule(part_name="P", expected_class="C")
         from dataclasses import asdict
         d = asdict(rule)
         self.assertFalse(d["tilt_gate_enabled"])
@@ -653,7 +658,6 @@ class OcrAnchorPrimaryGateTest(unittest.TestCase):
         sticker = StickerRule(
             part_name="P1",
             expected_class="K0W-HB0",
-            line="L1",
             enabled=True,
             validator_mode="ocr_anchor",
             ocr_mode="primary",
@@ -768,7 +772,6 @@ class StickerOnlyOcrGateTest(unittest.TestCase):
         sticker = StickerRule(
             part_name="P1",
             expected_class="ADV",
-            line="L1",
             enabled=True,
             validator_mode="sticker_only",
             use_ocr=True,

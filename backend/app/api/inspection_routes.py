@@ -394,7 +394,7 @@ def export_inspections():
 
 
 @inspection_blueprint.get("/inspection/plc/status")
-@require_roles(UserRole.OPERATOR, UserRole.ADMIN)
+@require_roles(UserRole.ADMIN)
 def plc_status():
     """Return the current PLC worker status (running, queue size, last command)."""
     if plc_worker is None:

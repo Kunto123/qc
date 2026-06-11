@@ -144,7 +144,11 @@ class InspectionSessionService:
         self._sticker_inference = sticker_inference
         self._sessions: dict[str, SessionState] = {}
         self._lock = threading.RLock()
-        self._accept_holdover_ms: int = app_config.accept_holdover_ms
+        self._accept_holdover_ms: int = (
+            max(0, int(app_config.accept_holdover_ms))
+            if app_config is not None
+            else 2000
+        )
         # System-wide settle default: used when a template's part_ready_settle_ms is None.
         self._default_settle_ms: int = (
             max(0, int(app_config.part_ready_settle_ms_default))
@@ -1992,6 +1996,10 @@ class InspectionSessionService:
             reject_reason = RejectReasonCode.LOW_CLASS_CONF.value
         elif thresholds["tilt_gate_enabled"] and max_tilt_degrees_value is not None and normalized_deviation is not None and normalized_deviation > max_tilt_degrees_value:
             reject_reason = RejectReasonCode.OUT_OF_ANGLE.value
+        elif offset_limit_x is not None and abs(offset_x) > float(offset_limit_x):
+            reject_reason = RejectReasonCode.OUT_OF_POSITION.value
+        elif offset_limit_y is not None and abs(offset_y) > float(offset_limit_y):
+            reject_reason = RejectReasonCode.OUT_OF_POSITION.value
         elif use_ocr and str(ocr_payload.get("status") or "") != "ok":
             reject_reason = RejectReasonCode.LOW_OCR_CONF.value
         elif use_ocr and ocr_payload.get("confidence") is not None and float(ocr_payload.get("confidence") or 0.0) < ocr_min_confidence:

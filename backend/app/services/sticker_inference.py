@@ -94,7 +94,7 @@ class StickerInferenceService:
             path = Path(meta_path)
             if not path.exists():
                 logger.warning("[inference] meta file not found: %s", meta_path)
-                # Jangan cache file yang tidak ditemukan — file bisa dibuat setelah startup
+                self._meta_cache.pop(meta_path, None)  # evict stale entry
                 return {}
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -136,46 +136,47 @@ class StickerInferenceService:
         return canvas, scale, pad_left, pad_top
 
     def _get_backend(self, mode: str) -> InferenceBackend:
-        """Create and cache backend instances."""
-        if mode in self._backend_cache:
-            return self._backend_cache[mode]
+        """Create and cache backend instances (thread-safe)."""
+        with self._runtime_lock:
+            if mode in self._backend_cache:
+                return self._backend_cache[mode]
 
-        backend: InferenceBackend
-        if mode == "tflite":
-            backend = TFLiteBackend(
-                config=self._config,
-                loaded_models=self._loaded_models,
-                meta_cache=self._meta_cache,
-                runtime_lock=self._runtime_lock,
-            )
-        elif mode == "openvino":
-            backend = OpenVINOBackend(
-                config=self._config,
-                loaded_models=self._loaded_models,
-                meta_cache=self._meta_cache,
-                runtime_lock=self._runtime_lock,
-            )
-        elif mode == "onnx":
-            backend = ONNXBackend(
-                config=self._config,
-                loaded_models=self._loaded_models,
-                meta_cache=self._meta_cache,
-                runtime_lock=self._runtime_lock,
-            )
-        elif mode == "ultralytics":
-            device_resolution = self._resolve_device()
-            backend = UltralyticsBackend(
-                config=self._config,
-                loaded_models=self._loaded_models,
-                meta_cache=self._meta_cache,
-                runtime_lock=self._runtime_lock,
-                device_resolution=device_resolution,
-            )
-        else:
-            raise ValueError(f"Unknown backend mode: {mode}")
+            backend: InferenceBackend
+            if mode == "tflite":
+                backend = TFLiteBackend(
+                    config=self._config,
+                    loaded_models=self._loaded_models,
+                    meta_cache=self._meta_cache,
+                    runtime_lock=self._runtime_lock,
+                )
+            elif mode == "openvino":
+                backend = OpenVINOBackend(
+                    config=self._config,
+                    loaded_models=self._loaded_models,
+                    meta_cache=self._meta_cache,
+                    runtime_lock=self._runtime_lock,
+                )
+            elif mode == "onnx":
+                backend = ONNXBackend(
+                    config=self._config,
+                    loaded_models=self._loaded_models,
+                    meta_cache=self._meta_cache,
+                    runtime_lock=self._runtime_lock,
+                )
+            elif mode == "ultralytics":
+                device_resolution = self._resolve_device()
+                backend = UltralyticsBackend(
+                    config=self._config,
+                    loaded_models=self._loaded_models,
+                    meta_cache=self._meta_cache,
+                    runtime_lock=self._runtime_lock,
+                    device_resolution=device_resolution,
+                )
+            else:
+                raise ValueError(f"Unknown backend mode: {mode}")
 
-        self._backend_cache[mode] = backend
-        return backend
+            self._backend_cache[mode] = backend
+            return backend
 
     def _normalize_detections(
         self,
@@ -1034,6 +1035,8 @@ class StickerInferenceService:
                     payload, image, vision,
                     expected_class=expected_class, sticker_rule=sticker_rule,
                 )
+            except (FileNotFoundError, ValueError, AttributeError) as exc:
+                raise  # misconfiguration — propagate
             except Exception as exc:
                 logging.warning("TFLite inference failed, fallback to classic: %s", exc)
                 payload = self._predict_classic(image, vision, expected_class)
@@ -1056,6 +1059,8 @@ class StickerInferenceService:
                     payload, image, vision,
                     expected_class=expected_class, sticker_rule=sticker_rule,
                 )
+            except (FileNotFoundError, ValueError, AttributeError) as exc:
+                raise  # misconfiguration — propagate
             except Exception as exc:
                 logging.warning("ONNX inference failed, fallback to classic: %s", exc)
                 payload = self._predict_classic(image, vision, expected_class)
@@ -1074,6 +1079,8 @@ class StickerInferenceService:
                         expected_class=expected_class, sticker_rule=sticker_rule)
                 return self._augment_with_anchor_ocr(payload, image, vision,
                     expected_class=expected_class, sticker_rule=sticker_rule)
+            except (FileNotFoundError, ValueError, AttributeError) as exc:
+                raise  # misconfiguration — propagate
             except Exception as exc:
                 logging.warning("OpenVINO inference failed, fallback to classic: %s", exc)
                 payload = self._predict_classic(image, vision, expected_class)

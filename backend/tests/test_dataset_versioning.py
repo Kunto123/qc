@@ -251,28 +251,20 @@ class AugmentIntegrationVersioningTest(unittest.TestCase):
         self.assertIn("1/3 ann", version["display_label"])
 
     def test_create_version_augment_export_includes_augmented_images(self) -> None:
-        """The YOLO export must contain original + augmented images in its splits."""
+        """Augmented images are stored in version_root/augmented/images (not in export)."""
         job = self._make_augment_job_stub(multiplier=2)
         version = self.versions_repo.create_version(self.dataset["id"], augment_jobs=[job])
-        export_root = Path(version["export_root"])
-        all_exported_images = list((export_root / "images").rglob("*.jpg"))
-        # 4 images total should be exported: img1, img2, img1_aug001, img1_aug002
-        self.assertEqual(len(all_exported_images), 4)
-        exported_names = {p.name for p in all_exported_images}
-        self.assertIn("img1.jpg", exported_names)
-        self.assertIn("img2.jpg", exported_names)
-        self.assertIn("img1_aug001.jpg", exported_names)
-        self.assertIn("img1_aug002.jpg", exported_names)
-
-        # Inherited annotation on augmented images must be exported as center-based YOLO xywh.
-        class_id, x, y, width, height = _read_single_yolo_row(
-            _find_exported_label_path(export_root, "img1_aug001.jpg")
-        )
-        self.assertEqual(class_id, 0)
-        self.assertAlmostEqual(x, 0.0625, places=4)
-        self.assertAlmostEqual(y, 0.083333, places=4)
-        self.assertAlmostEqual(width, 0.0625, places=4)
-        self.assertAlmostEqual(height, 0.083333, places=4)
+        # Augmented images go to augmented/ folder, not export
+        version_root = Path(version["source_root"]).parent
+        aug_images = list((version_root / "augmented" / "images").rglob("*.jpg"))
+        self.assertEqual(len(aug_images), 2)
+        aug_names = {p.name for p in aug_images}
+        self.assertIn("img1_aug001.jpg", aug_names)
+        self.assertIn("img1_aug002.jpg", aug_names)
+        # Source labels dir has augmented JSON labels
+        source_labels_dir = Path(version["source_root"]) / "labels"
+        aug_label = source_labels_dir / "img1_aug001.json"
+        self.assertTrue(aug_label.exists(), f"Expected {aug_label} to exist")
 
     def test_create_version_augmented_image_gets_original_annotation(self) -> None:
         """Augmented images inherit their original image's annotation in the snapshot labels dir."""
@@ -709,16 +701,20 @@ class Phase8VerificationTest(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_flag_on_flip_h_version_metrics_consistent(self) -> None:
-        """flag=ON + flip_h: image_count, annotated_count, YOLO export all consistent."""
+        """flag=ON + flip_h: image_count, annotated_count, source labels all consistent."""
         job = self._write_aug_with_trace(["flip_h"], "p8-on-metrics-flip")
         version = self.versions_repo_on.create_version(self.dataset["id"], augment_jobs=[job])
         self.assertEqual(version["image_count"], 2)
         self.assertEqual(version["annotated_image_count"], 2)
         self.assertEqual(version["annotation_coverage"], 1.0)
-        export_root = Path(version["export_root"])
-        all_labels = list((export_root / "labels").rglob("*.txt"))
-        # Both images must have a label file
-        self.assertEqual(len(all_labels), 2)
+        # Augmented labels are in source_labels/ as JSON
+        source_labels_dir = Path(version["source_root"]) / "labels"
+        aug_label = source_labels_dir / "src_aug001.json"
+        self.assertTrue(aug_label.exists(), f"Expected {aug_label} to exist")
+        import json as _json
+        payload = _json.loads(aug_label.read_text(encoding="utf-8"))
+        labels = payload.get("labels") or []
+        self.assertEqual(len(labels), 1)
 
     def test_flag_off_no_trace_file_still_works_verbatim(self) -> None:
         """flag=OFF with no trace sidecar: annotation copied verbatim (safe fallback)."""

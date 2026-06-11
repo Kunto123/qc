@@ -125,7 +125,6 @@ class StickerInferenceFilterTest(unittest.TestCase):
         sticker = StickerRule(
             part_name="P1",
             expected_class="K0W-HB0",
-            line="L1",
             expected_dot_x=0.5,
             expected_dot_y=0.5,
         )
@@ -167,7 +166,6 @@ class StickerInferenceFilterTest(unittest.TestCase):
         sticker = StickerRule(
             part_name="P1",
             expected_class="ADV",
-            line="L1",
             validator_mode="sticker_only",
             use_ocr=True,
             ocr_expected_code="ADV160A",

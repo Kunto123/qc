@@ -46,13 +46,16 @@ def _parse_yolo_output(
     pad_top: int,
     w_in: int,
     h_in: int,
+    has_objectness: bool = False,
 ) -> list[tuple[float, int, float, float, float, float]]:
     """Parse YOLOv11 output array into raw candidate detections.
 
     Handles both [N, 6] and [6, N] layouts (auto-transposes if needed).
 
-    Returns list of (conf, class_id, x1, y1, x2, y2) with coords normalized
-    to original image space (de-projected from padded model input).
+    Args:
+        has_objectness: If True, row format is [cx, cy, w, h, obj_conf, cls0, cls1, ...]
+                       (YOLOv5 raw). If False, row format is [cx, cy, w, h, cls0, cls1, ...]
+                       (YOLOv8/11). Default False.
     """
     candidates: list[tuple[float, int, float, float, float, float]] = []
     if out is None or out.size == 0:
@@ -63,9 +66,12 @@ def _parse_yolo_output(
             out = out.T
         w_content = w_in - 2 * pad_left
         h_content = h_in - 2 * pad_top
+        class_offset = 5 if has_objectness else 4
         for row in out:
-            class_scores = row[4:]
-            conf = float(np.max(class_scores))
+            class_scores = row[class_offset:]
+            base_conf = float(np.max(class_scores))
+            # YOLOv5 raw: final confidence = objectness × class score
+            conf = float(row[4]) * base_conf if has_objectness else base_conf
             if conf < conf_threshold:
                 continue
             class_id = int(np.argmax(class_scores))
@@ -220,6 +226,7 @@ class TFLiteBackend(InferenceBackend):
             path = Path(meta_path)
             if not path.exists():
                 logger.warning("[inference] meta file not found: %s", meta_path)
+                self._meta_cache.pop(meta_path, None)  # evict stale entry
                 return {}
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -235,43 +242,44 @@ class TFLiteBackend(InferenceBackend):
         # Cache key includes thread count so different configs get separate instances
         cache_key = f"{resolved}::t{num_threads}"
         with self._runtime_lock:
+            # Check cache
             interp = self._loaded_models.get(cache_key)
             if interp is not None:
                 return interp
-        try:
-            from ai_edge_litert.interpreter import Interpreter  # type: ignore
-            interpreter = Interpreter(model_path=resolved, num_threads=num_threads)
-        except (ImportError, TypeError):
+            # Load model inside lock to prevent duplicate loads
             try:
-                import warnings
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        "ignore",
-                        message=".*tf.lite.Interpreter.*",
-                        category=UserWarning,
-                    )
-                    from tflite_runtime.interpreter import Interpreter  # type: ignore
-                    try:
-                        interpreter = Interpreter(model_path=resolved, num_threads=num_threads)
-                    except TypeError:
-                        interpreter = Interpreter(model_path=resolved)
-            except ImportError:
+                from ai_edge_litert.interpreter import Interpreter  # type: ignore
+                interpreter = Interpreter(model_path=resolved, num_threads=num_threads)
+            except (ImportError, TypeError):
                 try:
-                    import tensorflow as tf  # type: ignore
-                    Interpreter = tf.lite.Interpreter
-                    try:
-                        interpreter = Interpreter(model_path=resolved, num_threads=num_threads)
-                    except TypeError:
-                        interpreter = Interpreter(model_path=resolved)
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore",
+                            message=".*tf.lite.Interpreter.*",
+                            category=UserWarning,
+                        )
+                        from tflite_runtime.interpreter import Interpreter  # type: ignore
+                        try:
+                            interpreter = Interpreter(model_path=resolved, num_threads=num_threads)
+                        except TypeError:
+                            interpreter = Interpreter(model_path=resolved)
                 except ImportError:
-                    raise ModuleNotFoundError(
-                        "TFLite runtime not found. Install one of: "
-                        "pip install ai-edge-litert | pip install tflite-runtime | pip install tensorflow"
-                    )
-        interpreter.allocate_tensors()
-        with self._runtime_lock:
+                    try:
+                        import tensorflow as tf  # type: ignore
+                        Interpreter = tf.lite.Interpreter
+                        try:
+                            interpreter = Interpreter(model_path=resolved, num_threads=num_threads)
+                        except TypeError:
+                            interpreter = Interpreter(model_path=resolved)
+                    except ImportError:
+                        raise ModuleNotFoundError(
+                            "TFLite runtime not found. Install one of: "
+                            "pip install ai-edge-litert | pip install tflite-runtime | pip install tensorflow"
+                        )
+            interpreter.allocate_tensors()
             self._loaded_models[cache_key] = interpreter
-        return interpreter
+            return interpreter
 
     @staticmethod
     def _letterbox(
@@ -460,6 +468,7 @@ class OpenVINOBackend(InferenceBackend):
             path = Path(meta_path)
             if not path.exists():
                 logger.warning("[inference] meta file not found: %s", meta_path)
+                self._meta_cache.pop(meta_path, None)  # evict stale entry
                 return {}
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -473,25 +482,26 @@ class OpenVINOBackend(InferenceBackend):
         """Load OpenVINO IR model (.xml) — cached after first load."""
         resolved = str(Path(model_path).resolve())
         with self._runtime_lock:
+            # Check cache
             model = self._loaded_models.get(resolved)
             if model is not None:
                 return model
-        try:
-            from openvino import Core  # type: ignore  # OpenVINO 2024.x+
-        except ImportError:
+            # Load model inside lock to prevent duplicate compilations
             try:
-                from openvino.runtime import Core  # type: ignore  # Legacy 2022.x–2023.x
+                from openvino import Core  # type: ignore  # OpenVINO 2024.x+
             except ImportError:
-                raise ModuleNotFoundError("openvino required: pip install openvino")
-        ie = Core()
-        ov_model = ie.read_model(model=resolved)
-        _n = getattr(self._config, "inference_num_threads", 4)
-        ie.set_property("CPU", {"INFERENCE_NUM_THREADS": str(_n)})
-        compiled = ie.compile_model(model=ov_model, device_name="CPU")
-        with self._runtime_lock:
+                try:
+                    from openvino.runtime import Core  # type: ignore  # Legacy 2022.x–2023.x
+                except ImportError:
+                    raise ModuleNotFoundError("openvino required: pip install openvino")
+            ie = Core()
+            ov_model = ie.read_model(model=resolved)
+            _n = getattr(self._config, "inference_num_threads", 4)
+            ie.set_property("CPU", {"INFERENCE_NUM_THREADS": str(_n)})
+            compiled = ie.compile_model(model=ov_model, device_name="CPU")
             self._loaded_models[resolved] = compiled
-        logger.debug("[openvino] model loaded: %s", resolved)
-        return compiled
+            logger.debug("[openvino] model loaded: %s", resolved)
+            return compiled
 
     @staticmethod
     def _letterbox(
@@ -590,9 +600,18 @@ class OpenVINOBackend(InferenceBackend):
         meta = self._load_meta(self._resolve_meta_path(vision))
         class_names = meta.get("class_names", [])
         names_map = {i: name for i, name in enumerate(class_names)}
+        if not names_map:
+            logger.warning(
+                "[openvino] class_names kosong — label akan tampil sebagai angka. "
+                "Pastikan file JSON dengan key 'class_names' ada di folder model."
+            )
         allowed_label_values = [str(label) for label in (vision.classes or []) if str(label).strip()]
         if expected_class and str(expected_class).strip():
             allowed_label_values.append(str(expected_class).strip())
+        if allowed_label_values:
+            for label in (getattr(vision, "text_anchor_class", ""), getattr(vision, "center_dot_class", "")):
+                if str(label or "").strip():
+                    allowed_label_values.append(str(label))
         allowed_labels = {label.strip().lower() for label in allowed_label_values} or None
         filtered = _apply_names_map(detections, names_map, allowed_labels)
 
@@ -664,6 +683,7 @@ class ONNXBackend(InferenceBackend):
             path = Path(meta_path)
             if not path.exists():
                 logger.warning("[inference] meta file not found: %s", meta_path)
+                self._meta_cache.pop(meta_path, None)  # evict stale entry
                 return {}
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -674,28 +694,29 @@ class ONNXBackend(InferenceBackend):
             return payload
 
     def _load_onnx_session(self, model_path: str):
-        """Load ONNX model via onnxruntime (CPU-friendly)."""
+        """Load ONNX model via onnxruntime (CPU-friendly). Thread-safe."""
         resolved = str(Path(model_path).resolve())
         with self._runtime_lock:
+            # Check cache
             sess = self._loaded_models.get(resolved)
             if sess is not None:
                 return sess
-        try:
-            import onnxruntime as ort  # type: ignore
-        except ImportError:
-            raise ModuleNotFoundError(
-                "onnxruntime is required for ONNX inference. "
-                "Install it with: pip install onnxruntime"
-            )
-        opts = ort.SessionOptions()
-        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        _n = getattr(self._config, "inference_num_threads", 4)
-        opts.intra_op_num_threads = _n   # threads within one op (matmul, conv)
-        opts.inter_op_num_threads = 1    # parallel between ops — 1 sufficient for small models
-        sess = ort.InferenceSession(resolved, sess_options=opts, providers=["CPUExecutionProvider"])
-        with self._runtime_lock:
+            # Load model inside lock to prevent duplicate sessions
+            try:
+                import onnxruntime as ort  # type: ignore
+            except ImportError:
+                raise ModuleNotFoundError(
+                    "onnxruntime is required for ONNX inference. "
+                    "Install it with: pip install onnxruntime"
+                )
+            opts = ort.SessionOptions()
+            opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            _n = getattr(self._config, "inference_num_threads", 4)
+            opts.intra_op_num_threads = _n   # threads within one op (matmul, conv)
+            opts.inter_op_num_threads = 1    # parallel between ops — 1 sufficient for small models
+            sess = ort.InferenceSession(resolved, sess_options=opts, providers=["CPUExecutionProvider"])
             self._loaded_models[resolved] = sess
-        return sess
+            return sess
 
     @staticmethod
     def _letterbox(
@@ -784,6 +805,11 @@ class ONNXBackend(InferenceBackend):
         meta = self._load_meta(self._resolve_meta_path(vision))
         class_names = meta.get("class_names", [])
         names_map = {i: name for i, name in enumerate(class_names)}
+        if not names_map:
+            logger.warning(
+                "[onnx] class_names kosong — label akan tampil sebagai angka. "
+                "Pastikan file JSON dengan key 'class_names' ada di folder model."
+            )
 
         allowed_label_values = [str(label) for label in (vision.classes or []) if str(label).strip()]
         if expected_class and str(expected_class).strip():
@@ -866,6 +892,7 @@ class UltralyticsBackend(InferenceBackend):
             path = Path(meta_path)
             if not path.exists():
                 logger.warning("[inference] meta file not found: %s", meta_path)
+                self._meta_cache.pop(meta_path, None)  # evict stale entry
                 return {}
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -930,6 +957,7 @@ class UltralyticsBackend(InferenceBackend):
                         "x2": xyxy[2],
                         "y2": xyxy[3],
                     },
+                    "bbox": [xyxy[0], xyxy[1], xyxy[2], xyxy[3]],
                 }
             )
         return detections

@@ -56,8 +56,12 @@ def _make_service(**kwargs) -> InspectionSessionService:
         svc = InspectionSessionService.__new__(InspectionSessionService)
     svc._sessions = {}
     svc._lock = __import__("threading").RLock()
-    svc._plc_worker = kwargs.get("plc_worker", MagicMock())
-    svc._plc_worker.clamp_engaged.return_value = True
+    if "plc_worker" in kwargs:
+        # Caller supplies (and configures) their own worker — may be None
+        svc._plc_worker = kwargs["plc_worker"]
+    else:
+        svc._plc_worker = MagicMock()
+        svc._plc_worker.clamp_engaged.return_value = True
     svc._plc_clamp_feedback_enabled = kwargs.get("feedback_enabled", True)
     svc._plc_clamp_feedback_fallback_delay_ms = kwargs.get(
         "fallback_delay_ms", 100.0
@@ -72,17 +76,20 @@ class TestClampGateRetry:
     """Test bahwa clamp gate retry bekerja setelah reclamp interval lewat."""
 
     def test_enqueue_resets_when_reclamp_blocked(self):
-        """enqueue_part_ready saat reclamp interval aktif -> flag di-reset."""
+        """Fallback path: PLC masih IDLE (command diblock reclamp interval) -> flag di-reset."""
         plc_worker = MagicMock()
-        svc = _make_service(plc_worker=plc_worker)
+        plc_worker.clamp_engaged.return_value = False  # PLC IDLE — command diblock
+        svc = _make_service(
+            plc_worker=plc_worker,
+            feedback_enabled=False,  # retry-reset hanya ada di fallback path
+            fallback_delay_ms=100.0,
+        )
 
         state = _make_session_state()
         state.plc_part_ready_triggered = True
-        state.plc_clamp_requested_at = time.time() - 0.05  # 50ms ago
+        state.plc_clamp_requested_at = time.time() - 0.2  # 200ms ago (> fallback delay)
         svc._sessions["s1"] = state
 
-        # Reclamp interval = 3000ms, elapsed hanya 50ms -> blocked
-        svc.plc_min_reclamp_interval_ms = 3000
         result = svc._clamp_gate_status(
             state, part_ready_settled=True, now_s=time.time()
         )
@@ -112,12 +119,12 @@ class TestClampGateRetry:
         assert info["status"] == "clamped"
 
     def test_fallback_when_plc_feedback_false(self):
-        """Fallback path: feedback_ready=False tapi fallback delay elapsed -> gate terbuka."""
+        """Fallback path: feedback_ready=False saat fallback delay elapsed -> flag di-reset untuk retry."""
         plc_worker = MagicMock()
         plc_worker.clamp_engaged.return_value = False  # PLC tidak clamp
         svc = _make_service(
             plc_worker=plc_worker,
-            feedback_enabled=True,
+            feedback_enabled=False,  # fallback path (time-based)
             fallback_delay_ms=50.0,  # 50ms fallback
         )
 
