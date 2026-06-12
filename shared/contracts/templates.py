@@ -118,7 +118,7 @@ class StickerRule:
     # 0     = bypass debounce for this template regardless of env.
     # > 0   = explicit ms value; overrides env default.
     part_ready_settle_ms: int | None = None
-    part_ready_settle_frames: int = 2   # frame berturut-turut di atas threshold sebelum clamp
+    part_ready_settle_frames: int = 3   # frame berturut-turut di atas threshold sebelum clamp (profil Seimbang)
     white_hsv_lower: list[int] = field(default_factory=lambda: [0, 0, 160])
     white_hsv_upper: list[int] = field(default_factory=lambda: [180, 70, 255])
     min_text_contour_area_ratio: float = 0.002

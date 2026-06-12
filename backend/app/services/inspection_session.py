@@ -633,7 +633,12 @@ class InspectionSessionService:
             state.template.part_ready_roi,
             state.part_ready_roi_override,
         )
-        part_ready = self._evaluate_part_ready(part_ready_frame, state)
+        # Skip part_ready evaluation when latch is active — part is confirmed present
+        # during inference phase. Still run presence detection for latch release.
+        if state.part_ready_latched:
+            part_ready = {"part_ready": True, "status": "latched", "match_ratio": 1.0}
+        else:
+            part_ready = self._evaluate_part_ready(part_ready_frame, state)
         presence = self._detect_part_presence(part_ready_frame)
         timings["part_ready_eval_ms"] = _elapsed_ms(part_ready_started)
 
