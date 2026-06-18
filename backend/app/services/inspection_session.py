@@ -2156,6 +2156,17 @@ class InspectionSessionService:
         elif use_ocr and expected_code and self._normalize_code(unique_code) != self._normalize_code(expected_code):
             reject_reason = RejectReasonCode.WRONG_TEXT.value
 
+        # Only allow specific hard reject reasons to trigger PLC reject coil.
+        # All other reject reasons are suppressed — system keeps inferring
+        # until ACCEPT, WRONG_TYPE, OUT_OF_ANGLE, or COMMIT_TIMEOUT.
+        _allowed_hard_rejects = {
+            RejectReasonCode.WRONG_TYPE.value,
+            RejectReasonCode.OUT_OF_ANGLE.value,
+            RejectReasonCode.COMMIT_TIMEOUT.value,
+        }
+        if reject_reason is not None and reject_reason not in _allowed_hard_rejects:
+            reject_reason = None
+
         decision = DecisionCode.ACCEPT.value if reject_reason is None else DecisionCode.REJECT.value
         status = "accepted" if reject_reason is None else reject_reason.lower()
         bbox = dict((selected_candidate or {}).get("bbox") or {}) or None
