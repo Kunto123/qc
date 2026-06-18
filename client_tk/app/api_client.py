@@ -257,6 +257,9 @@ class ApiClient:
     def stop_session(self, session_id: str) -> dict:
         return self._post(f"/inspection/sessions/{session_id}/stop", {})
 
+    def manual_release(self, session_id: str) -> dict:
+        return self._post(f"/inspection/sessions/{session_id}/release", {})
+
     def push_frame(self, session_id: str, image_b64: str, *, response_mode: str | None = None) -> dict:
         payload: dict[str, object] = {"image_b64": image_b64}
         if response_mode:

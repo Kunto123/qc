@@ -150,6 +150,7 @@ class OperatorScreen(ctk.CTkFrame):
         self.action_buttons = [
             ctk.CTkButton(self.action_bar, text="Start", command=self._start_production, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
             ctk.CTkButton(self.action_bar, text="Stop", command=self._stop_production, fg_color="#7f1d1d", hover_color="#991b1b", text_color="#fef2f2"),
+            ctk.CTkButton(self.action_bar, text="Release", command=self._manual_release, fg_color="#b45309", hover_color="#92400e", text_color="#fffbeb"),
         ]
 
         self.template_box = ctk.CTkFrame(self.top_bar, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
@@ -1561,6 +1562,19 @@ class OperatorScreen(ctk.CTkFrame):
         if self.state.active_session:
             self._stop_session()
         self._stop_camera()
+
+    def _manual_release(self) -> None:
+        """Neutral release: unclamp current part + reset cycle without committing."""
+        session = self.state.active_session or {}
+        session_id = session.get("session_id")
+        if not session_id:
+            self.info_var.set("Tidak ada sesi aktif untuk di-release.")
+            return
+        try:
+            self.api.manual_release(session_id)
+            self.info_var.set("Part di-release (netral, tanpa commit).")
+        except Exception as exc:  # noqa: BLE001
+            self.info_var.set(OperatorScreen._friendly_error(exc, "Gagal release part"))
 
     def _start_session(self) -> None:
         if self.capture.get_latest_frame() is None:

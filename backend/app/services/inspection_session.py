@@ -570,6 +570,52 @@ class InspectionSessionService:
         with self._lock:
             return session_id in self._sessions
 
+    def manual_release(self, session_id: str, *, reason: str = "manual_operator") -> dict[str, Any]:
+        """Operator-triggered NEUTRAL release.
+
+        Unclamps the current part and resets the clamping/inspection cycle WITHOUT
+        committing any result. No accept/reject is logged and counters are unchanged.
+        Used when a part is still being inspected (no ACCEPT yet) but the operator
+        wants to remove it (e.g. obviously wrong part, mis-loaded part).
+        """
+        state = self._require_session(session_id)
+        # Reset the cycle so the next part starts fresh (mirrors the post-commit reset,
+        # but without persisting/committing anything).
+        state.part_ready_latched = False
+        state.part_ready_latched_at = None
+        state.part_ready_unsettled_at = None
+        state.part_ready_settled_at = None
+        state.consecutive_part_ready_frames = 0
+        state.plc_part_ready_triggered = False
+        state.current_event_committed = False
+        state.current_event_id = None
+        state.current_event_key = None
+        state.current_presence = False
+        state.current_event_started_at = None
+        state.current_event_stable_frames = 0
+        state.cooldown_until = None
+        state.policy_stable_frames = 0
+        state.last_policy_key = ""
+        state.policy_stable_started_at = None
+        state.policy_holdover_expires_at = None
+        state.accept_cycle_started_at = None
+        state.inference_accept_count = 0
+        state.inference_last_counted_generation = -1
+        state.inference_accept_first_ts = 0.0
+        # Blackout to prevent immediate re-clamp of the same still-present part.
+        if self._phase_next_part_delay_ms > 0:
+            state.manual_release_cooldown_until = max(
+                float(getattr(state, "manual_release_cooldown_until", 0.0) or 0.0),
+                time.time() + (self._phase_next_part_delay_ms / 1000.0),
+            )
+        # Unclamp via PLC — neutral, no decision recorded.
+        if self._plc_worker is not None:
+            try:
+                self._plc_worker.force_release(reason=reason)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[inspection] manual_release force_release failed: %s", exc)
+        return self._session_payload(state)
+
     def process_frame(
         self,
         session_id: str,
@@ -1103,9 +1149,9 @@ class InspectionSessionService:
         # ── Inspection Policy Commit Gate ──
         # Determine whether this frame's validation result is allowed to commit.
         # - ACCEPT: commit only after stability threshold (consecutive frames + elapsed ms).
-        # - REJECT with hard reason (OUT_OF_ANGLE): commit only after stability threshold.
-        # - REJECT with non-hard reason (NOT_FOUND, WRONG_TYPE, etc.): never auto-commit.
-        #   These stay as pending/adjust, allowing operator to fix sticker.
+        # - REJECT with hard reason (OUT_OF_ANGLE, WRONG_TYPE): commit only after stability threshold.
+        # - REJECT with non-hard reason (NOT_FOUND, gap, low conf, etc.): never auto-commit.
+        #   These stay as pending so the system keeps inferring until ACCEPT (or COMMIT_TIMEOUT).
         _now_policy = datetime.now(UTC)
         _decision = str(validation.get("decision") or "").strip().upper()
         _reason = str(validation.get("reject_reason_code") or "").strip()
@@ -1262,7 +1308,8 @@ class InspectionSessionService:
                 _pending_reason = f"hard_reject_stabilizing({', '.join(_parts)})"
 
         else:
-            # Non-hard reject (NOT_FOUND, gap, etc.) — never auto-commit
+            # Non-hard reject (NOT_FOUND, gap, low conf, etc.) — never auto-commit.
+            # Keep inferring until ACCEPT (or COMMIT_TIMEOUT safety-net below).
             _policy_action = "pending"
             _pending_reason = f"non_hard_reject:{_reason}"
 
