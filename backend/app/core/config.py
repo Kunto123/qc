@@ -67,6 +67,10 @@ class AppConfig:
     # Templates that explicitly set part_ready_settle_ms (including 0 to bypass) ignore it.
     # Default 0 = no settle (backward compatible).
     part_ready_settle_ms_default: int = max(0, int(os.getenv("QC_SUITE_PART_READY_SETTLE_MS", "0")))
+    # Reject timeout (ms): max time after part settled before auto-reject.
+    # If no accept-commit happens within this window, part is rejected as COMMIT_TIMEOUT.
+    # Default 15000 = 15 seconds. Set to 0 to disable timeout reject.
+    reject_timeout_ms: int = max(0, int(os.getenv("QC_SUITE_REJECT_TIMEOUT_MS", "15000")))
     # Consecutive reject threshold — number of consecutive reject decisions required
     # before a reject is actually committed (PLC reject). 0 = immediate (no delay).
     # Set to 2-3 to allow operator to reposition sticker before final reject.
@@ -81,7 +85,7 @@ class AppConfig:
     # Non-hard reject reasons (NOT_FOUND, WRONG_TYPE, etc.) become pending/adjust
     # without PLC commit. Comma-separated list of RejectReasonCode values.
     inspect_hard_reject_reasons: str = os.getenv(
-        "QC_SUITE_INSPECT_HARD_REJECT_REASONS", "OUT_OF_ANGLE"
+        "QC_SUITE_INSPECT_HARD_REJECT_REASONS", "OUT_OF_ANGLE,WRONG_TYPE"
     ).strip()
     # Commit grace period (ms): minimum time after inference starts before any
     # commit (accept or hard reject) is allowed. This gives operator time to

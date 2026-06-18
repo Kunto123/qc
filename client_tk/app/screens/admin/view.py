@@ -27,6 +27,7 @@ from client_tk.app.screens.admin.tabs.operators_tab import OperatorsTab
 from client_tk.app.screens.admin.tabs.models_tab import ModelsTab
 from client_tk.app.screens.admin.tabs.calibration_tab import CalibrationTab
 from client_tk.app.screens.admin.tabs.results_tab import ResultsTab
+from client_tk.app.screens.admin.tabs.machine_settings_tab import MachineSettingsTab
 from client_tk.app.theme import (
     ACCENT,
     ACCENT_HOVER,
@@ -166,7 +167,10 @@ class AdminScreen(ctk.CTkFrame):
 
         self.status_var = tk.StringVar(value="Admin ready.")
         self.refresh_time_var = tk.StringVar(value="")
-
+        self.validator_mode_var = tk.StringVar(value="sticker")  # "sticker" or "component_count"
+        self.preset_validator_mode_var = tk.StringVar(value="sticker")
+        self.preset_component_rois: list = []
+        self.preset_model_classes_var = tk.StringVar()
         self.preset_name_var = tk.StringVar()
         self.preset_description_var = tk.StringVar()
         self.preset_model_choice_var = tk.StringVar()
@@ -272,7 +276,7 @@ class AdminScreen(ctk.CTkFrame):
     def _build_tabs(self) -> None:
         notebook = ctk.CTkTabview(self, fg_color=APP_BG, corner_radius=0)
         notebook.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
-        for tab_name in ("Templates", "Data", "Training", "Models", "Calibration", "Operators", "Monitor"):
+        for tab_name in ("Templates", "Data", "Training", "Models", "Calibration", "Operators", "Monitor", "Machine Settings"):
             notebook.add(tab_name)
 
         original_tab = notebook.tab
@@ -303,6 +307,7 @@ class AdminScreen(ctk.CTkFrame):
         self.calibration_tab = notebook.tab("Calibration")
         self.operators_tab = notebook.tab("Operators")
         self.monitor_tab = notebook.tab("Monitor")
+        self.plc_settings_tab = notebook.tab("Machine Settings")
 
         self._build_presets_tab()
         self._build_data_tab()
@@ -311,6 +316,7 @@ class AdminScreen(ctk.CTkFrame):
         self._build_calibration_tab()
         self._build_operators_tab()
         self._build_monitor_tab()
+        self._build_plc_settings_tab()
 
     def _build_status_bar(self) -> None:
         status_bar = ctk.CTkFrame(self, fg_color=APP_BG, corner_radius=0)
@@ -335,6 +341,9 @@ class AdminScreen(ctk.CTkFrame):
 
     def _build_monitor_tab(self) -> None:
         ResultsTab(self, self.monitor_tab)
+
+    def _build_plc_settings_tab(self) -> None:
+        MachineSettingsTab(self, self.plc_settings_tab)
     # ------------------------------------------------------------------
     # Refresh and render
     def refresh_all(self) -> None:
@@ -558,13 +567,23 @@ class AdminScreen(ctk.CTkFrame):
             self.preset_table.insert("", "end", iid="__empty__", values=("-", "No presets.", "", ""))
             return
         for item in active_items:
+            # Get latest template name from cache (falls back to deployment snapshot)
+            template_id = int(item.get("template_id") or 0)
+            latest_name = item.get("template_name") or ""
+            if template_id > 0:
+                tpl = next(
+                    (t for t in self._templates_cache if int(t.get("id") or 0) == template_id),
+                    None,
+                )
+                if tpl:
+                    latest_name = tpl.get("name") or latest_name
             self.preset_table.insert(
                 "",
                 "end",
                 iid=f"dep:{item.get('id')}",
                 values=(
                     f"D{item.get('id')}",
-                    _safe_text(item.get("template_name")),
+                    _safe_text(latest_name),
                     _safe_text(item.get("template_version_id")),
                     "ACTIVE",
                 ),
@@ -1150,6 +1169,18 @@ class AdminScreen(ctk.CTkFrame):
             version_id = int(saved.get("version_id") or saved.get("current_version_id") or 0)
             self.current_template_id = template_id
             self.current_template_version_id = version_id
+            # Update template_name in existing active deployment records
+            new_name = payload.get("name", "").strip()
+            if new_name and hasattr(self, "_deployments_cache"):
+                for dep in self._deployments_cache:
+                    if int(dep.get("template_id") or 0) == template_id and dep.get("is_active"):
+                        try:
+                            self.api.update_deployment(
+                                int(dep.get("id") or 0),
+                                {"template_name": new_name},
+                            )
+                        except Exception:
+                            pass
             # Reload exact version detail to wizard form so values reflect the update
             try:
                 if version_id:
@@ -1177,7 +1208,8 @@ class AdminScreen(ctk.CTkFrame):
             messagebox.showerror("Preset", str(exc))
             return
         try:
-            if self.current_template_id:
+            is_update = bool(self.current_template_id)
+            if is_update:
                 saved = self.api.update_template(self.current_template_id, payload)
             else:
                 saved = self.api.create_template(payload)
@@ -1197,6 +1229,20 @@ class AdminScreen(ctk.CTkFrame):
                     "template_version_id": version_id,
                 }
             )
+            # Update template_name in existing active deployment records
+            # This keeps the name in sync when renaming a deployed template
+            if is_update:
+                new_name = payload.get("name", "").strip()
+                if new_name and hasattr(self, "_deployments_cache"):
+                    for dep in self._deployments_cache:
+                        if int(dep.get("template_id") or 0) == template_id and dep.get("is_active"):
+                            try:
+                                self.api.update_deployment(
+                                    int(dep.get("id") or 0),
+                                    {"template_name": new_name},
+                                )
+                            except Exception:
+                                pass
         except Exception as exc:
             messagebox.showerror("Preset", str(exc))
             return
@@ -1349,10 +1395,15 @@ class AdminScreen(ctk.CTkFrame):
             raise ValueError("Preset name is required.")
         if not model_path:
             raise ValueError("Model is required.")
-        if not expected_code:
-            raise ValueError("Sticker code is required.")
-        if not expected_class:
-            raise ValueError("Expected class is required.")
+        mode = self.preset_validator_mode_var.get()
+        if mode == "component_count":
+            expected_code = expected_code or ""
+            expected_class = expected_class or ""
+        else:
+            if not expected_code:
+                raise ValueError("Sticker code is required.")
+            if not expected_class:
+                raise ValueError("Expected class is required.")
         max_tilt = None
         if self.preset_max_tilt_var.get().strip():
             max_tilt = _float_or_default(self.preset_max_tilt_var.get(), 5.0)

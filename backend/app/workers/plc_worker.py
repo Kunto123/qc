@@ -1,26 +1,16 @@
 """
-PLC Worker — simple, berdasarkan testall.py yang sudah terbukti bekerja.
+PLC Worker — strategy-based, reads config from MachineSettings DB.
 
 Flow:
-  IDLE → CLAMPING → ACCEPT (CH0=OFF, CH1=ON 1s → CH1=OFF → IDLE)
-                   → REJECT (CH2=ON, CH0=ON → wait Input 1 → IDLE)
-  Any state → Input 1 → IDLE (all off)
-  Any state → Input 2 → cycle template
+  IDLE → CLAMPING → ACCEPT (clamp OFF, OK pulse → IDLE)
+                   → REJECT (enji buzzer ON, clamp stays → wait release → IDLE)
+  Any state → Input release → IDLE (all off)
+  Any state → Input template → cycle template
 
-Relay Map:
-  CH0 = Clamp (ON=clamp, OFF=release)
-  CH1 = Buzzer + Lampu Accept/Reject (1 relay, 3 fungsi via NC/NO)
-  CH2 = Buzzer Reject
-
-Input Map:
-  Input 1 (address 0) = Manual Release
-  Input 2 (address 1) = Ganti Template
-  Input 3 (address 2) = Clamp engaged feedback (optional)
-
-Command Queue Pattern:
-  Semua command (enqueue_part_ready, notify_decision, force_release)
-  masuk ke queue. PLC worker thread yang consume dan execute.
-  Backend thread TIDAK langsung write_coil() — hanya enqueue.
+Strategy pattern:
+  PlcWorker delegates mode-specific behavior to PlcFlowStrategy.
+  Strategy is selected by `validator_mode` from the active template.
+  Strategy reads addresses/timing from MachineSettings (DB, not env).
 """
 from __future__ import annotations
 
@@ -29,14 +19,32 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from backend.app.services.counter_flow import CounterFlow
+from backend.app.services.plc_flow_strategy import PlcFlowStrategy
+from backend.app.services.sticker_flow import StickerFlow
+
 if TYPE_CHECKING:
     from backend.app.services.plc_adapter import PlcAdapter
 
 logger = logging.getLogger(__name__)
 
-_POLL_INTERVAL_S = 0.2  # 200ms — gives time for response to arrive before next poll
-_INPUT_READ_COUNT = 8   # sesuai firmware
-_CMD_QUEUE_MAX = 64     # max queue depth, drop oldest if full
+_POLL_INTERVAL_S = 0.2
+_INPUT_READ_COUNT = 8
+_CMD_QUEUE_MAX = 64
+
+
+def _build_strategy(
+    validator_mode: str,
+    adapter: "PlcAdapter",
+    settings,  # MachineSettings
+    num_channels: int = 4,
+) -> PlcFlowStrategy:
+    """Factory: select strategy based on validator_mode."""
+    mode = (validator_mode or "sticker").strip().lower()
+    if mode == "component_count":
+        return CounterFlow(adapter, settings.counter, num_channels)
+    # Default: sticker mode
+    return StickerFlow(adapter, settings.sticker, num_channels)
 
 
 class PlcWorker:
@@ -54,54 +62,113 @@ class PlcWorker:
         relay_enji_buzzer_address: int = 1,
     ) -> None:
         self._adapter = adapter
-        self._accept_pulse_ms = int(accept_pulse_ms)
         self._num_channels = num_channels
+        self._accept_pulse_ms = int(accept_pulse_ms)
+
+        # Legacy constructor args (kept for backward compat / container.py wiring)
+        # These are OVERRIDDEN once strategy is set from MachineSettings.
         self._input_release_address = max(0, int(input_release_address))
         self._input_template_address = max(0, int(input_template_address))
         self._input_clamp_engaged_address = max(0, int(input_clamp_engaged_address))
         self._clamp_feedback_enabled = bool(clamp_feedback_enabled)
-        # Relay coil addresses (configurable)
         self._relay_clamp = max(0, int(relay_clamp_address))
         self._relay_ok_light_buzzer = max(0, int(relay_ok_light_buzzer_address))
         self._relay_enji_buzzer = max(0, int(relay_enji_buzzer_address))
+
+        # Strategy (set via set_strategy or set_validator_mode)
+        self._strategy: PlcFlowStrategy | None = None
+
         # ── Cycle Lock State ──
-        # After ACCEPT/REJECT commit, lock prevents re-clamp until part is removed
         self._cycle_locked: bool = False
         self._cycle_lock_reason: str = ""
-        self._last_clamp_off_at: float = 0.0  # timestamp of last clamp release
-        self._last_part_ready_event_id: str | None = None  # deduplicate guard
+        self._last_clamp_off_at: float = 0.0
+        self._last_part_ready_event_id: str | None = None
+
         # Config (set from container)
         self._min_reclamp_interval_ms: int = 3000
         self._release_input_debounce_ms: int = 500
         self._dry_run: bool = False
-        # Release input edge tracking (prevents stuck-high from retriggering)
+
+        # Release input edge tracking
         self._release_input_started_at: float | None = None
         self._release_input_triggered: bool = False
+
         # State
         self._state: str = "IDLE"
         self._accept_pulse_end: float | None = None
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
-        # Command queue — backend thread enqueue, worker thread consume
+
+        # Command queue
         self._cmd_queue: list[dict] = []
-        self._cmd_event = threading.Event()  # signal worker thread
+        self._cmd_event = threading.Event()
+
         # Input debounce
         self._last_input_press: dict[int, float] = {}
         self._input_debounce_s: float = 0.5
         self._template_cycle_event_id: int = 0
         self._last_template_cycle_at: float | None = None
         self._last_input_snapshot: list[bool] = []
-        # Template cycling callback
+
+        # Callbacks
         self._template_cycle_callback = None
-        # State change callback (called when PLC state changes)
         self._on_state_change_callback = None
+
+    # ── Strategy setup ───────────────────────────────────────────────
+
+    def set_strategy(self, strategy: PlcFlowStrategy) -> None:
+        """Set the active flow strategy. Called from container after seed."""
+        self._strategy = strategy
+        logger.info("[plc-worker] strategy set: %s", strategy.flow_name)
+
+    def set_validator_mode(self, mode: str, settings=None) -> None:
+        """Select strategy by validator_mode string.
+
+        If settings (MachineSettings) is provided, build strategy from DB.
+        Otherwise, fall back to legacy constructor args (backward compat).
+        """
+        if settings is not None:
+            self._strategy = _build_strategy(
+                mode, self._adapter, settings, self._num_channels
+            )
+            logger.info(
+                "[plc-worker] strategy built from MachineSettings: %s",
+                self._strategy.flow_name,
+            )
+        else:
+            # Legacy fallback — build from constructor args
+            from backend.app.models.machine_settings import StickerModeConfig, CounterModeConfig
+            if mode == "component_count":
+                cfg = CounterModeConfig(
+                    relay_clamp_address=self._relay_clamp,
+                    relay_ok_light_buzzer_address=self._relay_ok_light_buzzer,
+                    relay_enji_buzzer_address=self._relay_enji_buzzer,
+                    input_release_address=self._input_release_address,
+                    input_template_address=self._input_template_address,
+                    input_clamp_engaged_address=self._input_clamp_engaged_address,
+                    clamp_feedback_enabled=self._clamp_feedback_enabled,
+                )
+                self._strategy = CounterFlow(self._adapter, cfg, self._num_channels)
+            else:
+                cfg = StickerModeConfig(
+                    relay_clamp_address=self._relay_clamp,
+                    relay_ok_light_buzzer_address=self._relay_ok_light_buzzer,
+                    relay_enji_buzzer_address=self._relay_enji_buzzer,
+                    input_release_address=self._input_release_address,
+                    input_template_address=self._input_template_address,
+                    input_clamp_engaged_address=self._input_clamp_engaged_address,
+                    clamp_feedback_enabled=self._clamp_feedback_enabled,
+                    accept_pulse_ms=self._accept_pulse_ms,
+                )
+                self._strategy = StickerFlow(self._adapter, cfg, self._num_channels)
+
+    # ── Public API (unchanged signatures) ───────────────────────────
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop_event.clear()
-        # Connect dan semua relay OFF
         try:
             self._adapter.connect()
             self._adapter.all_off(self._num_channels)
@@ -111,12 +178,11 @@ class PlcWorker:
         self._state = "IDLE"
         self._thread = threading.Thread(target=self._loop, name="qc-plc-worker", daemon=True)
         self._thread.start()
-        logger.info("[plc-worker] started (state=IDLE)")
+        logger.info("[plc-worker] started (state=%s, strategy=%s)", self._state, self._strategy.flow_name if self._strategy else "none")
 
     def stop(self, timeout: float = 3.0) -> None:
         self._stop_event.set()
-        self._cmd_event.set()  # wake up worker thread
-        # Safety: semua relay OFF
+        self._cmd_event.set()
         try:
             self._adapter.all_off(self._num_channels)
         except Exception as exc:
@@ -130,37 +196,19 @@ class PlcWorker:
         self._state = "IDLE"
         logger.info("[plc-worker] stopped")
 
-    # ------------------------------------------------------------------
-    # Public API — semua return immediately, enqueue ke worker thread
-    # ------------------------------------------------------------------
-
     def enqueue_part_ready(self, *, event_id: str | None) -> None:
-        """Part ready → enqueue CLAMPING command. Non-blocking."""
-        self._enqueue_cmd({
-            "type": "part_ready",
-            "event_id": event_id,
-        })
+        self._enqueue_cmd({"type": "part_ready", "event_id": event_id})
 
     def notify_decision(self, decision: str, *, event_id: str | None = None) -> None:
-        """Inspection decision → enqueue ACCEPT/REJECT command. Non-blocking."""
-        self._enqueue_cmd({
-            "type": "decision",
-            "decision": decision,
-            "event_id": event_id,
-        })
+        self._enqueue_cmd({"type": "decision", "decision": decision, "event_id": event_id})
 
     def force_release(self, *, reason: str = "manual") -> None:
-        """Manual release → enqueue force_release command. Non-blocking."""
-        self._enqueue_cmd({
-            "type": "force_release",
-            "reason": reason,
-        })
+        self._enqueue_cmd({"type": "force_release", "reason": reason})
 
     def set_template_cycle_callback(self, callback) -> None:
         self._template_cycle_callback = callback
 
     def set_on_state_change_callback(self, callback) -> None:
-        """Callback dipanggil saat PLC state berubah. old_state, new_state."""
         self._on_state_change_callback = callback
 
     def configure_guards(
@@ -170,13 +218,11 @@ class PlcWorker:
         release_input_debounce_ms: int = 500,
         dry_run: bool = False,
     ) -> None:
-        """Configure cycle guard settings (called from container init)."""
         self._min_reclamp_interval_ms = max(0, int(min_reclamp_interval_ms))
         self._release_input_debounce_ms = max(0, int(release_input_debounce_ms))
         self._dry_run = bool(dry_run)
 
     def unlock_cycle(self, *, reason: str = "manual") -> None:
-        """Explicitly unlock cycle (called from inspection session after part removal)."""
         logger.info("[plc-worker] cycle unlocked — %s", reason)
         self._cycle_locked = False
         self._cycle_lock_reason = ""
@@ -189,6 +235,7 @@ class PlcWorker:
                 "running": self._thread is not None and self._thread.is_alive(),
                 "state": self._state,
                 "connected": self._adapter.is_connected(),
+                "strategy": self._strategy.flow_name if self._strategy else "none",
                 "clamp_feedback_enabled": self._clamp_feedback_enabled,
                 "clamp_feedback_address": self._input_clamp_engaged_address,
                 "clamp_engaged": clamp_engaged,
@@ -213,14 +260,29 @@ class PlcWorker:
             return False
         return self._state in {"CLAMPING", "CLAMPED", "REJECT_BUZZER"}
 
-    # ------------------------------------------------------------------
-    # Command Queue
-    # ------------------------------------------------------------------
+    # ── Backward-compatible coil access for diagnostics ──────────────
+
+    @property
+    def relay_clamp(self) -> int:
+        return self._relay_clamp
+
+    @property
+    def relay_ok_light_buzzer(self) -> int:
+        return self._relay_ok_light_buzzer
+
+    @property
+    def relay_enji_buzzer(self) -> int:
+        return self._relay_enji_buzzer
+
+    @property
+    def num_channels(self) -> int:
+        return self._num_channels
+
+    # ── Command Queue ────────────────────────────────────────────────
 
     def _enqueue_cmd(self, cmd: dict) -> None:
         with self._lock:
             if len(self._cmd_queue) >= _CMD_QUEUE_MAX:
-                # Drop oldest non-critical commands
                 self._cmd_queue.pop(0)
                 logger.warning("[plc-worker] cmd queue full, dropped oldest")
             self._cmd_queue.append(cmd)
@@ -232,16 +294,13 @@ class PlcWorker:
                 return self._cmd_queue.pop(0)
         return None
 
-    # ------------------------------------------------------------------
-    # Internal — executed in PLC worker thread only
-    # ------------------------------------------------------------------
+    # ── State setter with callback ───────────────────────────────────
 
     def _set_state(self, new_state: str) -> None:
         with self._lock:
             old = self._state
             self._state = new_state
         logger.info("[plc-worker] %s → %s", old, new_state)
-        # Notify callback if registered
         if self._on_state_change_callback and old != new_state:
             try:
                 self._on_state_change_callback(old, new_state)
@@ -249,7 +308,6 @@ class PlcWorker:
                 logger.error("[plc-worker] state change callback error: %s", exc)
 
     def _write_coil(self, addr: int, value: bool) -> None:
-        """Write coil with retry and timeout protection. Raises on persistent error."""
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
@@ -272,47 +330,41 @@ class PlcWorker:
         self._last_clamp_off_at = time.time()
         self._set_state("IDLE")
 
-    # -- ACCEPT: release clamp, CH1 pulse, back to IDLE --
+    # ── ACCEPT / REJECT (delegated to strategy when available) ───────
 
     def _on_accept(self) -> None:
-        """
-        ACCEPT:
-        1. CH0=OFF (release clamp)
-        2. CH1=ON (Green+Buzzer, Red OFF via NC)
-        3. Timer _accept_pulse_ms → CH1=OFF → IDLE
-        """
-        self._set_state("ACCEPT_PULSE")
-        self._write_coil(self._relay_clamp, False)       # Clamp=OFF (release)
-        self._write_coil(self._relay_ok_light_buzzer, True)  # OK Light+Buzzer=ON
-        self._accept_pulse_end = time.time() + (self._accept_pulse_ms / 1000.0)
-        logger.info("[plc-worker] ACCEPT — CH1 pulse %dms", self._accept_pulse_ms)
+        if self._strategy is not None:
+            self._strategy.on_accept(self)
+            self._set_state("ACCEPT_PULSE")
+        else:
+            # Legacy hardcoded fallback
+            self._set_state("ACCEPT_PULSE")
+            self._write_coil(self._relay_clamp, False)
+            self._write_coil(self._relay_ok_light_buzzer, True)
+            self._accept_pulse_end = time.time() + (self._accept_pulse_ms / 1000.0)
+            logger.info("[plc-worker] ACCEPT — CH1 pulse %dms (legacy)", self._accept_pulse_ms)
 
     def _finish_accept_pulse(self) -> None:
-        self._write_coil(self._relay_ok_light_buzzer, False)  # OK Light+Buzzer=OFF
-        self._accept_pulse_end = None
+        if self._strategy is not None and isinstance(self._strategy, StickerFlow):
+            self._strategy.finish_accept_pulse(self)
+        else:
+            self._write_coil(self._relay_ok_light_buzzer, False)
+            self._accept_pulse_end = None
         self._last_clamp_off_at = time.time()
         self._set_state("IDLE")
         logger.info("[plc-worker] ACCEPT done → IDLE")
 
-    # -- REJECT: CH2=ON, CH0=ON, wait Input 1 --
-
     def _on_reject(self) -> None:
-        """
-        REJECT:
-        1. CH2=ON (Buzzer Reject)
-        2. CH0=ON (clamp stays)
-        3. CH1=OFF (Red ON via NC)
-        4. Wait Input 1
-        """
-        self._set_state("REJECT_BUZZER")
-        self._write_coil(self._relay_enji_buzzer, True)   # Enji Buzzer=ON
-        self._write_coil(self._relay_clamp, True)         # Clamp stays ON
-        # OK Light=OFF (Red ON via NC)
-        logger.info("[plc-worker] REJECT — CH2 ON, waiting Input 1")
+        if self._strategy is not None:
+            self._strategy.on_reject(self)
+            self._set_state("REJECT_BUZZER")
+        else:
+            self._set_state("REJECT_BUZZER")
+            self._write_coil(self._relay_enji_buzzer, True)
+            self._write_coil(self._relay_clamp, True)
+            logger.info("[plc-worker] REJECT — CH2 ON, waiting Input 1 (legacy)")
 
-    # ------------------------------------------------------------------
-    # Command handlers — executed in PLC worker thread
-    # ------------------------------------------------------------------
+    # ── Command handlers ─────────────────────────────────────────────
 
     def _handle_cmd(self, cmd: dict) -> None:
         cmd_type = cmd.get("type")
@@ -329,25 +381,21 @@ class PlcWorker:
             logger.error("[plc-worker] cmd %s error: %s", cmd_type, exc)
 
     def _cmd_part_ready(self, cmd: dict) -> None:
-        """Handle part_ready command in worker thread."""
         event_id = cmd.get("event_id")
-        # Deduplicate: ignore if same event_id already processed
         if event_id and event_id == self._last_part_ready_event_id:
             logger.info("[plc-worker] part_ready dedup — event=%s", event_id)
             return
-        # Cycle lock: reject clamp if locked
         if self._cycle_locked:
             logger.info("[plc-worker] part_ready blocked (cycle_locked=%s) — event=%s",
                         self._cycle_lock_reason, event_id)
             return
-        # Min reclamp interval: reject if too soon after last clamp off
         now = time.time()
         if self._last_clamp_off_at > 0:
-            _elapsed_since_release_ms = (now - self._last_clamp_off_at) * 1000.0
-            if _elapsed_since_release_ms < self._min_reclamp_interval_ms:
+            elapsed_since_release_ms = (now - self._last_clamp_off_at) * 1000.0
+            if elapsed_since_release_ms < self._min_reclamp_interval_ms:
                 logger.info(
                     "[plc-worker] part_ready blocked (reclamp interval %.0fms < %dms) — event=%s",
-                    _elapsed_since_release_ms, self._min_reclamp_interval_ms, event_id,
+                    elapsed_since_release_ms, self._min_reclamp_interval_ms, event_id,
                 )
                 return
         with self._lock:
@@ -355,14 +403,19 @@ class PlcWorker:
                 logger.info("[plc-worker] part_ready ignored (state=%s)", self._state)
                 return
         self._last_part_ready_event_id = event_id
-        self._write_coil(self._relay_clamp, True)         # Clamp=ON
-        self._write_coil(self._relay_ok_light_buzzer, False)  # OK Light=OFF
-        self._write_coil(self._relay_enji_buzzer, False)  # Enji Buzzer=OFF
-        self._set_state("CLAMPING")
+
+        if self._strategy is not None:
+            self._strategy.on_part_ready(self)
+            self._set_state("CLAMPING")
+        else:
+            # Legacy fallback
+            self._write_coil(self._relay_clamp, True)
+            self._write_coil(self._relay_ok_light_buzzer, False)
+            self._write_coil(self._relay_enji_buzzer, False)
+            self._set_state("CLAMPING")
         logger.info("[plc-worker] CLAMPING — event=%s", event_id)
 
     def _cmd_decision(self, cmd: dict) -> None:
-        """Handle decision command in worker thread."""
         decision = cmd.get("decision")
         with self._lock:
             if self._state not in {"CLAMPING", "CLAMPED"}:
@@ -373,12 +426,9 @@ class PlcWorker:
             self._on_reject()
 
     def _cmd_force_release(self, cmd: dict) -> None:
-        """Handle force_release command in worker thread."""
         self._all_off(cmd.get("reason", "manual"))
 
-    # ------------------------------------------------------------------
-    # Main loop (polling + state machine + command processing)
-    # ------------------------------------------------------------------
+    # ── Main loop ────────────────────────────────────────────────────
 
     def _loop(self) -> None:
         while not self._stop_event.is_set():
@@ -394,9 +444,14 @@ class PlcWorker:
                 if self._accept_pulse_end is not None and time.time() >= self._accept_pulse_end:
                     self._finish_accept_pulse()
 
+                # Also check strategy-level accept pulse (StickerFlow)
+                if self._strategy is not None and isinstance(self._strategy, StickerFlow):
+                    if self._strategy.is_accept_pulse_complete() and self._state == "ACCEPT_PULSE":
+                        self._finish_accept_pulse()
+
                 # Poll inputs
                 self._poll_inputs()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.error("[plc-worker] _loop unhandled exception: %s", exc, exc_info=True)
             self._cmd_event.wait(timeout=_POLL_INTERVAL_S)
             self._cmd_event.clear()
@@ -406,7 +461,6 @@ class PlcWorker:
             inputs = self._adapter.read_inputs(address=0, count=_INPUT_READ_COUNT)
         except Exception as exc:
             logger.warning("[plc-worker] read_inputs error: %s — attempting reconnect", exc)
-            # Try to reconnect — if this fails, we'll retry next poll cycle
             try:
                 self._adapter.connect()
                 logger.info("[plc-worker] reconnect successful after read error")
@@ -420,35 +474,31 @@ class PlcWorker:
         with self._lock:
             self._last_input_snapshot = list(inputs[:_INPUT_READ_COUNT])
 
-        # Input 1 (index 0): Manual Release — edge triggered + stable debounce
+        # Input release (IN1) — edge triggered + stable debounce
         _release_addr = self._input_release_address
         if _release_addr < len(inputs):
             _release_active = bool(inputs[_release_addr])
             _now = now
-            # Track the timestamp when release input first went high
             if _release_active:
                 if self._release_input_started_at is None:
                     self._release_input_started_at = _now
-                # Only trigger if input has been stable high for debounce period
                 _stable_ms = (_now - self._release_input_started_at) * 1000.0
                 logger.debug(
                     "[plc-worker] IN1 HIGH — stable %.0fms / debounce %dms",
                     _stable_ms, self._release_input_debounce_ms,
                 )
                 if _stable_ms >= self._release_input_debounce_ms:
-                    # Edge: only trigger once per activation cycle
                     if not self._release_input_triggered:
                         self._release_input_triggered = True
                         logger.info("[plc-worker] INPUT 1 — Manual Release (stable %.0fms)", _stable_ms)
                         self._all_off("input_1")
             else:
-                # Input went low — reset state for next edge
                 if self._release_input_started_at is not None and self._release_input_triggered:
                     logger.debug("[plc-worker] IN1 LOW — release cycle complete")
                 self._release_input_started_at = None
                 self._release_input_triggered = False
 
-        # Input 2 (index 1): Ganti Template — edge triggered + debounce
+        # Input template cycle (IN2) — edge triggered + debounce
         if self._input_template_address < len(inputs) and inputs[self._input_template_address]:
             last = self._last_input_press.get(self._input_template_address, 0.0)
             if now - last > self._input_debounce_s:
@@ -464,6 +514,7 @@ class PlcWorker:
                     except Exception as exc:
                         logger.error("[plc-worker] template cycle error: %s", exc)
 
+        # Clamp feedback
         if (
             self._clamp_feedback_enabled
             and self._input_clamp_engaged_address < len(inputs)

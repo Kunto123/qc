@@ -116,15 +116,17 @@ class OperatorScreen(ctk.CTkFrame):
         self.template_choice = tk.StringVar()
         self.display_source = tk.StringVar(value="Right View: Live Camera + ROIs")
 
+        # Component ROI vars — list of dicts {"x": StringVar, "y": StringVar, "w": StringVar, "h": StringVar, "name": StringVar}
+        self._comp_roi_vars: list[dict[str, tk.StringVar]] = []
+
         self.operator_context = tk.StringVar(value=f"Operator: {self.state.user.get('username') if self.state.user else '-'}")
         self.template_context = tk.StringVar(value="Template: -")
         self.info_var = tk.StringVar(value="Idle. Pilih template atau deployment, lalu start camera.")
 
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(3, weight=1)
+        self.rowconfigure(2, weight=1)
 
         self._build_top_bar()
-        self._build_context_bar()
         self._build_status_strip()
         self._build_content()
         self._load_template_choices()
@@ -160,27 +162,21 @@ class OperatorScreen(ctk.CTkFrame):
 
         self._layout_top_bar(compact=False)
 
-    def _build_context_bar(self) -> None:
-        self.context_bar = ctk.CTkFrame(self, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
-        self.context_bar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        self.context_labels = {
-            "operator": ctk.CTkLabel(self.context_bar, textvariable=self.operator_context, font=("Segoe UI", 13, "bold"), text_color=TEXT_PRIMARY),
-            "template": ctk.CTkLabel(self.context_bar, textvariable=self.template_context, font=("Segoe UI", 11), text_color=TEXT_SECONDARY),
-        }
-        self._layout_context_bar(compact=False)
-
     def _build_status_strip(self) -> None:
         self.status_frame = ctk.CTkFrame(self, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
-        self.status_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        ctk.CTkLabel(self.status_frame, text="System Status", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).pack(
-            anchor="w",
-            padx=10,
-            pady=(10, 6),
-        )
+        self.status_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        # Header row with title + operator/template info
+        header_frame = ctk.CTkFrame(self.status_frame, fg_color="transparent")
+        header_frame.pack(fill="x", padx=10, pady=(10, 4))
+        ctk.CTkLabel(header_frame, text="System Status", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).pack(side="left")
+        ctk.CTkLabel(header_frame, textvariable=self.operator_context, font=("Segoe UI", 10, "bold"), text_color=TEXT_SECONDARY).pack(side="right")
+        ctk.CTkLabel(header_frame, textvariable=self.template_context, font=("Segoe UI", 10), text_color=TEXT_SECONDARY).pack(side="right", padx=(0, 12))
+
         self.status_badges_container = ctk.CTkFrame(self.status_frame, fg_color="transparent")
         self.status_badges_container.pack(fill="x", padx=10, pady=(0, 10))
         self.badges: dict[str, ctk.CTkLabel] = {}
-        for key in ("SERVER", "CAMERA", "SESSION", "DB", "EVENT", "PLC"):
+        for key in ("EVENT", "PLC"):
             label = ctk.CTkLabel(
                 self.status_badges_container,
                 text=f"{key}: -",
@@ -196,7 +192,7 @@ class OperatorScreen(ctk.CTkFrame):
 
     def _build_content(self) -> None:
         self.content_scroller = ScrollableFrame(self)
-        self.content_scroller.grid(row=3, column=0, sticky="nsew")
+        self.content_scroller.grid(row=2, column=0, sticky="nsew")
         self.content = self.content_scroller.body
         self.content.columnconfigure(0, weight=1)
         self.content.rowconfigure(0, weight=1)
@@ -340,7 +336,6 @@ class OperatorScreen(ctk.CTkFrame):
             width = max(self.winfo_width(), self.winfo_toplevel().winfo_width())
             compact = width < RESPONSIVE_BREAKPOINT
             self._layout_top_bar(compact=compact)
-            self._layout_context_bar(compact=compact)
             self._layout_status_strip(compact=compact)
         except tk.TclError:
             return
@@ -417,29 +412,13 @@ class OperatorScreen(ctk.CTkFrame):
             for index, button in enumerate(self.action_buttons):
                 button.grid(row=0, column=index, sticky="w", padx=(0 if index == 0 else 6, 0))
 
-    def _layout_context_bar(self, *, compact: bool) -> None:
-        for widget in self.context_bar.grid_slaves():
-            widget.grid_forget()
-
-        if compact:
-            self.context_bar.columnconfigure(0, weight=1)
-            self.context_bar.columnconfigure(1, weight=1)
-            self.context_labels["operator"].grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
-            self.context_labels["template"].grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
-            self.context_labels["template"].grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        else:
-            for index in range(4):
-                self.context_bar.columnconfigure(index, weight=1)
-            self.context_labels["operator"].grid(row=0, column=0, sticky="w", padx=(0, 8))
-            self.context_labels["template"].grid(row=0, column=1, columnspan=3, sticky="w")
-
     def _layout_status_strip(self, *, compact: bool) -> None:
         for widget in self.status_badges_container.grid_slaves():
             widget.grid_forget()
 
-        keys = ["SERVER", "CAMERA", "SESSION", "DB", "EVENT", "PLC"]
-        columns = 3 if compact else 6
-        rows = 2 if compact else 1
+        keys = ["EVENT", "PLC"]
+        columns = 2 if compact else 2
+        rows = 1
         for column in range(columns):
             self.status_badges_container.columnconfigure(column, weight=1)
         for row in range(rows):
@@ -487,8 +466,16 @@ class OperatorScreen(ctk.CTkFrame):
         ttk.Label(general, text="0/90/180/270", foreground="gray").grid(row=2, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(0, 4))
         self._settings_entry(general, 3, 0, "Template Ver", self.template_version_value)
 
+        # Detect validator_mode from active template detail
+        template_detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
+        validator_mode = str((template_detail or {}).get("sticker", {}).get("validator_mode", "") or "").strip().lower()
+        is_component_counter = validator_mode == "component_count"
+
+        # Part Ready ROI — only shown in sticker mode
         part_ready_roi = ttk.LabelFrame(body, text="Part Ready ROI", padding=10)
         part_ready_roi.grid(row=1, column=0, sticky="nsew", pady=(12, 0), padx=(0, 6))
+        if is_component_counter:
+            part_ready_roi.grid_remove()
         for index in range(8):
             part_ready_roi.columnconfigure(index, weight=1)
         ttk.Label(
@@ -503,8 +490,11 @@ class OperatorScreen(ctk.CTkFrame):
         self._settings_roi_entry(part_ready_roi, 1, 4, "w (width)", self.part_ready_roi_w_value)
         self._settings_roi_entry(part_ready_roi, 1, 6, "h (height)", self.part_ready_roi_h_value)
 
+        # Sticker ROI — only shown in sticker mode
         sticker_roi = ttk.LabelFrame(body, text="Sticker ROI", padding=10)
         sticker_roi.grid(row=1, column=1, sticky="nsew", pady=(12, 0), padx=(6, 0))
+        if is_component_counter:
+            sticker_roi.grid_remove()
         for index in range(8):
             sticker_roi.columnconfigure(index, weight=1)
         ttk.Label(
@@ -519,9 +509,23 @@ class OperatorScreen(ctk.CTkFrame):
         self._settings_roi_entry(sticker_roi, 1, 4, "w (width)", self.sticker_roi_w_value)
         self._settings_roi_entry(sticker_roi, 1, 6, "h (height)", self.sticker_roi_h_value)
 
+        # Component ROI editor — only shown in component_count mode
+        self._comp_roi_settings_frame = ttk.LabelFrame(body, text="Component ROIs", padding=10)
+        self._comp_roi_settings_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
+        if not is_component_counter:
+            self._comp_roi_settings_frame.grid_remove()
+        self._comp_roi_settings_frame.columnconfigure(0, weight=1)
+        self._build_comp_roi_settings(self._comp_roi_settings_frame, template_detail)
+
+        # Help text
+        help_text = (
+            "ROI disimpan dalam format rasio 0-1 terhadap frame kamera. "
+            + ("Gunakan Component ROIs untuk mendeteksi dan menghitung komponen." if is_component_counter
+               else "Gunakan part-ready ROI untuk gate warna, dan sticker ROI untuk inferensi model. Right view akan menampilkan frame penuh dengan ROI sticker atau overlay hasil machine learning.")
+        )
         ttk.Label(
             body,
-            text="ROI disimpan dalam format rasio 0-1 terhadap frame kamera. Gunakan part-ready ROI untuk gate warna, dan sticker ROI untuk inferensi model. Right view akan menampilkan frame penuh dengan ROI sticker atau overlay hasil machine learning.",
+            text=help_text,
             foreground="#475569",
             wraplength=620,
             justify="left",
@@ -533,6 +537,44 @@ class OperatorScreen(ctk.CTkFrame):
         ttk.Button(footer, text="Use Template ROI", command=self._sync_selected_template_detail).pack(side="left", padx=8)
         ttk.Button(footer, text="Apply ROI", command=self._apply_roi).pack(side="left")
         ttk.Button(footer, text="Close", command=self._close_settings).pack(side="right")
+
+    def _build_comp_roi_settings(self, parent: ttk.LabelFrame, template_detail: dict | None) -> None:
+        """Build component ROI entry fields inside the given parent frame."""
+        # Clear existing slaves
+        for child in parent.winfo_children():
+            child.destroy()
+        self._comp_roi_vars.clear()
+
+        component_rois = (template_detail or {}).get("component_rois") or []
+        if not component_rois:
+            ttk.Label(parent, text="No component ROIs defined. Use Admin → Templates to add.",
+                      foreground="#475569").grid(row=0, column=0, sticky="w", pady=4)
+            return
+
+        for idx, cr in enumerate(component_rois):
+            roi = cr.get("roi") or {}
+            name = cr.get("name", f"ROI {idx}")
+            row_frame = ttk.Frame(parent)
+            row_frame.grid(row=idx, column=0, sticky="ew", pady=(4 if idx == 0 else 8, 0))
+            row_frame.columnconfigure(1, weight=1)
+            row_frame.columnconfigure(3, weight=1)
+            row_frame.columnconfigure(5, weight=1)
+            row_frame.columnconfigure(7, weight=1)
+
+            ttk.Label(row_frame, text=f"{name}:", font=("Segoe UI", 9, "bold")).grid(
+                row=0, column=0, columnspan=8, sticky="w", pady=(0, 4)
+            )
+            x_var = tk.StringVar(value=str(roi.get("x", 0.1)))
+            y_var = tk.StringVar(value=str(roi.get("y", 0.1)))
+            w_var = tk.StringVar(value=str(roi.get("w", 0.3)))
+            h_var = tk.StringVar(value=str(roi.get("h", 0.3)))
+            name_var = tk.StringVar(value=name)
+            self._comp_roi_vars.append({"x": x_var, "y": y_var, "w": w_var, "h": h_var, "name": name_var})
+
+            self._settings_roi_entry(row_frame, 1, 0, "x", x_var)
+            self._settings_roi_entry(row_frame, 1, 2, "y", y_var)
+            self._settings_roi_entry(row_frame, 1, 4, "w", w_var)
+            self._settings_roi_entry(row_frame, 1, 6, "h", h_var)
 
     def _close_settings(self) -> None:
         if self._settings_window and self._settings_window.winfo_exists():
@@ -1244,6 +1286,9 @@ class OperatorScreen(ctk.CTkFrame):
         self.camera_rotation_value.set(str(_rot if _rot is not None else "0"))
         sticker_config = detail.get("sticker") or {}
         self.state.cache["selected_template_detail"] = detail
+        # Update result panel mode (show/hide sections)
+        validator_mode = str(sticker_config.get("validator_mode", "") or "").strip().lower()
+        self.result_panel.set_mode(validator_mode)
         self._refresh_context_summary()
 
     def _sync_selected_template_detail(self) -> None:
@@ -1385,22 +1430,6 @@ class OperatorScreen(ctk.CTkFrame):
     def _update_status_badges(self, payload: dict | None = None) -> None:
         token = getattr(self.state, "token", None)
         latest_error = getattr(self.state, "latest_error", None)
-        server_tone = "success" if token and not latest_error else "danger" if latest_error else "info"
-        self._set_badge("SERVER", "ONLINE" if token and not latest_error else "ISSUE", server_tone)
-
-        camera_ready = self.capture.get_latest_frame() is not None
-        self._set_badge("CAMERA", "READY" if camera_ready else "STOPPED", "success" if camera_ready else "neutral")
-
-        session_running = self.state.active_session is not None
-        self._set_badge("SESSION", "RUNNING" if session_running else "IDLE", "info" if session_running else "neutral")
-
-        db_write = ((payload or {}).get("last_committed_result") or {}).get("db_write") or (payload or {}).get("db_write") or {}
-        if db_write.get("written"):
-            self._set_badge("DB", "WRITTEN", "success")
-        elif db_write.get("reason") in {"disabled", "not_committed"}:
-            self._set_badge("DB", "WAITING", "neutral")
-        else:
-            self._set_badge("DB", str(db_write.get("reason") or "ISSUE").upper(), "warning")
 
         event_state = str((payload or {}).get("event_state") or "idle").upper()
         event_tone = "success" if event_state == "DECISION_COMMITTED" else "info" if event_state not in {"IDLE", "COOLDOWN"} else "neutral"
@@ -1724,22 +1753,64 @@ class OperatorScreen(ctk.CTkFrame):
         self._update_status_badges()
 
     def _apply_roi(self) -> None:
-        try:
-            part_ready_roi = self._validated_roi_payload("part_ready")
-            sticker_roi = self._validated_roi_payload("sticker")
-        except ValueError as exc:
-            messagebox.showerror("ROI", str(exc))
-            return
-        if not self.state.active_session:
-            self.info_var.set("Dua ROI disimpan lokal. Akan diterapkan saat session aktif.")
-            self._refresh_context_summary()
-            return
-        self.api.update_rois(
-            self.state.active_session["session_id"],
-            part_ready_roi=part_ready_roi,
-            sticker_roi=sticker_roi,
-        )
-        self.info_var.set("Part-ready ROI dan sticker ROI updated.")
+        # Detect mode from active template detail
+        template_detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
+        validator_mode = str((template_detail or {}).get("sticker", {}).get("validator_mode", "") or "").strip().lower()
+        is_component_counter = validator_mode == "component_count"
+
+        if is_component_counter:
+            # Component counter mode: collect component ROI values
+            comp_rois = []
+            for cv in self._comp_roi_vars:
+                try:
+                    x = float(cv["x"].get().strip())
+                    y = float(cv["y"].get().strip())
+                    w = float(cv["w"].get().strip())
+                    h = float(cv["h"].get().strip())
+                    name = cv["name"].get().strip() or "ROI"
+                except (ValueError, TypeError) as exc:
+                    messagebox.showerror("ROI", f"Component ROI field harus numerik: {exc}")
+                    return
+                if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0):
+                    messagebox.showerror("ROI", "Component ROI values must be in 0-1 range (w,h > 0).")
+                    return
+                comp_rois.append({"name": name, "roi": {"x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4)}})
+            if not comp_rois:
+                messagebox.showerror("ROI", "No component ROIs to apply.")
+                return
+            # Update via template API — save component_rois to template detail
+            try:
+                tid = int((template_detail or {}).get("id") or 0)
+                if not tid:
+                    self.info_var.set("Component ROI disimpan lokal. Aktifkan template dulu.")
+                    return
+                # Get full template detail and patch component_rois
+                full = self.api.get_template_version(int(template_detail.get("version_id") or template_detail.get("current_version_id") or 0))
+                if full:
+                    full["component_rois"] = comp_rois
+                    self.api.update_template(tid, full)
+                self.info_var.set(f"Component ROI updated ({len(comp_rois)} ROIs).")
+            except Exception as exc:
+                messagebox.showerror("ROI", f"Gagal update component ROI: {exc}")
+                return
+        else:
+            # Sticker mode: original part_ready + sticker ROI
+            try:
+                part_ready_roi = self._validated_roi_payload("part_ready")
+                sticker_roi = self._validated_roi_payload("sticker")
+            except ValueError as exc:
+                messagebox.showerror("ROI", str(exc))
+                return
+            if not self.state.active_session:
+                self.info_var.set("Dua ROI disimpan lokal. Akan diterapkan saat session aktif.")
+                self._refresh_context_summary()
+                return
+            self.api.update_rois(
+                self.state.active_session["session_id"],
+                part_ready_roi=part_ready_roi,
+                sticker_roi=sticker_roi,
+            )
+            self.info_var.set("Part-ready ROI dan sticker ROI updated.")
 
     def _update_result_info(self, payload: dict) -> None:
         timings = payload.get("timings") or {}

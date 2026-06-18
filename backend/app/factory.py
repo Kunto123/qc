@@ -12,6 +12,7 @@ from backend.app.api.dashboard_routes import dashboard_blueprint
 from backend.app.api.deployment_routes import deployment_blueprint
 from backend.app.api.inspection_routes import inspection_blueprint
 from backend.app.api.template_routes import template_blueprint
+from backend.app.api.machine_settings_routes import machine_settings_blueprint
 from backend.app.api.workstation_routes import workstation_blueprint
 from backend.app.core.config import AppConfig, ensure_data_dirs
 from backend.app.core.logging_config import configure_logging
@@ -33,6 +34,7 @@ def create_app() -> Flask:
     app.register_blueprint(dashboard_blueprint)
     app.register_blueprint(calibration_blueprint)
     app.register_blueprint(workstation_blueprint)
+    app.register_blueprint(machine_settings_blueprint)
 
     @app.get("/health")
     def health():

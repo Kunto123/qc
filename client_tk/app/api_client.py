@@ -559,3 +559,28 @@ class ApiClient:
     def delete_workstation(self, machine_id: str) -> dict:
         safe_id = quote(machine_id, safe="")
         return self._delete(f"/workstations/{safe_id}")
+
+    # ------------------------------------------------------------------
+    # Machine / PLC Settings
+    # ------------------------------------------------------------------
+
+    def get_machine_settings(self) -> dict:
+        return self._get("/machine-settings")
+
+    def update_machine_settings(self, payload: dict) -> dict:
+        return self._put("/machine-settings", payload)
+
+    def seed_machine_settings(self, force: bool = True) -> dict:
+        return self._post(f"/machine-settings/seed?force={'1' if force else '0'}", {})
+
+    def get_plc_diagnostics(self) -> dict:
+        return self._get("/machine-settings/plc/diagnostics")
+
+    def test_plc_coil(self, address: int, duration_ms: int, confirm: bool = True) -> dict:
+        return self._post(
+            "/machine-settings/plc/test-coil",
+            {"address": address, "duration_ms": duration_ms, "confirm": "yes" if confirm else "no"},
+        )
+
+    def plc_all_off(self) -> dict:
+        return self._post("/machine-settings/plc/all-off", {})
