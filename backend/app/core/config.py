@@ -85,7 +85,7 @@ class AppConfig:
     # Non-hard reject reasons (NOT_FOUND, WRONG_TYPE, etc.) become pending/adjust
     # without PLC commit. Comma-separated list of RejectReasonCode values.
     inspect_hard_reject_reasons: str = os.getenv(
-        "QC_SUITE_INSPECT_HARD_REJECT_REASONS", "OUT_OF_ANGLE"
+        "QC_SUITE_INSPECT_HARD_REJECT_REASONS", "OUT_OF_ANGLE,WRONG_TYPE"
     ).strip()
     # Commit grace period (ms): minimum time after inference starts before any
     # commit (accept or hard reject) is allowed. This gives operator time to

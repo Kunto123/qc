@@ -24,6 +24,7 @@ from backend.app.repositories.templates_repository import TemplatesRepository
 from backend.app.repositories.training_repository import TrainingRepository
 from backend.app.repositories.users_repository import UsersRepository
 from backend.app.repositories.workstation_registry_repository import WorkstationRegistryRepository
+from backend.app.repositories.machine_settings_repository import MachineSettingsRepository
 from backend.app.services.model_export_service import ModelExportService
 from backend.app.services.inspection_session import InspectionSessionService
 from backend.app.services.sticker_inference import StickerInferenceService
@@ -112,6 +113,19 @@ inspection_session_service = InspectionSessionService(
 training_service = TrainingService(training_repo, models_repo, device_runtime, app_config=app_config)
 workstation_registry_repo = WorkstationRegistryRepository()
 augment_repo = AugmentRepository()
+machine_settings_repo = MachineSettingsRepository()
+
+# Seed machine settings from env on first boot (idempotent)
+machine_settings_repo.seed_from_env(app_config, force=False)
+_machine_settings = machine_settings_repo.load_settings()
+
+# Set PLC worker strategy from MachineSettings
+if plc_worker is not None:
+    plc_worker.set_validator_mode("sticker", _machine_settings)
+    logging.getLogger("backend.container").info(
+        "[container] PLC worker strategy: %s (from MachineSettings DB)",
+        plc_worker.status().get("strategy", "none"),
+    )
 
 from backend.app.workers.augment_worker import AugmentWorker  # noqa: E402
 

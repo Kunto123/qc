@@ -27,6 +27,7 @@ from client_tk.app.screens.admin.tabs.operators_tab import OperatorsTab
 from client_tk.app.screens.admin.tabs.models_tab import ModelsTab
 from client_tk.app.screens.admin.tabs.calibration_tab import CalibrationTab
 from client_tk.app.screens.admin.tabs.results_tab import ResultsTab
+from client_tk.app.screens.admin.tabs.machine_settings_tab import MachineSettingsTab
 from client_tk.app.theme import (
     ACCENT,
     ACCENT_HOVER,
@@ -275,7 +276,7 @@ class AdminScreen(ctk.CTkFrame):
     def _build_tabs(self) -> None:
         notebook = ctk.CTkTabview(self, fg_color=APP_BG, corner_radius=0)
         notebook.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
-        for tab_name in ("Templates", "Data", "Training", "Models", "Calibration", "Operators", "Monitor"):
+        for tab_name in ("Templates", "Data", "Training", "Models", "Calibration", "Operators", "Monitor", "Machine Settings"):
             notebook.add(tab_name)
 
         original_tab = notebook.tab
@@ -306,6 +307,7 @@ class AdminScreen(ctk.CTkFrame):
         self.calibration_tab = notebook.tab("Calibration")
         self.operators_tab = notebook.tab("Operators")
         self.monitor_tab = notebook.tab("Monitor")
+        self.plc_settings_tab = notebook.tab("Machine Settings")
 
         self._build_presets_tab()
         self._build_data_tab()
@@ -314,6 +316,7 @@ class AdminScreen(ctk.CTkFrame):
         self._build_calibration_tab()
         self._build_operators_tab()
         self._build_monitor_tab()
+        self._build_plc_settings_tab()
 
     def _build_status_bar(self) -> None:
         status_bar = ctk.CTkFrame(self, fg_color=APP_BG, corner_radius=0)
@@ -338,6 +341,9 @@ class AdminScreen(ctk.CTkFrame):
 
     def _build_monitor_tab(self) -> None:
         ResultsTab(self, self.monitor_tab)
+
+    def _build_plc_settings_tab(self) -> None:
+        MachineSettingsTab(self, self.plc_settings_tab)
     # ------------------------------------------------------------------
     # Refresh and render
     def refresh_all(self) -> None:

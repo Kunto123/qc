@@ -34,18 +34,9 @@ logger = logging.getLogger(__name__)
 
 
 KNOWN_REJECT_CODES = (
-    RejectReasonCode.NOT_FOUND.value,
-    RejectReasonCode.WRONG_TYPE.value,
-    RejectReasonCode.WRONG_TEXT.value,
-    RejectReasonCode.LOW_ROI_CONF.value,
-    RejectReasonCode.LOW_CLASS_CONF.value,
-    RejectReasonCode.LOW_OCR_CONF.value,
-    RejectReasonCode.OUT_OF_POSITION.value,
     RejectReasonCode.OUT_OF_ANGLE.value,
-    RejectReasonCode.ANCHOR_NOT_FOUND.value,
-    RejectReasonCode.ANCHOR_MISMATCH.value,
-    RejectReasonCode.PART_NOT_READY.value,
-    RejectReasonCode.ERROR.value,
+    RejectReasonCode.WRONG_TYPE.value,
+    RejectReasonCode.COMMIT_TIMEOUT.value,
 )
 MAX_RECENT_EVENTS = 8
 COMMIT_STABLE_FRAMES = 1
