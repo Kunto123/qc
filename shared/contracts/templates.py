@@ -10,7 +10,7 @@ class CameraDefaults:
     width: int | None = None
     height: int | None = None
     fps: float | None = None
-    rotation_degrees: float = 0.0  # Free rotation: 0, 90, 180, 270, or any angle
+    rotation_degrees: float = 0.0
 
 
 @dataclass(slots=True)
@@ -21,7 +21,6 @@ class RoiGeometry:
     h: float = 1.0
     rotation: float = 0.0
     width: int | None = None
-    height: int | None = None
 
 
 @dataclass(slots=True)
@@ -50,16 +49,14 @@ class VisionConfig:
 @dataclass(slots=True)
 class PartReadyConfig:
     enabled: bool = True
-    # Method: "gap_template_match" (new default) or "color_profile_match" (legacy)
     method: str = "gap_template_match"
-    # Gap detection via template matching
-    gap_match_threshold: float = 0.85  # min cv2.matchTemplate score for part_ready=True
-    gap_ref_path: str | None = None    # relative path to reference PNG on disk
-    gap_ref_type: str = "raw"          # "raw" = HSV lama, "edge_map" = Canny baru
+    gap_match_threshold: float = 0.85
+    gap_ref_path: str | None = None
+    logo_ref_path: str | None = None
+    gap_ref_type: str = "raw"
     gap_hsv_lower: list[int] = field(default_factory=lambda: [90, 50, 50])
-    gap_hsv_upper: list[int] = field(default_factory=lambda: [130, 255, 255])  # blue clamp HSV upper
-    gap_padding_px: int = 20  # px padding around clamp mask to extract gap patch
-    # Legacy color profile fields (kept for backward compatibility)
+    gap_hsv_upper: list[int] = field(default_factory=lambda: [130, 255, 255])
+    gap_padding_px: int = 20
     color_profile_id: int | None = None
     colorspace: str = "LAB"
     distance_threshold: float | None = None
@@ -68,6 +65,20 @@ class PartReadyConfig:
     hsv_upper: list[int] = field(default_factory=lambda: [180, 255, 80])
     stable_ms: int = 500
     release_ms: int = 300
+
+
+@dataclass(slots=True)
+class ComponentClassTarget:
+    class_name: str
+    count: int
+
+
+@dataclass(slots=True)
+class ComponentRoiRule:
+    name: str
+    roi: RoiGeometry
+    classes: list[ComponentClassTarget]
+    strict_foreign_class: bool = False
 
 
 @dataclass(slots=True)
@@ -98,27 +109,15 @@ class StickerRule:
     expected_dot_y: float | None = None
     max_anchor_offset_x: float | None = None
     max_anchor_offset_y: float | None = None
-    # Tilt gate toggle: when False (default) the OUT_OF_ANGLE decision is never
-    # raised — tilt telemetry is still calculated and forwarded as observability data.
-    # Set True to make max_tilt_degrees an active reject gate.
     tilt_gate_enabled: bool = False
-    # Edge/text-band analysis config for OUT_OF_ANGLE gate
-    edge_roi_tolerance_px: int = 10  # px tolerance for text-band edge sticking out of ROI
-    edge_search_padding_ratio: float = 0.10  # expand sticker ROI by this ratio for edge search
-    morph_kernel_width: int = 40  # horizontal kernel width for morphological closing
-    morph_kernel_height: int = 5  # horizontal kernel height for morphological closing
-    min_text_aspect_ratio: float = 3.0  # min aspect ratio to filter text bands vs logos
-    # Legacy field — kept for backward compatibility with older templates and API
-    # payloads only. Runtime commit timing is now controlled exclusively by
-    # part_ready_settle_ms and no longer depends on this field.
+    edge_roi_tolerance_px: int = 10
+    edge_search_padding_ratio: float = 0.10
+    morph_kernel_width: int = 40
+    morph_kernel_height: int = 5
+    min_text_aspect_ratio: float = 3.0
     commit_stable_frames: int = 1
-    # Primary runtime timing knob: controls both the inference hold (settle) and the
-    # commit window after the first stable post-ready result.
-    # None  = use system-wide default (QC_SUITE_PART_READY_SETTLE_MS env var).
-    # 0     = bypass debounce for this template regardless of env.
-    # > 0   = explicit ms value; overrides env default.
     part_ready_settle_ms: int | None = None
-    part_ready_settle_frames: int = 3   # frame berturut-turut di atas threshold sebelum clamp (profil Seimbang)
+    part_ready_settle_frames: int = 3
     white_hsv_lower: list[int] = field(default_factory=lambda: [0, 0, 160])
     white_hsv_upper: list[int] = field(default_factory=lambda: [180, 70, 255])
     min_text_contour_area_ratio: float = 0.002
@@ -144,11 +143,11 @@ class InspectionTemplate:
     part_ready: PartReadyConfig
     sticker: StickerRule
     persistence: PersistenceConfig
+    component_rois: list[ComponentRoiRule] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def roi(self) -> RoiGeometry:
-        # Transitional alias for code paths that still reference the legacy single ROI.
         return self.sticker_roi
 
     def to_dict(self) -> dict[str, Any]:
@@ -166,8 +165,20 @@ class InspectionTemplate:
             "part_ready": asdict(self.part_ready),
             "sticker": asdict(self.sticker),
             "persistence": asdict(self.persistence),
+            "component_rois": [
+                {
+                    "name": cr.name,
+                    "roi": asdict(cr.roi),
+                    "classes": [asdict(c) for c in cr.classes],
+                    "strict_foreign_class": cr.strict_foreign_class,
+                }
+                for cr in self.component_rois
+            ],
             "metadata": dict(self.metadata),
         }
+
+
+_ROI_ALLOWED = {"x", "y", "w", "h", "rotation", "width"}
 
 
 def _pick_roi_payload(payload: dict[str, Any], *keys: str) -> dict[str, Any]:
@@ -193,9 +204,49 @@ _VALID_STICKER_FIELDS = {
 }
 
 
+def _parse_component_rois(payload: dict[str, Any]) -> list[ComponentRoiRule]:
+    """Parse component_rois from template payload dict."""
+    raw_rois = payload.get("component_rois") or []
+    if not isinstance(raw_rois, list):
+        return []
+    result = []
+    for raw_roi in raw_rois:
+        if not isinstance(raw_roi, dict):
+            continue
+        roi_raw = raw_roi.get("roi") or {}
+        roi_geom = RoiGeometry(**{k: v for k, v in roi_raw.items() if k in _ROI_ALLOWED})
+        raw_classes = raw_roi.get("classes") or []
+        classes = []
+        for rc in raw_classes:
+            if not isinstance(rc, dict):
+                continue
+            cn = str(rc.get("class_name") or "").strip()
+            if not cn:
+                continue
+            try:
+                cnt = int(rc.get("count") or 0)
+            except (TypeError, ValueError):
+                cnt = 0
+            if cnt <= 0:
+                continue
+            classes.append(ComponentClassTarget(class_name=cn, count=cnt))
+        if not classes:
+            continue
+        result.append(ComponentRoiRule(
+            name=str(raw_roi.get("name") or "ROI").strip() or "ROI",
+            roi=roi_geom,
+            classes=classes,
+            strict_foreign_class=bool(raw_roi.get("strict_foreign_class", False)),
+        ))
+    return result
+
+
 def template_from_dict(payload: dict[str, Any]) -> InspectionTemplate:
     part_ready_roi_payload = _pick_roi_payload(payload, "part_ready_roi", "roi", "sticker_roi")
     sticker_roi_payload = _pick_roi_payload(payload, "sticker_roi", "roi", "part_ready_roi")
+    # Strip unknown keys that RoiGeometry doesn't accept (e.g. 'height' from old DB data)
+    part_ready_roi_payload = {k: v for k, v in part_ready_roi_payload.items() if k in _ROI_ALLOWED}
+    sticker_roi_payload = {k: v for k, v in sticker_roi_payload.items() if k in _ROI_ALLOWED}
     _sticker_raw = dict(payload.get("sticker") or {})
     _sticker_filtered = {k: v for k, v in _sticker_raw.items() if k in _VALID_STICKER_FIELDS}
     return InspectionTemplate(
@@ -212,5 +263,6 @@ def template_from_dict(payload: dict[str, Any]) -> InspectionTemplate:
         part_ready=PartReadyConfig(**(payload.get("part_ready") or {})),
         sticker=StickerRule(**_sticker_filtered),
         persistence=PersistenceConfig(**(payload.get("persistence") or {})),
+        component_rois=_parse_component_rois(payload),
         metadata=dict(payload.get("metadata") or {}),
     )

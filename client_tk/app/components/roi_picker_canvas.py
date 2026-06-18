@@ -16,6 +16,7 @@ from client_tk.app.theme import BORDER, PANEL_BG, TEXT_PRIMARY, TEXT_SECONDARY
 _COLOR_PART_READY = (50, 180, 255)   # BGR oranye
 _COLOR_STICKER = (0, 200, 255)       # BGR kuning
 _COLOR_CROSSHAIR = (255, 255, 255)   # BGR putih
+_COLOR_COMPONENT = (0, 255, 0)        # BGR hijau
 _ARM = 18
 _LABEL_FONT = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -114,6 +115,7 @@ class RoiPickerCanvas(ctk.CTkFrame):
         self._source_frame: np.ndarray | None = None
         self._part_ready_roi: dict = {}
         self._sticker_roi: dict = {}
+        self._show_sticker: bool = True  # False saat mode component_count
         self._active_roi_kind: str | None = None
         self._drag_mode: str | None = None
         self._drag_start: tuple[float, float] | None = None
@@ -182,9 +184,60 @@ class RoiPickerCanvas(ctk.CTkFrame):
             self._sticker_roi = self._normalize_roi(sticker_roi)
         self.redraw()
 
+    # ── Component ROI API ──
+
+    def set_component_rois(self, rois: list[dict]) -> None:
+        """Set component ROIs. Each dict: {name, x, y, w, h, rotation}."""
+        self._component_rois = []
+        for r in (rois or []):
+            nr = self._normalize_roi(r)
+            nr["name"] = r.get("name", "ROI")
+            self._component_rois.append(nr)
+        if self._active_roi_kind and self._active_roi_kind.startswith("component:"):
+            idx = int(self._active_roi_kind.split(":")[1])
+            if idx >= len(self._component_rois):
+                self._active_roi_kind = None
+        self.redraw()
+
+    def add_component_roi(self, name: str = "ROI") -> int:
+        """Add a default component ROI. Returns index."""
+        self._component_rois.append({"name": name, "x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3, "rotation": 0.0})
+        self.redraw()
+        return len(self._component_rois) - 1
+
+    def remove_component_roi(self, idx: int) -> None:
+        if 0 <= idx < len(self._component_rois):
+            self._component_rois.pop(idx)
+            self.redraw()
+
+    def get_component_rois(self) -> list[dict]:
+        return [dict(r) for r in self._component_rois]
+
+    def set_sticker_visible(self, visible: bool) -> None:
+        """Show/hide sticker ROI (used for component_count mode)."""
+        self._show_sticker = visible
+        self.redraw()
+
+    def _hit_test_component(self, x: int, y: int) -> int:
+        """Return component ROI index at (x, y), or -1."""
+        for i, roi in enumerate(reversed(self._component_rois)):
+            roi_idx = len(self._component_rois) - 1 - i
+            rx, ry = self._denormalize_point(roi, (x, y))
+            if 0 <= rx <= 1 and 0 <= ry <= 1:
+                return roi_idx
+        return -1
+
     def set_active_roi(self, kind: str | None) -> None:
-        if kind not in {"part_ready", "sticker", None}:
-            raise ValueError("kind must be 'part_ready', 'sticker', or None")
+        _valid = {"part_ready", "sticker", None}
+        if kind is not None and kind.startswith("component:"):
+            try:
+                idx = int(kind.split(":")[1])
+                if 0 <= idx < len(getattr(self, "_component_rois", [])):
+                    _valid.add(kind)
+            except (ValueError, IndexError):
+                pass
+        if kind not in _valid:
+            raise ValueError("kind must be 'part_ready', 'sticker', 'component:<idx>', or None")
         self._active_roi_kind = kind
         if kind is not None:
             rot = self._roi_for_kind(kind).get("rotation", 0.0)
@@ -279,7 +332,7 @@ class RoiPickerCanvas(ctk.CTkFrame):
                 else:
                     self._draw_handles(canvas_frame, rx, ry, rw, rh, _COLOR_PART_READY)
 
-        if self._sticker_roi:
+        if self._sticker_roi and self._show_sticker:
             rx, ry, rw, rh = _roi_px(self._sticker_roi)
             _rot = float(self._sticker_roi.get("rotation", 0))
             if abs(_rot) > 0.1:
@@ -300,6 +353,26 @@ class RoiPickerCanvas(ctk.CTkFrame):
             exp_px = rx + int(self._cx * rw)
             exp_py = ry + int(self._cy * rh)
             _draw_crosshair(canvas_frame, exp_px, exp_py, _COLOR_CROSSHAIR, "EXP CTR")
+
+        # Draw component ROIs
+        for ci, comp_roi in enumerate(getattr(self, '_component_rois', [])):
+            if not comp_roi:
+                continue
+            rx, ry, rw, rh = _roi_px(comp_roi)
+            _rot = float(comp_roi.get("rotation", 0))
+            _name = comp_roi.get("name", f"ROI {ci}")
+            _color = _COLOR_COMPONENT
+            if abs(_rot) > 0.1:
+                _draw_roi_box_rotated(canvas_frame, rx, ry, rw, rh, _rot, _color, _name)
+            else:
+                _draw_roi_box(canvas_frame, rx, ry, rw, rh, _color, _name)
+            if self._active_roi_kind == f"component:{ci}":
+                if abs(_rot) > 0.1:
+                    for px, py in _rotated_corners(rx, ry, rw, rh, _rot):
+                        cv2.rectangle(canvas_frame, (px-5, py-5), (px+5, py+5), _color, -1)
+                        cv2.rectangle(canvas_frame, (px-5, py-5), (px+5, py+5), (255, 255, 255), 1)
+                else:
+                    self._draw_handles(canvas_frame, rx, ry, rw, rh, _color)
 
         return canvas_frame
 

@@ -57,6 +57,11 @@ class ResultPanel(ctk.CTkFrame):
         self.anchor_offset_var = self._build_field(self.sticker_frame, 8, "Anchor Offset")
         self.pose_angle_var = self._build_field(self.sticker_frame, 9, "Pose Angle")
 
+        self.component_frame = self._build_section("Component Count")
+        self.comp_mode_var = self._build_field(self.component_frame, 0, "Mode")
+        self.comp_roi_summary_var = self._build_field(self.component_frame, 1, "ROI Summary")
+        self.comp_reject_reason_var = self._build_field(self.component_frame, 2, "Reject Reason")
+
         self.debug_frame = self._build_section("Inference Debug")
         self.raw_detection_count_var = self._build_field(self.debug_frame, 0, "Raw Detections")
         self.fallback_reason_var = self._build_field(self.debug_frame, 1, "Fallback Reason")
@@ -139,6 +144,36 @@ class ResultPanel(ctk.CTkFrame):
         self.live_state_var.configure(text=str(payload.get("event_state") or "-").upper())
         self.live_decision_var.configure(text=str(live_validation.get("decision") or "-"))
         self.live_reason_var.configure(text=str(live_reason))
+
+        # Component count display
+        live_details = live_validation.get("validation_details") or {}
+        self._validator_mode = str(live_details.get("mode") or "sticker").strip().lower()
+        # Component count display
+        if self._validator_mode == "component_count":
+            comp_details = display_details.get("component_rois") or []
+            self.comp_mode_var.configure(text="Component Count")
+            if comp_details:
+                roi_summaries = []
+                for roi in comp_details:
+                    roi_name = roi.get("name", "?")
+                    classes = roi.get("classes", {})
+                    all_ok = roi.get("ok", False)
+                    status = "OK" if all_ok else "FAIL"
+                    if isinstance(classes, dict):
+                        cls_info = ", ".join(f"{v.get('detected_voted', '?')}/{v.get('target', '?')} {cn}" for cn, v in classes.items())
+                    else:
+                        cls_info = ", ".join(f"{c.get('detected_voted', '?')}/{c.get('target', '?')} {c.get('class_name', '?')}" for c in classes)
+                    roi_summaries.append(f"{status} {roi_name}: {cls_info}")
+                self.comp_roi_summary_var.configure(text=" | ".join(roi_summaries))
+            else:
+                self.comp_roi_summary_var.configure(text="No ROIs")
+            comp_reject = display_validation.get("reject_reason_code") or "-"
+            self.comp_reject_reason_var.configure(text=str(comp_reject))
+        else:
+            self.comp_mode_var.configure(text="QC Sticker")
+            self.comp_roi_summary_var.configure(text="-")
+            self.comp_reject_reason_var.configure(text="-")
+
         self.live_template_version_var.configure(text=str(live_session.get("template_version_id") or "-"))
         # Inference gate display
         _gate = live_inference_gate
@@ -215,6 +250,11 @@ class ResultPanel(ctk.CTkFrame):
                 f"x={_format_metric(anchor_offset.get('x'), precision=2)}, "
                 f"y={_format_metric(anchor_offset.get('y'), precision=2)}"
             )
+        ocr_payload = display_details.get("ocr") or {}
+        ocr_text = display_validation.get("ocr_text") or ocr_payload.get("canonical_text") or ocr_payload.get("text")
+        ocr_confidence = display_validation.get("ocr_confidence")
+        if ocr_confidence is None:
+            ocr_confidence = ocr_payload.get("confidence")
         ocr_payload = display_details.get("ocr") or {}
         ocr_text = display_validation.get("ocr_text") or ocr_payload.get("canonical_text") or ocr_payload.get("text")
         ocr_confidence = display_validation.get("ocr_confidence")
@@ -313,5 +353,8 @@ class ResultPanel(ctk.CTkFrame):
             self.db_var,
             self.event_var,
             self.commit_var,
+            self.comp_mode_var,
+            self.comp_roi_summary_var,
+            self.comp_reject_reason_var,
         ):
             widget.configure(text="-")

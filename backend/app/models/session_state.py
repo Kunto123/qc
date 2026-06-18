@@ -77,6 +77,10 @@ class SessionState:
     # Hysteresis counter: number of consecutive settled frames.
     # Reset to 0 when part_ready/presence is lost.
     settle_frame_count: int = 0
+    # Timestamp when part first became settled (consecutive_part_ready_frames >= threshold).
+    # Used for reject timeout: if no accept-commit within reject_timeout_ms, reject as COMMIT_TIMEOUT.
+    # Reset to None when PLC returns to IDLE or when part leaves.
+    part_ready_settled_at: datetime | None = None
     # Inference cooldown: timestamp (ms) of last inference run.
     # Prevents inference from running more than once per second.
     consecutive_part_ready_frames: int = 0
@@ -117,3 +121,7 @@ class SessionState:
     awaiting_part_removal_after_commit: bool = False
     policy_holdover_expires_at: datetime | None = None
     part_absent_started_at: datetime | None = None
+    # ── Component Count Mode ──
+    component_count_history: list = field(default_factory=list)
+    # ── Logo Anti-Reclamp ──
+    expected_logo_edge: object = None  # np.ndarray | None

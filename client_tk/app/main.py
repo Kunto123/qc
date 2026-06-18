@@ -15,7 +15,9 @@ LOGO_PATH = ASSETS_DIR / "aski_logo.svg"
 _logo_image_ref = None
 
 
-def _get_logo_image(width: int = 120):
+LOGO_HEADER_WIDTH = 140  # Lebar logo di header shell, proporsional dengan tombol Start
+
+def _get_logo_image(width: int = LOGO_HEADER_WIDTH):
     """Load and cache logo image (PNG preferred, SVG fallback via cairosvg)."""
     global _logo_image_ref
     try:
@@ -205,7 +207,7 @@ class QcSuiteDesktopApp(ctk.CTk):
         header = ctk.CTkFrame(self.shell, fg_color=SHELL_BG, corner_radius=0, border_width=0)
         header.pack(fill="x")
         # Logo in header
-        header_logo = _get_logo_image(width=28)
+        header_logo = _get_logo_image(width=LOGO_HEADER_WIDTH)
         if header_logo is not None:
             ctk.CTkLabel(header, image=header_logo, text="").pack(side="left", padx=(16, 8), pady=10)
         self.user_label = ctk.CTkLabel(header, text="Not authenticated", text_color=TEXT_SECONDARY)

@@ -121,10 +121,9 @@ class OperatorScreen(ctk.CTkFrame):
         self.info_var = tk.StringVar(value="Idle. Pilih template atau deployment, lalu start camera.")
 
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(3, weight=1)
+        self.rowconfigure(2, weight=1)
 
         self._build_top_bar()
-        self._build_context_bar()
         self._build_status_strip()
         self._build_content()
         self._load_template_choices()
@@ -160,27 +159,21 @@ class OperatorScreen(ctk.CTkFrame):
 
         self._layout_top_bar(compact=False)
 
-    def _build_context_bar(self) -> None:
-        self.context_bar = ctk.CTkFrame(self, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
-        self.context_bar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        self.context_labels = {
-            "operator": ctk.CTkLabel(self.context_bar, textvariable=self.operator_context, font=("Segoe UI", 13, "bold"), text_color=TEXT_PRIMARY),
-            "template": ctk.CTkLabel(self.context_bar, textvariable=self.template_context, font=("Segoe UI", 11), text_color=TEXT_SECONDARY),
-        }
-        self._layout_context_bar(compact=False)
-
     def _build_status_strip(self) -> None:
         self.status_frame = ctk.CTkFrame(self, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
-        self.status_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        ctk.CTkLabel(self.status_frame, text="System Status", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).pack(
-            anchor="w",
-            padx=10,
-            pady=(10, 6),
-        )
+        self.status_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        # Header row with title + operator/template info
+        header_frame = ctk.CTkFrame(self.status_frame, fg_color="transparent")
+        header_frame.pack(fill="x", padx=10, pady=(10, 4))
+        ctk.CTkLabel(header_frame, text="System Status", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).pack(side="left")
+        ctk.CTkLabel(header_frame, textvariable=self.operator_context, font=("Segoe UI", 10, "bold"), text_color=TEXT_SECONDARY).pack(side="right")
+        ctk.CTkLabel(header_frame, textvariable=self.template_context, font=("Segoe UI", 10), text_color=TEXT_SECONDARY).pack(side="right", padx=(0, 12))
+
         self.status_badges_container = ctk.CTkFrame(self.status_frame, fg_color="transparent")
         self.status_badges_container.pack(fill="x", padx=10, pady=(0, 10))
         self.badges: dict[str, ctk.CTkLabel] = {}
-        for key in ("SERVER", "CAMERA", "SESSION", "DB", "EVENT", "PLC"):
+        for key in ("EVENT", "PLC"):
             label = ctk.CTkLabel(
                 self.status_badges_container,
                 text=f"{key}: -",
@@ -196,7 +189,7 @@ class OperatorScreen(ctk.CTkFrame):
 
     def _build_content(self) -> None:
         self.content_scroller = ScrollableFrame(self)
-        self.content_scroller.grid(row=3, column=0, sticky="nsew")
+        self.content_scroller.grid(row=2, column=0, sticky="nsew")
         self.content = self.content_scroller.body
         self.content.columnconfigure(0, weight=1)
         self.content.rowconfigure(0, weight=1)
@@ -340,7 +333,6 @@ class OperatorScreen(ctk.CTkFrame):
             width = max(self.winfo_width(), self.winfo_toplevel().winfo_width())
             compact = width < RESPONSIVE_BREAKPOINT
             self._layout_top_bar(compact=compact)
-            self._layout_context_bar(compact=compact)
             self._layout_status_strip(compact=compact)
         except tk.TclError:
             return
@@ -417,29 +409,13 @@ class OperatorScreen(ctk.CTkFrame):
             for index, button in enumerate(self.action_buttons):
                 button.grid(row=0, column=index, sticky="w", padx=(0 if index == 0 else 6, 0))
 
-    def _layout_context_bar(self, *, compact: bool) -> None:
-        for widget in self.context_bar.grid_slaves():
-            widget.grid_forget()
-
-        if compact:
-            self.context_bar.columnconfigure(0, weight=1)
-            self.context_bar.columnconfigure(1, weight=1)
-            self.context_labels["operator"].grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
-            self.context_labels["template"].grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
-            self.context_labels["template"].grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        else:
-            for index in range(4):
-                self.context_bar.columnconfigure(index, weight=1)
-            self.context_labels["operator"].grid(row=0, column=0, sticky="w", padx=(0, 8))
-            self.context_labels["template"].grid(row=0, column=1, columnspan=3, sticky="w")
-
     def _layout_status_strip(self, *, compact: bool) -> None:
         for widget in self.status_badges_container.grid_slaves():
             widget.grid_forget()
 
-        keys = ["SERVER", "CAMERA", "SESSION", "DB", "EVENT", "PLC"]
-        columns = 3 if compact else 6
-        rows = 2 if compact else 1
+        keys = ["EVENT", "PLC"]
+        columns = 2 if compact else 2
+        rows = 1
         for column in range(columns):
             self.status_badges_container.columnconfigure(column, weight=1)
         for row in range(rows):
@@ -1385,22 +1361,6 @@ class OperatorScreen(ctk.CTkFrame):
     def _update_status_badges(self, payload: dict | None = None) -> None:
         token = getattr(self.state, "token", None)
         latest_error = getattr(self.state, "latest_error", None)
-        server_tone = "success" if token and not latest_error else "danger" if latest_error else "info"
-        self._set_badge("SERVER", "ONLINE" if token and not latest_error else "ISSUE", server_tone)
-
-        camera_ready = self.capture.get_latest_frame() is not None
-        self._set_badge("CAMERA", "READY" if camera_ready else "STOPPED", "success" if camera_ready else "neutral")
-
-        session_running = self.state.active_session is not None
-        self._set_badge("SESSION", "RUNNING" if session_running else "IDLE", "info" if session_running else "neutral")
-
-        db_write = ((payload or {}).get("last_committed_result") or {}).get("db_write") or (payload or {}).get("db_write") or {}
-        if db_write.get("written"):
-            self._set_badge("DB", "WRITTEN", "success")
-        elif db_write.get("reason") in {"disabled", "not_committed"}:
-            self._set_badge("DB", "WAITING", "neutral")
-        else:
-            self._set_badge("DB", str(db_write.get("reason") or "ISSUE").upper(), "warning")
 
         event_state = str((payload or {}).get("event_state") or "idle").upper()
         event_tone = "success" if event_state == "DECISION_COMMITTED" else "info" if event_state not in {"IDLE", "COOLDOWN"} else "neutral"

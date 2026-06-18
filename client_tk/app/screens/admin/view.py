@@ -166,7 +166,10 @@ class AdminScreen(ctk.CTkFrame):
 
         self.status_var = tk.StringVar(value="Admin ready.")
         self.refresh_time_var = tk.StringVar(value="")
-
+        self.validator_mode_var = tk.StringVar(value="sticker")  # "sticker" or "component_count"
+        self.preset_validator_mode_var = tk.StringVar(value="sticker")
+        self.preset_component_rois: list = []
+        self.preset_model_classes_var = tk.StringVar()
         self.preset_name_var = tk.StringVar()
         self.preset_description_var = tk.StringVar()
         self.preset_model_choice_var = tk.StringVar()

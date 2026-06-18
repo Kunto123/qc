@@ -213,7 +213,11 @@ class InspectionSessionService:
             r.strip().upper()
             for r in app_config.inspect_hard_reject_reasons.split(",")
             if r.strip()
-        ) if app_config is not None and app_config.inspect_hard_reject_reasons else {"OUT_OF_ANGLE"}
+        ) if app_config is not None and app_config.inspect_hard_reject_reasons else {"OUT_OF_ANGLE", "WRONG_TYPE"}
+        self._reject_timeout_ms: int = (
+            max(0, int(app_config.reject_timeout_ms))
+            if app_config is not None else 15000
+        )
         self._commit_grace_ms: int = (
             max(0, int(app_config.commit_grace_ms))
             if app_config is not None else 1500
@@ -281,8 +285,10 @@ class InspectionSessionService:
                     state.plc_clamp_ready_at = 0.0
                     state.plc_clamp_timeout = False
                     state.plc_clamp_event_id = None
+                    state.expected_logo_edge = None  # reset logo for new cycle
                     state.operator_sticker_delay_started_at = 0.0
                     state.operator_sticker_ready_at = 0.0
+                    state.part_ready_settled_at = None  # reset timeout tracker for new cycle
                     # Reset accept-cycle counters — mencegah commit instan dari akumulasi selama hold
                     state.accept_cycle_started_at = None
                     state.policy_stable_frames = 0
@@ -633,8 +639,22 @@ class InspectionSessionService:
             state.template.part_ready_roi,
             state.part_ready_roi_override,
         )
-        # Skip part_ready evaluation when latch is active — part is confirmed present
-        # during inference phase. Still run presence detection for latch release.
+        # ── Logo anti-reclamp check ──
+        _logo_skip_reclamp = False
+        _expected_logo = getattr(state, "expected_logo_edge", None)
+        if _expected_logo is not None and not state.part_ready_latched:
+            from backend.app.services.gap_detector import match_gap
+            _fh, _fw = part_ready_frame.shape[:2]
+            _logo_result = match_gap(
+                part_ready_frame,
+                {"x": 0, "y": 0, "w": _fw, "h": _fh},
+                _expected_logo,
+                threshold=0.6,
+            )
+            if _logo_result.get("match"):
+                _logo_skip_reclamp = True
+                logger.info("[logo] match score=%.3f — skip reclamp", _logo_result.get("score", 0))
+        # Skip part_ready evaluation when latch is active
         if state.part_ready_latched:
             part_ready = {"part_ready": True, "status": "latched", "match_ratio": 1.0}
         else:
@@ -737,6 +757,10 @@ class InspectionSessionService:
             settle_remaining_ms = 0.0
             self._reset_clamp_gate(state)
 
+        # ── Timeout tracker: record when part first becomes settled ──
+        if part_ready_settled and state.part_ready_settled_at is None:
+            state.part_ready_settled_at = _settle_now
+
         # ------------------------------------------------------------------
         # Part-Ready Latch Logic
         # Latch protects inference gate from brief part_ready drops during
@@ -766,6 +790,25 @@ class InspectionSessionService:
             # Presence back — reset unsettled timer
             state.part_ready_unsettled_at = None
 
+        # Logo skip: if logo match and part settled, skip reclamp
+        if _logo_skip_reclamp and part_ready_settled:
+            logger.info("[logo] skipping cycle — logo match")
+            _elapsed = _elapsed_ms(total_started)
+            return {
+                "session": self._session_payload(state),
+                "presence": presence,
+                "part_ready": {**part_ready, "status": "logo_skip", "part_ready": False},
+                "event_state": InspectionEventState.IDLE.value,
+                "operator_state": state.operator_state,
+                "clamp": {"enabled": True, "status": "idle", "ready": False},
+                "phase": {"status": "idle", "ready": False},
+                "count_committed": False,
+                "count_source": None,
+                "counters": self._counter_payload(state),
+                "last_committed_result": state.last_committed_result,
+                "recent_events": list(state.recent_events),
+                "timings": {**timings, "total_ms": _elapsed},
+            }
         # Trigger PLC clamp hold on the first frame where part is settled.
         # But check release/next-part cooldown before re-clamping.
         _cooldown_until = float(getattr(state, "manual_release_cooldown_until", 0.0))
@@ -1044,7 +1087,6 @@ class InspectionSessionService:
             username=username,
             user_id=user_id,
         )
-        validation = self._attach_ocr_observability(validation, sticker_detection, state)
         timings["validation_ms"] = _elapsed_ms(validation_started)
         validation_details = validation.get("validation_details") or {}
         if validation_details:
@@ -1216,9 +1258,25 @@ class InspectionSessionService:
                 _pending_reason = f"hard_reject_stabilizing({', '.join(_parts)})"
 
         else:
-            # Non-hard reject (NOT_FOUND, WRONG_TYPE, etc.) — never auto-commit
+            # Non-hard reject (NOT_FOUND, gap, etc.) — never auto-commit
             _policy_action = "pending"
             _pending_reason = f"non_hard_reject:{_reason}"
+
+        # ── Timeout reject ──
+        # Jika part sudah settled tapi tidak ada accept-commit dalam waktu reject_timeout_ms
+        if (
+            not _commit_allowed
+            and not _is_hard_reject
+            and state.part_ready_settled_at is not None
+            and self._reject_timeout_ms > 0
+        ):
+            _settled_elapsed_ms = (datetime.now(UTC) - state.part_ready_settled_at).total_seconds() * 1000.0
+            if _settled_elapsed_ms >= self._reject_timeout_ms:
+                _is_hard_reject = True
+                _reason = RejectReasonCode.COMMIT_TIMEOUT.value
+                _decision = DecisionCode.REJECT.value
+                _commit_allowed = True  # Allow commit untuk reject timeout
+                _policy_action = "timeout_reject"
 
         # Build inspection_policy response
         inspection_policy = {
@@ -1390,6 +1448,16 @@ class InspectionSessionService:
             payload["operator_state"] = "RESULT"
             self._operator_state_machine.mark_result(state, payload)
             payload["operator_state"] = state.operator_state
+            # Update expected logo from current frame after ACCEPT
+            if part_ready_frame is not None and part_ready_frame.size > 0:
+                from backend.app.services.gap_detector import _auto_canny
+                try:
+                    _gray = cv2.cvtColor(part_ready_frame, cv2.COLOR_BGR2GRAY)
+                    _edge = _auto_canny(_gray)
+                    state.expected_logo_edge = _edge
+                    logger.info("[logo] updated expected logo after ACCEPT")
+                except Exception as exc:
+                    logger.warning("[logo] failed to update expected logo: %s", exc)
         state.latest_result = to_jsonable(payload)
         return payload
 
@@ -1426,7 +1494,7 @@ class InspectionSessionService:
             "w": base.w,
             "h": base.h,
             "width": base.width,
-            "height": base.height,
+            "height": None,
         }
         payload.update(override)
         return payload
@@ -1778,52 +1846,14 @@ class InspectionSessionService:
     @staticmethod
     def _ocr_validation_fields(detection_payload: dict[str, Any]) -> dict[str, Any]:
         anchor = detection_payload.get("anchor") or {}
-        ocr = detection_payload.get("ocr") or {}
         geometry = detection_payload.get("geometry") or {}
         return {
-            "ocr_text": ocr.get("canonical_text") or ocr.get("text") or None,
-            "ocr_confidence": ocr.get("confidence"),
-            "ocr_engine": ocr.get("engine"),
-            "ocr_status": ocr.get("status"),
             "text_bbox": anchor.get("text_bbox"),
             "dot_bbox": anchor.get("dot_bbox"),
             "dot_position": geometry.get("dot_position") or anchor.get("dot_position"),
             "anchor_offset": geometry.get("anchor_offset"),
             "pose_angle": geometry.get("pose_angle"),
         }
-
-    def _attach_ocr_observability(
-        self,
-        validation: dict[str, Any],
-        detection_payload: dict[str, Any],
-        state: SessionState,
-    ) -> dict[str, Any]:
-        result = dict(validation)
-        for key, value in self._ocr_validation_fields(detection_payload).items():
-            if result.get(key) is None:
-                result[key] = value
-        details = result.get("validation_details")
-        if isinstance(details, dict):
-            ocr_mode = self._resolve_ocr_mode(state)
-            ocr_payload = dict(detection_payload.get("ocr") or {})
-            anchor_payload = dict(detection_payload.get("anchor") or {})
-            geometry_payload = dict(detection_payload.get("geometry") or {})
-            details.setdefault("ocr_mode", ocr_mode)
-            details.setdefault("ocr", ocr_payload)
-            details.setdefault("anchor", anchor_payload)
-            details.setdefault("geometry", geometry_payload)
-            if ocr_mode == "shadow":
-                details["ocr_shadow"] = {
-                    "anchor_status": anchor_payload.get("status"),
-                    "ocr_status": ocr_payload.get("status"),
-                    "geometry_status": geometry_payload.get("status"),
-                    "ocr_text": ocr_payload.get("canonical_text") or ocr_payload.get("text"),
-                    "ocr_confidence": ocr_payload.get("confidence"),
-                    "match_expected": bool(ocr_payload.get("match_expected")),
-                    "anchor_offset": geometry_payload.get("anchor_offset"),
-                    "pose_angle": geometry_payload.get("pose_angle"),
-                }
-        return result
 
     def _validate_ocr_anchor(
         self,
@@ -2219,6 +2249,18 @@ class InspectionSessionService:
     ) -> dict[str, Any]:
         sticker = state.template.sticker
         validator_mode = str(getattr(sticker, "validator_mode", "ml_detection") or "ml_detection").strip().lower()
+
+        # Dispatch to component_count validator if mode is active
+        if validator_mode == "component_count" and state.template.component_rois:
+            return self._validate_component_count(
+                state=state,
+                detections=detections,
+                detection_payload=detection_payload,
+                part_ready_payload=part_ready_payload,
+                username=username,
+                user_id=user_id,
+            )
+
         position_gate_enabled = validator_mode not in ROI_CLASS_VALIDATOR_MODES
         line_id = state.line_id
         expected_tilt_degrees = float(getattr(sticker, "expected_tilt_degrees", 0.0) or 0.0)
@@ -2726,18 +2768,6 @@ class InspectionSessionService:
             1,
             cv2.LINE_AA,
         )
-        ocr_text = validation.get("ocr_text") or "-"
-        ocr_conf = validation.get("ocr_confidence")
-        cv2.putText(
-            overlay,
-            f"ocr={ocr_text} conf={ocr_conf if ocr_conf is not None else '-'}",
-            (12, 92),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
         anchor_offset = validation.get("anchor_offset") or {}
         if anchor_offset:
             cv2.putText(
@@ -2870,10 +2900,6 @@ class InspectionSessionService:
                 "sticker_confidence": validation.get("sticker_confidence"),
                 "sticker_bbox": validation.get("sticker_bbox"),
                 "sticker_backend": validation.get("sticker_backend"),
-                "ocr_text": validation.get("ocr_text"),
-                "ocr_confidence": validation.get("ocr_confidence"),
-                "ocr_engine": validation.get("ocr_engine"),
-                "ocr_status": validation.get("ocr_status"),
                 "text_bbox": validation.get("text_bbox"),
                 "dot_bbox": validation.get("dot_bbox"),
                 "dot_position": validation.get("dot_position"),
@@ -2888,3 +2914,266 @@ class InspectionSessionService:
         state.last_persisted_at = datetime.now(UTC)
         state.last_persisted_key = persist_key
         return {"written": True, "result_id": record["id"]}
+
+
+    # ---------------------------------------------------------------------------
+    # Component Count Mode — helpers
+    # ---------------------------------------------------------------------------
+
+    def _build_roi_montage(
+        self,
+        crops,
+        *,
+        padding: int = 4,
+        target_size: int = 640,
+    ):
+        """Arrange ROI crops into a single grid image for batch inference."""
+        import math
+        if not crops:
+            blank = np.zeros((target_size, target_size, 3), dtype=np.uint8)
+            return blank, []
+        n = len(crops)
+        cols = max(1, math.ceil(math.sqrt(n)))
+        rows = max(1, math.ceil(n / cols))
+        max_h = max(c.shape[0] for c in crops)
+        max_w = max(c.shape[1] for c in crops)
+        tile_h = min(max_h + padding * 2, target_size)
+        tile_w = min(max_w + padding * 2, target_size)
+        montage_h = rows * tile_h + padding * (rows + 1)
+        montage_w = cols * tile_w + padding * (cols + 1)
+        montage = np.zeros((montage_h, montage_w, 3), dtype=np.uint8)
+        tile_map = []
+        for idx, crop_info in enumerate(crops):
+            if isinstance(crop_info, tuple):
+                crop, roi_x0, roi_y0 = crop_info
+            else:
+                crop = crop_info
+                roi_x0, roi_y0 = 0, 0
+            row = idx // cols
+            col = idx % cols
+            y_off = padding + row * (tile_h + padding)
+            x_off = padding + col * (tile_w + padding)
+            ch, cw = crop.shape[:2]
+            dy = (tile_h - ch) // 2
+            dx = (tile_w - cw) // 2
+            montage[y_off + dy:y_off + dy + ch, x_off + dx:x_off + dx + cw] = crop
+            tile_map.append({
+                "row": row, "col": col,
+                "y_off": y_off + dy, "x_off": x_off + dx,
+                "h": ch, "w": cw,
+                "roi_x0": roi_x0, "roi_y0": roi_y0,
+            })
+        return montage, tile_map
+
+    def _remap_montage_detections(self, detections, tile_map):
+        """Map detection coords from montage space back to full-frame space."""
+        results = []
+        for det in detections:
+            bbox = det.get("bbox") or det.get("position") or {}
+            if not bbox:
+                continue
+            cx = float(bbox.get("x", 0)) + float(bbox.get("w", 0)) / 2.0
+            cy = float(bbox.get("y", 0)) + float(bbox.get("h", 0)) / 2.0
+            assigned_tile = -1
+            for i, tile in enumerate(tile_map):
+                tx1, ty1 = tile["x_off"], tile["y_off"]
+                tx2, ty2 = tx1 + tile["w"], ty1 + tile["h"]
+                if tx1 <= cx <= tx2 and ty1 <= cy <= ty2:
+                    assigned_tile = i
+                    break
+            if assigned_tile < 0:
+                continue
+            tile = tile_map[assigned_tile]
+            remap_det = dict(det)
+            new_bbox = dict(bbox)
+            det_x = float(bbox.get("x", 0))
+            det_y = float(bbox.get("y", 0))
+            new_bbox["x"] = det_x - float(tile["x_off"]) + float(tile.get("roi_x0", 0))
+            new_bbox["y"] = det_y - float(tile["y_off"]) + float(tile.get("roi_y0", 0))
+            remap_det["bbox"] = new_bbox
+            remap_det["tile_index"] = assigned_tile
+            results.append(remap_det)
+        return results
+
+    def _validate_component_count(
+        self,
+        *,
+        state: SessionState,
+        detections: list[dict[str, Any]],
+        detection_payload: dict[str, Any],
+        part_ready_payload: dict[str, Any],
+        username: str | None = None,
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Validate component count mode.
+
+        Rules per ROI:
+        1. voted_count(class) == target for all registered classes
+        2. total detections in ROI == sum(targets)
+        3. (if strict_foreign_class) no foreign class detections
+        """
+        from collections import Counter
+        import time as _time
+
+        component_rois = state.template.component_rois
+        if not component_rois:
+            return {
+                "decision": "REJECT",
+                "reject_reason_code": "NO_COMPONENT_ROIS",
+                "validation_details": {"mode": "component_count", "error": "No component ROIs defined"},
+            }
+
+        # Count detections per (ROI_index, class)
+        roi_counts: list[Counter] = [Counter() for _ in component_rois]
+        for det in detections:
+            label = str(det.get("label") or det.get("class_name") or "").strip().lower()
+            tile_idx = det.get("tile_index", -1)
+            if 0 <= tile_idx < len(component_rois):
+                roi_counts[tile_idx][label] += 1
+
+        # Append to history
+        frame_counts = []
+        for roi_idx, roi_rule in enumerate(component_rois):
+            frame_counts.append(dict(roi_counts[roi_idx]))
+        state.component_count_history.append(frame_counts)
+
+        # Keep only last K frames
+        K = max(1, int(self._accept_stable_frames))
+        if len(state.component_count_history) > K:
+            state.component_count_history = state.component_count_history[-K:]
+
+        # Vote: take mode (most frequent count) per (ROI, class)
+        voted_counts: list[dict] = [{} for _ in component_rois]
+        stable_class_names: list[set] = [set() for _ in component_rois]
+        class_count_lists: list[dict] = [{} for _ in component_rois]
+        for frame_counts in state.component_count_history:
+            for roi_idx, roi_count in enumerate(frame_counts):
+                for cls_name, cnt in roi_count.items():
+                    stable_class_names[roi_idx].add(cls_name)
+                    if cls_name not in class_count_lists[roi_idx]:
+                        class_count_lists[roi_idx][cls_name] = []
+                    class_count_lists[roi_idx][cls_name].append(cnt)
+        for roi_idx in range(len(component_rois)):
+            for cls_name, counts in class_count_lists[roi_idx].items():
+                mode_count = max(set(counts), key=counts.count)
+                voted_counts[roi_idx][cls_name] = mode_count
+
+        # Evaluate each ROI
+        all_ok = True
+        reject_reason = None
+        roi_results = []
+
+        for roi_idx, roi_rule in enumerate(component_rois):
+            roi_ok = True
+            class_results = {}
+            target_sum = 0
+            registered_classes = set()
+
+            for ct in roi_rule.classes:
+                cn = ct.class_name.strip().lower()
+                target = ct.count
+                target_sum += target
+                registered_classes.add(cn)
+                detected = voted_counts[roi_idx].get(cn, 0)
+                ok = detected == target
+                class_results[cn] = {
+                    "detected_voted": detected,
+                    "target": target,
+                    "ok": ok,
+                }
+                if not ok:
+                    roi_ok = False
+
+            total_detected = sum(voted_counts[roi_idx].values())
+            total_ok = total_detected == target_sum
+
+            foreign_classes = []
+            if roi_rule.strict_foreign_class:
+                for cls_name in stable_class_names[roi_idx]:
+                    if cls_name not in registered_classes:
+                        foreign_classes.append(cls_name)
+                        roi_ok = False
+
+            if not total_ok:
+                roi_ok = False
+
+            if not all_ok or not roi_ok:
+                all_ok = False
+                if not reject_reason:
+                    if not total_ok:
+                        reject_reason = "UNEXPECTED_COMPONENT"
+                    else:
+                        reject_reason = "COMPONENT_COUNT_MISMATCH"
+
+            roi_results.append({
+                "name": roi_rule.name,
+                "ok": roi_ok,
+                "classes": class_results,
+                "total_detected": total_detected,
+                "total_target": target_sum,
+                "foreign_classes": foreign_classes,
+            })
+
+        decision = "ACCEPT" if all_ok else "REJECT"
+        result = {
+            "decision": decision,
+            "reject_reason_code": reject_reason if not all_ok else None,
+            "validation_details": {
+                "component_rois": roi_results,
+                "mode": "component_count",
+            },
+        }
+
+        # Update counters
+        if all_ok:
+            _now = _time.time()
+            if state.accept_cycle_started_at is None:
+                state.accept_cycle_started_at = datetime.now(UTC)
+            if state.policy_stable_started_at is None:
+                state.policy_stable_started_at = datetime.now(UTC)
+            state.policy_stable_frames += 1
+            if state.inference_accept_first_ts == 0.0:
+                state.inference_accept_first_ts = _now
+            state.inference_accept_count += 1
+        else:
+            state.policy_stable_frames = 0
+            state.policy_stable_started_at = None
+            state.accept_cycle_started_at = None
+            state.inference_accept_count = 0
+            state.inference_accept_first_ts = 0.0
+            state.inference_last_counted_generation = -1
+            state.component_count_history.clear()
+
+        return result
+
+    def _run_component_inference_sync(self, montage_frame, state, tile_map):
+        """Run inference on montage and remap detections to full-frame coords."""
+        try:
+            raw = self._sticker_inference.predict(
+                montage_frame,
+                state.template.vision,
+                expected_class=None,
+                sticker_rule=None,
+            )
+            remapped = self._remap_montage_detections(
+                raw.get("detections") or [], tile_map
+            )
+            raw["detections"] = remapped
+            return raw
+        except Exception as exc:
+            logger.warning("[inference-thread] component error: %s", exc)
+            return {"detections": [], "timings": {}}
+
+    def _on_component_inference_done(self, future, state):
+        """Callback when component inference completes."""
+        try:
+            result = future.result()
+            state.inference_result_cache = result
+            state.inference_result_ts = monotonic()
+            state.inference_result_generation += 1
+        except Exception as exc:
+            logger.warning("[inference] component callback error: %s", exc)
+            state.inference_result_cache = {"detections": [], "timings": {}}
+        finally:
+            state.inference_thread_busy = False
+            state.inference_submit_at = 0.0
