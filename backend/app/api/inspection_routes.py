@@ -93,6 +93,17 @@ def stop_session(session_id: str):
     return jsonify(result)
 
 
+@inspection_blueprint.post("/inspection/sessions/<session_id>/release")
+@require_roles(UserRole.ADMIN, UserRole.OPERATOR)
+def manual_release(session_id: str):
+    """Operator NEUTRAL release: unclamp + reset cycle without committing a result."""
+    try:
+        result = inspection_session_service.manual_release(session_id, reason="manual_operator")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    return jsonify(result)
+
+
 @inspection_blueprint.get("/inspection/reject-logs")
 @require_roles(UserRole.ADMIN)
 def list_reject_logs():

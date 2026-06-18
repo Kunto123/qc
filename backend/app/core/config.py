@@ -81,9 +81,10 @@ class AppConfig:
     # 0 = legacy behavior (latch resets immediately when raw drops).
     part_ready_release_ms_default: int = max(0, int(os.getenv("QC_SUITE_PART_READY_RELEASE_MS", "300")))
     # ── Inspection Policy ──
-    # Hard reject reasons: only these trigger PLC buzzer/reject.
-    # Non-hard reject reasons (NOT_FOUND, WRONG_TYPE, etc.) become pending/adjust
-    # without PLC commit. Comma-separated list of RejectReasonCode values.
+    # Hard reject reasons: only these (plus COMMIT_TIMEOUT safety-net) are terminal —
+    # they commit + trigger PLC reclamp. Everything else (NOT_FOUND, gap, low conf, etc.)
+    # stays pending so the system keeps inferring until ACCEPT. Comma-separated
+    # list of RejectReasonCode values.
     inspect_hard_reject_reasons: str = os.getenv(
         "QC_SUITE_INSPECT_HARD_REJECT_REASONS", "OUT_OF_ANGLE,WRONG_TYPE"
     ).strip()
