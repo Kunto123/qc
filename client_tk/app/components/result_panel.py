@@ -76,6 +76,8 @@ class ResultPanel(ctk.CTkFrame):
         self.response_mode_var = self._build_field(self.debug_frame, 5, "Response Mode")
         self.latency_total_var = self._build_field(self.debug_frame, 6, "Latency Total")
         self.latency_inference_var = self._build_field(self.debug_frame, 7, "Inference Time")
+        # Anchor for restoring section order on show/hide
+        self._debug_section = self.debug_frame.master
 
         self.commit_frame = self._build_section("Commit Details")
         self.reason_var = self._build_field(self.commit_frame, 0, "Reason")
@@ -86,6 +88,16 @@ class ResultPanel(ctk.CTkFrame):
         self.event_var = self._build_field(self.commit_frame, 5, "Event ID")
         self.commit_var = self._build_field(self.commit_frame, 6, "Committed At")
         self.bind("<Configure>", self._on_resize, add="+")
+
+    def set_mode(self, validator_mode: str) -> None:
+        """Show/hide validation sections based on template validator mode."""
+        mode = (validator_mode or "sticker").strip().lower()
+        show_component = mode == "component_count"
+        target_show = self._component_section if show_component else self._sticker_section
+        target_hide = self._sticker_section if show_component else self._component_section
+        target_hide.pack_forget()
+        if not target_show.winfo_manager():
+            target_show.pack(fill="x", padx=12, pady=(0, 10), before=self._debug_section)
 
     def _build_section(self, title: str) -> ctk.CTkFrame:
         section = ctk.CTkFrame(self, fg_color=PANEL_ALT_BG, corner_radius=12, border_width=1, border_color=BORDER)
