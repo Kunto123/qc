@@ -19,7 +19,7 @@ ENV/
 data/models/*
 model-minipc/*
 backend/app/assets/part_ready_refs/*
-guidebook/*
+guidebook/
 
 # Test / coverage / type-check caches
 .pytest_cache/

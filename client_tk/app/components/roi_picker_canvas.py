@@ -115,7 +115,8 @@ class RoiPickerCanvas(ctk.CTkFrame):
         self._source_frame: np.ndarray | None = None
         self._part_ready_roi: dict = {}
         self._sticker_roi: dict = {}
-        self._show_sticker: bool = True  # False saat mode component_count
+        self._show_sticker: bool = True
+        self._show_part_ready: bool = True  # False saat mode component_count
         self._active_roi_kind: str | None = None
         self._drag_mode: str | None = None
         self._drag_start: tuple[float, float] | None = None
@@ -218,6 +219,11 @@ class RoiPickerCanvas(ctk.CTkFrame):
         self._show_sticker = visible
         self.redraw()
 
+    def set_part_ready_visible(self, visible: bool) -> None:
+        """Show/hide part ready ROI (used for component_count mode)."""
+        self._show_part_ready = visible
+        self.redraw()
+
     def _hit_test_component(self, x: int, y: int) -> int:
         """Return component ROI index at (x, y), or -1."""
         for i, roi in enumerate(reversed(self._component_rois)):
@@ -313,7 +319,7 @@ class RoiPickerCanvas(ctk.CTkFrame):
             rh = max(1, int(float(roi.get("h", 1.0)) * dh))
             return rx, ry, rw, rh
 
-        if self._part_ready_roi:
+        if self._part_ready_roi and self._show_part_ready:
             rx, ry, rw, rh = _roi_px(self._part_ready_roi)
             _rot = float(self._part_ready_roi.get("rotation", 0))
             if abs(_rot) > 0.1:
@@ -416,6 +422,13 @@ class RoiPickerCanvas(ctk.CTkFrame):
             return self._part_ready_roi
         if kind == "sticker":
             return self._sticker_roi
+        if kind is not None and kind.startswith("component:"):
+            try:
+                idx = int(kind.split(":")[1])
+                if 0 <= idx < len(self._component_rois):
+                    return self._component_rois[idx]
+            except (ValueError, IndexError):
+                pass
         return {}
 
     def _set_roi_for_kind(self, kind: str, roi: dict, *, notify: bool = True) -> None:
@@ -424,6 +437,15 @@ class RoiPickerCanvas(ctk.CTkFrame):
             self._part_ready_roi = normalized
         elif kind == "sticker":
             self._sticker_roi = normalized
+        elif kind is not None and kind.startswith("component:"):
+            try:
+                idx = int(kind.split(":")[1])
+                if 0 <= idx < len(self._component_rois):
+                    self._component_rois[idx] = normalized
+                else:
+                    return
+            except (ValueError, IndexError):
+                return
         else:
             return
         self.redraw()

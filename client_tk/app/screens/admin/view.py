@@ -567,13 +567,23 @@ class AdminScreen(ctk.CTkFrame):
             self.preset_table.insert("", "end", iid="__empty__", values=("-", "No presets.", "", ""))
             return
         for item in active_items:
+            # Get latest template name from cache (falls back to deployment snapshot)
+            template_id = int(item.get("template_id") or 0)
+            latest_name = item.get("template_name") or ""
+            if template_id > 0:
+                tpl = next(
+                    (t for t in self._templates_cache if int(t.get("id") or 0) == template_id),
+                    None,
+                )
+                if tpl:
+                    latest_name = tpl.get("name") or latest_name
             self.preset_table.insert(
                 "",
                 "end",
                 iid=f"dep:{item.get('id')}",
                 values=(
                     f"D{item.get('id')}",
-                    _safe_text(item.get("template_name")),
+                    _safe_text(latest_name),
                     _safe_text(item.get("template_version_id")),
                     "ACTIVE",
                 ),
@@ -1159,6 +1169,18 @@ class AdminScreen(ctk.CTkFrame):
             version_id = int(saved.get("version_id") or saved.get("current_version_id") or 0)
             self.current_template_id = template_id
             self.current_template_version_id = version_id
+            # Update template_name in existing active deployment records
+            new_name = payload.get("name", "").strip()
+            if new_name and hasattr(self, "_deployments_cache"):
+                for dep in self._deployments_cache:
+                    if int(dep.get("template_id") or 0) == template_id and dep.get("is_active"):
+                        try:
+                            self.api.update_deployment(
+                                int(dep.get("id") or 0),
+                                {"template_name": new_name},
+                            )
+                        except Exception:
+                            pass
             # Reload exact version detail to wizard form so values reflect the update
             try:
                 if version_id:
@@ -1186,7 +1208,8 @@ class AdminScreen(ctk.CTkFrame):
             messagebox.showerror("Preset", str(exc))
             return
         try:
-            if self.current_template_id:
+            is_update = bool(self.current_template_id)
+            if is_update:
                 saved = self.api.update_template(self.current_template_id, payload)
             else:
                 saved = self.api.create_template(payload)
@@ -1206,6 +1229,20 @@ class AdminScreen(ctk.CTkFrame):
                     "template_version_id": version_id,
                 }
             )
+            # Update template_name in existing active deployment records
+            # This keeps the name in sync when renaming a deployed template
+            if is_update:
+                new_name = payload.get("name", "").strip()
+                if new_name and hasattr(self, "_deployments_cache"):
+                    for dep in self._deployments_cache:
+                        if int(dep.get("template_id") or 0) == template_id and dep.get("is_active"):
+                            try:
+                                self.api.update_deployment(
+                                    int(dep.get("id") or 0),
+                                    {"template_name": new_name},
+                                )
+                            except Exception:
+                                pass
         except Exception as exc:
             messagebox.showerror("Preset", str(exc))
             return
@@ -1358,10 +1395,15 @@ class AdminScreen(ctk.CTkFrame):
             raise ValueError("Preset name is required.")
         if not model_path:
             raise ValueError("Model is required.")
-        if not expected_code:
-            raise ValueError("Sticker code is required.")
-        if not expected_class:
-            raise ValueError("Expected class is required.")
+        mode = self.preset_validator_mode_var.get()
+        if mode == "component_count":
+            expected_code = expected_code or ""
+            expected_class = expected_class or ""
+        else:
+            if not expected_code:
+                raise ValueError("Sticker code is required.")
+            if not expected_class:
+                raise ValueError("Expected class is required.")
         max_tilt = None
         if self.preset_max_tilt_var.get().strip():
             max_tilt = _float_or_default(self.preset_max_tilt_var.get(), 5.0)

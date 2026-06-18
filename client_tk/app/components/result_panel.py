@@ -62,6 +62,11 @@ class ResultPanel(ctk.CTkFrame):
         self.comp_roi_summary_var = self._build_field(self.component_frame, 1, "ROI Summary")
         self.comp_reject_reason_var = self._build_field(self.component_frame, 2, "Reject Reason")
 
+        # Track section frames for show/hide
+        self._part_ready_section = self.part_ready_frame.master
+        self._sticker_section = self.sticker_frame.master
+        self._component_section = self.component_frame.master
+
         self.debug_frame = self._build_section("Inference Debug")
         self.raw_detection_count_var = self._build_field(self.debug_frame, 0, "Raw Detections")
         self.fallback_reason_var = self._build_field(self.debug_frame, 1, "Fallback Reason")

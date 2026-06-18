@@ -206,6 +206,16 @@ class TemplatesTab:
             except Exception:
                 pass
 
+        # Keep references to part ready reference widgets (capture/upload ref, status label)
+        # These are hidden in component_counter mode since part ready uses Modbus sensor only
+        a._part_ready_ref_widgets = []
+        for _r in (13, 14):
+            try:
+                for w in wizard.grid_slaves(row=_r):
+                    a._part_ready_ref_widgets.append(w)
+            except Exception:
+                pass
+
         # Initial mode sync
         a.preset_validator_mode_var.trace_add("write", lambda *_: self._on_mode_changed(a))
 
@@ -227,11 +237,20 @@ class TemplatesTab:
             a._comp_editor_frame.grid_remove()
             a._add_comp_roi_btn.grid_remove()
             a._logo_frame.grid()
-        # Show/hide sticker ROI on canvas based on mode
+        # Show/hide sticker and part-ready ROI on canvas based on mode
         if hasattr(a, "preset_roi_picker"):
             a.preset_roi_picker.set_sticker_visible(mode != "component_count")
-        # Update ROI selector
+            a.preset_roi_picker.set_part_ready_visible(mode != "component_count")
+        # ROI picker panel stays visible in both modes (used for component ROIs in counter mode)
+        # But update its selector to show component ROIs vs sticker/part-ready ROIs
         self._update_roi_selector_dropdown(a)
+        # Show/hide part ready reference buttons (capture/upload ref, status label)
+        # Not needed in component_counter mode since part ready = Modbus sensor only
+        for w in getattr(a, "_part_ready_ref_widgets", []):
+            if mode == "component_count":
+                w.grid_remove()
+            else:
+                w.grid()
 
     # ------------------------------------------------------------------
     # ROI Picker
@@ -239,6 +258,7 @@ class TemplatesTab:
         roi_panel = ctk.CTkFrame(wizard, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
         roi_panel.grid(row=16, column=0, columnspan=4, sticky="ew", padx=12, pady=(12, 2))
         roi_panel.columnconfigure(0, weight=1)
+        a._roi_picker_panel = roi_panel
 
         ctk.CTkLabel(roi_panel, text="Visual ROI Picker", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
             row=0, column=0, sticky="w", padx=10, pady=(10, 4),

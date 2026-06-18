@@ -625,32 +625,45 @@ class InspectionSessionService:
             frame = _apply_rotation(frame, _rotation)
 
         part_ready_started = time.perf_counter()
-        part_ready_frame, part_ready_roi_meta = self._crop_stage_roi(
-            frame,
-            state.template.part_ready_roi,
-            state.part_ready_roi_override,
-        )
+        validator_mode = str(getattr(state.template.sticker, "validator_mode", "") or "").strip().lower()
+        is_component_counter = validator_mode == "component_count"
+
+        if is_component_counter:
+            # Component Counter mode: part readiness from Modbus sensor input only,
+            # ignore camera-based part ready ROI completely
+            part_ready_frame = None
+            part_ready_roi_meta = {}
+            part_ready = {"part_ready": True, "status": "sensor_input", "match_ratio": 1.0}
+            presence = {"present": True, "area_ratio": 1.0, "mean": 255.0, "std": 0.0}
+        else:
+            part_ready_frame, part_ready_roi_meta = self._crop_stage_roi(
+                frame,
+                state.template.part_ready_roi,
+                state.part_ready_roi_override,
+            )
         # ── Logo anti-reclamp check ──
         _logo_skip_reclamp = False
-        _expected_logo = getattr(state, "expected_logo_edge", None)
-        if _expected_logo is not None and not state.part_ready_latched:
-            from backend.app.services.gap_detector import match_gap
-            _fh, _fw = part_ready_frame.shape[:2]
-            _logo_result = match_gap(
-                part_ready_frame,
-                {"x": 0, "y": 0, "w": _fw, "h": _fh},
-                _expected_logo,
-                threshold=0.6,
-            )
-            if _logo_result.get("match"):
-                _logo_skip_reclamp = True
-                logger.info("[logo] match score=%.3f — skip reclamp", _logo_result.get("score", 0))
-        # Skip part_ready evaluation when latch is active
-        if state.part_ready_latched:
-            part_ready = {"part_ready": True, "status": "latched", "match_ratio": 1.0}
-        else:
-            part_ready = self._evaluate_part_ready(part_ready_frame, state)
-        presence = self._detect_part_presence(part_ready_frame)
+        if not is_component_counter:
+            _expected_logo = getattr(state, "expected_logo_edge", None)
+            if _expected_logo is not None and not state.part_ready_latched:
+                from backend.app.services.gap_detector import match_gap
+                _fh, _fw = part_ready_frame.shape[:2]
+                _logo_result = match_gap(
+                    part_ready_frame,
+                    {"x": 0, "y": 0, "w": _fw, "h": _fh},
+                    _expected_logo,
+                    threshold=0.6,
+                )
+                if _logo_result.get("match"):
+                    _logo_skip_reclamp = True
+                    logger.info("[logo] match score=%.3f — skip reclamp", _logo_result.get("score", 0))
+        # Skip part_ready evaluation when latch is active (sticker mode only)
+        if not is_component_counter:
+            if state.part_ready_latched:
+                part_ready = {"part_ready": True, "status": "latched", "match_ratio": 1.0}
+            else:
+                part_ready = self._evaluate_part_ready(part_ready_frame, state)
+            presence = self._detect_part_presence(part_ready_frame)
         timings["part_ready_eval_ms"] = _elapsed_ms(part_ready_started)
 
         roi_crop_started = time.perf_counter()
