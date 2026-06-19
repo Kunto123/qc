@@ -108,10 +108,7 @@ class StickerInferenceService:
         return self._device_runtime.resolve()
 
     def _resolve_ocr_engine(self, vision: VisionConfig) -> str:
-        engine = str(getattr(vision, "ocr_engine", "") or "").strip().lower()
-        if engine in {"", "default", "auto"}:
-            engine = str(self._config.default_ocr_engine or "disabled").strip().lower()
-        return engine or "disabled"
+        return "disabled"
 
     @staticmethod
     def _letterbox(
