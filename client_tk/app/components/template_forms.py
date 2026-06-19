@@ -206,10 +206,6 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.model_inference_fps_var = tk.StringVar(value="4")
         self.model_imgsz_var = tk.StringVar(value="640")
         self.model_classes_var = tk.StringVar()
-        self.ocr_engine_var = tk.StringVar(value="default")
-        self.ocr_language_var = tk.StringVar(value="eng")
-        self.ocr_psm_var = tk.StringVar(value="7")
-        self.ocr_allowlist_var = tk.StringVar()
         self.text_anchor_class_var = tk.StringVar(value="text_anchor")
         self.center_dot_class_var = tk.StringVar(value="center_dot")
         self.anchor_crop_padding_var = tk.StringVar(value="0.08")
@@ -225,19 +221,6 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.sticker_max_offset_y_var = tk.StringVar(value="80")
         self.sticker_expected_center_x_var = tk.StringVar(value="")
         self.sticker_expected_center_y_var = tk.StringVar(value="")
-        self.sticker_use_ocr_var = tk.BooleanVar(value=False)
-        self.sticker_ocr_expected_code_var = tk.StringVar(value="")
-        self.sticker_ocr_flip_fallback_var = tk.BooleanVar(value=True)
-        self.sticker_ocr_mode_var = tk.StringVar(value="")
-        self.sticker_ocr_expected_text_var = tk.StringVar(value="")
-        self.sticker_ocr_min_conf_var = tk.StringVar(value="")
-        self.sticker_ocr_regex_var = tk.StringVar(value="")
-        self.sticker_expected_dot_x_var = tk.StringVar(value="")
-        self.sticker_expected_dot_y_var = tk.StringVar(value="")
-        self.sticker_max_anchor_offset_x_var = tk.StringVar(value="")
-        self.sticker_max_anchor_offset_y_var = tk.StringVar(value="")
-        self.sticker_anchor_min_conf_var = tk.StringVar(value="")
-        self.sticker_dot_min_conf_var = tk.StringVar(value="")
         self.sticker_commit_stable_frames_var = tk.StringVar(value="5")
         self.sticker_settle_ms_var = tk.StringVar(value="")
         self.sticker_tilt_gate_enabled_var = tk.BooleanVar(value=False)
@@ -358,46 +341,11 @@ class TemplateEditorForm(ctk.CTkFrame):
             row=10, column=0, columnspan=4, sticky="w", pady=(0, 4), padx=10
         )
 
-        # OCR and anchor validation section
-        ocr_separator = ctk.CTkFrame(sticker_config, fg_color=BORDER, height=1)
-        ocr_separator.grid(row=11, column=0, columnspan=4, sticky="ew", padx=10, pady=(6, 4))
-        ctk.CTkLabel(sticker_config, text="OCR + Anchor Geometry", font=("Segoe UI", 9, "bold"), text_color=TEXT_PRIMARY).grid(
-            row=12, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 4))
-        self._entry(sticker_config, 13, 0, "OCR Mode", self.sticker_ocr_mode_var)
-        self._entry(sticker_config, 13, 2, "Expected OCR Text", self.sticker_ocr_expected_text_var)
-        self._entry(sticker_config, 14, 0, "Min OCR Conf", self.sticker_ocr_min_conf_var)
-        self._entry(sticker_config, 14, 2, "OCR Regex", self.sticker_ocr_regex_var)
-        self.ocr_sticker_only_checkbox = ctk.CTkCheckBox(
-            sticker_config,
-            text="Use OCR sticker-only validation",
-            variable=self.sticker_use_ocr_var,
-            text_color=TEXT_PRIMARY,
-            fg_color=ACCENT,
-            hover_color=ACCENT_HOVER,
-        )
-        self.ocr_sticker_only_checkbox.grid(row=15, column=0, columnspan=2, sticky="w", padx=10, pady=4)
-        self.ocr_flip_checkbox = ctk.CTkCheckBox(
-            sticker_config,
-            text="Try 180 flip fallback",
-            variable=self.sticker_ocr_flip_fallback_var,
-            text_color=TEXT_PRIMARY,
-            fg_color=ACCENT,
-            hover_color=ACCENT_HOVER,
-        )
-        self.ocr_flip_checkbox.grid(row=15, column=2, columnspan=2, sticky="w", padx=10, pady=4)
-        self._entry(sticker_config, 16, 0, "Expected OCR Code", self.sticker_ocr_expected_code_var)
-        self._entry(sticker_config, 16, 2, "Expected Dot X (0-1)", self.sticker_expected_dot_x_var)
-        self._entry(sticker_config, 17, 0, "Expected Dot Y (0-1)", self.sticker_expected_dot_y_var)
-        self._entry(sticker_config, 17, 2, "Max Anchor Offset X", self.sticker_max_anchor_offset_x_var)
-        self._entry(sticker_config, 18, 0, "Max Anchor Offset Y", self.sticker_max_anchor_offset_y_var)
-        self._entry(sticker_config, 18, 2, "Anchor Min Conf", self.sticker_anchor_min_conf_var)
-        self._entry(sticker_config, 19, 0, "Dot Min Conf", self.sticker_dot_min_conf_var)
-
         # Tilt gate section
         tilt_separator = ctk.CTkFrame(sticker_config, fg_color=BORDER, height=1)
-        tilt_separator.grid(row=20, column=0, columnspan=4, sticky="ew", padx=10, pady=(6, 4))
+        tilt_separator.grid(row=11, column=0, columnspan=4, sticky="ew", padx=10, pady=(6, 4))
         ctk.CTkLabel(sticker_config, text="Tilt Gate", font=("Segoe UI", 9, "bold"), text_color=TEXT_PRIMARY).grid(
-            row=21, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 4))
+            row=12, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 4))
         self.tilt_gate_checkbox = ctk.CTkCheckBox(
             sticker_config,
             text="Aktifkan Gate Kemiringan (OUT_OF_ANGLE)",
@@ -405,16 +353,16 @@ class TemplateEditorForm(ctk.CTkFrame):
             text_color=TEXT_PRIMARY,
             command=self._on_tilt_gate_toggled,
         )
-        self.tilt_gate_checkbox.grid(row=22, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 6))
-        self._entry(sticker_config, 23, 0, "Expected Tilt (deg)", self.sticker_expected_tilt_var)
-        self._entry(sticker_config, 23, 2, "Max Tilt Deviation (deg)", self.sticker_max_tilt_var)
+        self.tilt_gate_checkbox.grid(row=13, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 6))
+        self._entry(sticker_config, 14, 0, "Expected Tilt (deg)", self.sticker_expected_tilt_var)
+        self._entry(sticker_config, 14, 2, "Max Tilt Deviation (deg)", self.sticker_max_tilt_var)
         self.tilt_note_label = ctk.CTkLabel(
             sticker_config,
             text="Gate nonaktif — nilai tersimpan sebagai telemetry, tidak memengaruhi accept/reject.",
             text_color=TEXT_SECONDARY,
             font=("Segoe UI", 8),
         )
-        self.tilt_note_label.grid(row=24, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 8))
+        self.tilt_note_label.grid(row=15, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 8))
         self._tilt_entries: list[ctk.CTkEntry] = []
         self.sticker_tilt_gate_enabled_var.trace_add("write", lambda *_: self._on_tilt_gate_toggled())
 
@@ -458,14 +406,6 @@ class TemplateEditorForm(ctk.CTkFrame):
         self._entry(vision_tab, 3, 2, "Inference FPS", self.model_inference_fps_var)
         self._entry(vision_tab, 4, 0, "Image Size", self.model_imgsz_var)
         self._entry(vision_tab, 4, 2, "Classes CSV", self.model_classes_var)
-        self._entry(vision_tab, 5, 0, "OCR Engine", self.ocr_engine_var)
-        self._entry(vision_tab, 5, 2, "OCR Language", self.ocr_language_var)
-        self._entry(vision_tab, 6, 0, "OCR PSM", self.ocr_psm_var)
-        self._entry(vision_tab, 6, 2, "OCR Allowlist", self.ocr_allowlist_var)
-        self._entry(vision_tab, 7, 0, "Text Anchor Class", self.text_anchor_class_var)
-        self._entry(vision_tab, 7, 2, "Center Dot Class", self.center_dot_class_var)
-        self._entry(vision_tab, 8, 0, "Anchor Crop Padding", self.anchor_crop_padding_var)
-        self._entry(vision_tab, 8, 2, "Anchor Crop Scale", self.anchor_crop_scale_var)
 
         persistence_tab.columnconfigure(0, weight=1)
         ctk.CTkCheckBox(persistence_tab, text="Write committed result to DB", variable=self.write_to_db_var, text_color=TEXT_PRIMARY).grid(
