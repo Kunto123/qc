@@ -178,7 +178,6 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_model_meta_path_var = tk.StringVar()
         self.preset_runtime_var = tk.StringVar(value="auto")
         self.preset_conf_threshold_var = tk.StringVar(value="0.25")
-        self.preset_expected_code_var = tk.StringVar()
         self.preset_expected_class_var = tk.StringVar()
         self.preset_max_tilt_var = tk.StringVar(value="")
         self.preset_tilt_gate_var = tk.BooleanVar(value=False)
@@ -847,8 +846,8 @@ class AdminScreen(ctk.CTkFrame):
             self.preset_table.focus("")
         self.preset_name_var.set("")
         self.preset_description_var.set("")
+        self.preset_expected_class_var.set("")
         self.preset_conf_threshold_var.set("0.25")
-        self.preset_expected_code_var.set("")
         self.preset_max_tilt_var.set("")
         self.preset_tilt_gate_var.set(False)
         self.preset_gap_threshold_var.set("0.85")
@@ -914,8 +913,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_description_var.set(str(detail.get("description") or ""))
         sticker = detail.get("sticker") or {}
         part_ready = detail.get("part_ready") or {}
-        self.preset_expected_code_var.set(str(sticker.get("ocr_expected_code") or sticker.get("ocr_expected_text") or ""))
-        self.preset_expected_code_var.set("")
+        self.preset_expected_class_var.set(str(sticker.get("expected_class") or ""))
         self.preset_max_tilt_var.set("" if sticker.get("max_tilt_degrees") is None else str(sticker.get("max_tilt_degrees")))
         self.preset_tilt_gate_var.set(bool(sticker.get("tilt_gate_enabled", False)))
         self.preset_gap_threshold_var.set(str(part_ready.get("gap_match_threshold", 0.85)))
@@ -1382,7 +1380,6 @@ class AdminScreen(ctk.CTkFrame):
 
     def _preset_payload(self) -> dict:
         name = self.preset_name_var.get().strip()
-        expected_code = self.preset_expected_code_var.get().strip()
         expected_class = self.preset_expected_class_var.get().strip()
         model_path = self.preset_model_path_var.get().strip()
         if not name:
@@ -1391,11 +1388,8 @@ class AdminScreen(ctk.CTkFrame):
             raise ValueError("Model is required.")
         mode = self.preset_validator_mode_var.get()
         if mode == "component_count":
-            expected_code = expected_code or ""
             expected_class = expected_class or ""
         else:
-            if not expected_code:
-                raise ValueError("Sticker code is required.")
             if not expected_class:
                 raise ValueError("Expected class is required.")
         max_tilt = None
@@ -1436,14 +1430,10 @@ class AdminScreen(ctk.CTkFrame):
                 "stream_fps": 10.0,
                 "inference_fps": 4.0,
                 "imgsz": 640,
-                "classes": [expected_class],
+                "classes": [c.strip() for c in self.preset_model_classes_var.get().split(",") if c.strip()] or [expected_class],
                 "enable_ergonomic_check": False,
                 "ergonomic_pose_model_path": None,
                 "ergonomic_min_keypoint_conf": 0.35,
-                "ocr_engine": "default",
-                "ocr_language": "eng",
-                "ocr_psm": 13,
-                "ocr_allowlist": "",
                 "text_anchor_class": "text_anchor",
                 "center_dot_class": "center_dot",
                 "anchor_crop_padding_ratio": 0.08,
@@ -1458,7 +1448,7 @@ class AdminScreen(ctk.CTkFrame):
                 "release_ms": 300,
             },
             "sticker": {
-                "part_name": expected_code,
+                "part_name": expected_class,
                 "expected_class": expected_class,
                 "enabled": True,
                 "validator_mode": "ml_detection",

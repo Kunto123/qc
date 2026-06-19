@@ -2052,19 +2052,6 @@ class InspectionSessionService:
 
         ocr_payload = detection_payload.get("ocr") or {}
         unique_code = str(detection_payload.get("unique_code") or "").strip()
-        expected_code = str(
-            getattr(sticker, "ocr_expected_code", "")
-            or getattr(sticker, "ocr_expected_text", "")
-            or sticker.expected_class
-            or ""
-        ).strip()
-        use_ocr = bool(getattr(sticker, "use_ocr", False))
-        ocr_min_confidence = (
-            self._default_ocr_min_confidence
-            if getattr(sticker, "ocr_min_confidence", None) is None
-            else float(getattr(sticker, "ocr_min_confidence") or 0.0)
-        )
-
         reject_reason = None
         if selected_candidate is None:
             reject_reason = RejectReasonCode.NOT_FOUND.value
@@ -2080,13 +2067,6 @@ class InspectionSessionService:
             reject_reason = RejectReasonCode.OUT_OF_POSITION.value
         elif offset_limit_y is not None and abs(offset_y) > float(offset_limit_y):
             reject_reason = RejectReasonCode.OUT_OF_POSITION.value
-        elif use_ocr and str(ocr_payload.get("status") or "") != "ok":
-            reject_reason = RejectReasonCode.LOW_OCR_CONF.value
-        elif use_ocr and ocr_payload.get("confidence") is not None and float(ocr_payload.get("confidence") or 0.0) < ocr_min_confidence:
-            reject_reason = RejectReasonCode.LOW_OCR_CONF.value
-        elif use_ocr and expected_code and self._normalize_code(unique_code) != self._normalize_code(expected_code):
-            reject_reason = RejectReasonCode.WRONG_TEXT.value
-
         decision = DecisionCode.ACCEPT.value if reject_reason is None else DecisionCode.REJECT.value
         status = "accepted" if reject_reason is None else reject_reason.lower()
         bbox = dict((selected_candidate or {}).get("bbox") or {}) or None
@@ -2140,7 +2120,6 @@ class InspectionSessionService:
                 "tilt": tilt_info,
                 "thresholds": {
                     **thresholds,
-                    "ocr_min_confidence": ocr_min_confidence,
                     "max_anchor_offset_x": None if offset_limit_x is None else float(offset_limit_x),
                     "max_anchor_offset_y": None if offset_limit_y is None else float(offset_limit_y),
                 },
