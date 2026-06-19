@@ -125,3 +125,10 @@ class SessionState:
     component_count_history: list = field(default_factory=list)
     # ── Logo Anti-Reclamp ──
     expected_logo_edge: object = None  # np.ndarray | None
+    # ── Inference Result Cache for Hand-Obstruction Handling ──
+    # When YOLO detects a valid class but part_ready drops temporarily (e.g., hand
+    # obstructing during commit wait), we cache the last valid inference result and
+    # timestamp. If part_ready returns within the grace window, we use the cached
+    # result instead of re-running inference (which might fail due to obstruction).
+    last_valid_inference: dict[str, Any] | None = None
+    last_valid_inference_ts: float = 0.0  # monotonic timestamp

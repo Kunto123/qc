@@ -92,6 +92,10 @@ class AppConfig:
     accept_stable_frames: int = max(1, int(os.getenv("QC_SUITE_ACCEPT_STABLE_FRAMES", "1")))
     # accept: minimal stable elapsed ms before commit (default 200).
     accept_stable_ms: int = max(0, int(os.getenv("QC_SUITE_ACCEPT_STABLE_MS", "200")))
+    # Inference cache grace period (ms): if part_ready drops temporarily (e.g., hand
+    # obstructing during commit wait), use cached inference result if within this
+    # window. Default 300ms. Set 0 to disable.
+    inference_cache_grace_ms: int = max(0, int(os.getenv("QC_SUITE_INFERENCE_CACHE_GRACE_MS", "300")))
     # Detection holdover: when ACCEPT transitions to NOT_FOUND briefly,
     # hold the ACCEPT state for this duration before resetting stability.
     # 0 = disabled (legacy: reset immediately on key change).
