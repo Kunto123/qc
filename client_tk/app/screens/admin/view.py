@@ -180,8 +180,6 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_conf_threshold_var = tk.StringVar(value="0.25")
         self.preset_expected_code_var = tk.StringVar()
         self.preset_expected_class_var = tk.StringVar()
-        self.preset_use_ocr_var = tk.BooleanVar(value=False)
-        self.preset_ocr_flip_fallback_var = tk.BooleanVar(value=True)
         self.preset_max_tilt_var = tk.StringVar(value="")
         self.preset_tilt_gate_var = tk.BooleanVar(value=False)
         self.preset_gap_threshold_var = tk.StringVar(value="0.85")
@@ -851,8 +849,6 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_description_var.set("")
         self.preset_conf_threshold_var.set("0.25")
         self.preset_expected_code_var.set("")
-        self.preset_use_ocr_var.set(False)
-        self.preset_ocr_flip_fallback_var.set(True)
         self.preset_max_tilt_var.set("")
         self.preset_tilt_gate_var.set(False)
         self.preset_gap_threshold_var.set("0.85")
@@ -919,9 +915,7 @@ class AdminScreen(ctk.CTkFrame):
         sticker = detail.get("sticker") or {}
         part_ready = detail.get("part_ready") or {}
         self.preset_expected_code_var.set(str(sticker.get("ocr_expected_code") or sticker.get("ocr_expected_text") or ""))
-        self.preset_expected_class_var.set(str(sticker.get("expected_class") or ""))
-        self.preset_use_ocr_var.set(bool(sticker.get("use_ocr", False)))
-        self.preset_ocr_flip_fallback_var.set(bool(sticker.get("ocr_flip_fallback", True)))
+        self.preset_expected_code_var.set("")
         self.preset_max_tilt_var.set("" if sticker.get("max_tilt_degrees") is None else str(sticker.get("max_tilt_degrees")))
         self.preset_tilt_gate_var.set(bool(sticker.get("tilt_gate_enabled", False)))
         self.preset_gap_threshold_var.set(str(part_ready.get("gap_match_threshold", 0.85)))
@@ -1467,7 +1461,7 @@ class AdminScreen(ctk.CTkFrame):
                 "part_name": expected_code,
                 "expected_class": expected_class,
                 "enabled": True,
-                "validator_mode": "sticker_only" if self.preset_use_ocr_var.get() else "ml_detection",
+                "validator_mode": "ml_detection",
                 "min_roi_confidence": 0.0,
                 "min_class_confidence": None,
                 "max_offset_x": 80,
@@ -1476,20 +1470,6 @@ class AdminScreen(ctk.CTkFrame):
                 "expected_center_y": None,
                 "expected_tilt_degrees": 0.0,
                 "max_tilt_degrees": max_tilt,
-                "use_ocr": bool(self.preset_use_ocr_var.get()),
-                "ocr_expected_code": expected_code,
-                "ocr_flip_fallback": bool(self.preset_ocr_flip_fallback_var.get()),
-                "ocr_mode": None,
-                "ocr_expected_text": expected_code,
-                "ocr_min_confidence": None,
-                "ocr_regex": None,
-                "ocr_canonical_map": {},
-                "anchor_min_confidence": None,
-                "dot_min_confidence": None,
-                "expected_dot_x": None,
-                "expected_dot_y": None,
-                "max_anchor_offset_x": None,
-                "max_anchor_offset_y": None,
                 "tilt_gate_enabled": bool(self.preset_tilt_gate_var.get()),
                 "commit_stable_frames": 1,
                 "part_ready_settle_ms": None,

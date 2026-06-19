@@ -141,7 +141,6 @@ def _log_startup_config() -> None:
         f"debug: {_cfg.debug}",
         f"database_backend: {_cfg.database_backend}",
         f"sticker_inference_mode: {_cfg.sticker_inference_mode}",
-        f"sticker_ocr_mode: {_cfg.sticker_ocr_mode}",
         f"default_sticker_model_path: {_cfg.default_sticker_model_path or '(empty — auto-discover from template)'}",
         f"commit_grace_ms: {_cfg.commit_grace_ms}",
         f"accept_stable_ms: {_cfg.accept_stable_ms}",

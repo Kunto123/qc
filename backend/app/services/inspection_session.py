@@ -146,16 +146,6 @@ class InspectionSessionService:
             if app_config is not None
             else 0
         )
-        self._default_ocr_mode = (
-            str(getattr(app_config, "sticker_ocr_mode", "legacy") or "legacy").strip().lower()
-            if app_config is not None
-            else "legacy"
-        )
-        self._default_ocr_min_confidence = (
-            max(0.0, min(1.0, float(getattr(app_config, "default_ocr_min_confidence", 0.70))))
-            if app_config is not None
-            else 0.70
-        )
         self._plc_clamp_feedback_enabled = (
             bool(getattr(app_config, "plc_clamp_feedback_enabled", False))
             if app_config is not None
@@ -276,7 +266,6 @@ class InspectionSessionService:
                     state.plc_clamp_ready_at = 0.0
                     state.plc_clamp_timeout = False
                     state.plc_clamp_event_id = None
-                    state.expected_logo_edge = None  # reset logo for new cycle
                     state.operator_sticker_delay_started_at = 0.0
                     state.operator_sticker_ready_at = 0.0
                     state.part_ready_settled_at = None  # reset timeout tracker for new cycle
@@ -687,22 +676,6 @@ class InspectionSessionService:
                 state.template.part_ready_roi,
                 state.part_ready_roi_override,
             )
-        # ── Logo anti-reclamp check ──
-        _logo_skip_reclamp = False
-        if not is_component_counter:
-            _expected_logo = getattr(state, "expected_logo_edge", None)
-            if _expected_logo is not None and not state.part_ready_latched:
-                from backend.app.services.gap_detector import match_gap
-                _fh, _fw = part_ready_frame.shape[:2]
-                _logo_result = match_gap(
-                    part_ready_frame,
-                    {"x": 0, "y": 0, "w": _fw, "h": _fh},
-                    _expected_logo,
-                    threshold=0.6,
-                )
-                if _logo_result.get("match"):
-                    _logo_skip_reclamp = True
-                    logger.info("[logo] match score=%.3f — skip reclamp", _logo_result.get("score", 0))
         # Skip part_ready evaluation when latch is active (sticker mode only)
         if not is_component_counter:
             if state.part_ready_latched:
@@ -840,25 +813,6 @@ class InspectionSessionService:
             # Presence back — reset unsettled timer
             state.part_ready_unsettled_at = None
 
-        # Logo skip: if logo match and part settled, skip reclamp
-        if _logo_skip_reclamp and part_ready_settled:
-            logger.info("[logo] skipping cycle — logo match")
-            _elapsed = _elapsed_ms(total_started)
-            return {
-                "session": self._session_payload(state),
-                "presence": presence,
-                "part_ready": {**part_ready, "status": "logo_skip", "part_ready": False},
-                "event_state": InspectionEventState.IDLE.value,
-                "operator_state": state.operator_state,
-                "clamp": {"enabled": True, "status": "idle", "ready": False},
-                "phase": {"status": "idle", "ready": False},
-                "count_committed": False,
-                "count_source": None,
-                "counters": self._counter_payload(state),
-                "last_committed_result": state.last_committed_result,
-                "recent_events": list(state.recent_events),
-                "timings": {**timings, "total_ms": _elapsed},
-            }
         # Trigger PLC clamp hold on the first frame where part is settled.
         # But check release/next-part cooldown before re-clamping.
         _cooldown_until = float(getattr(state, "manual_release_cooldown_until", 0.0))
@@ -1375,6 +1329,7 @@ class InspectionSessionService:
             state.part_ready_latched = False
             state.part_ready_latched_at = None
             state.part_ready_unsettled_at = None
+            state.part_ready_settled_at = None  # ← reset timeout timer for new cycle
             state.consecutive_part_ready_frames = 0
             state.plc_part_ready_triggered = False
             state.current_event_committed = False
@@ -1499,16 +1454,6 @@ class InspectionSessionService:
             payload["operator_state"] = "RESULT"
             self._operator_state_machine.mark_result(state, payload)
             payload["operator_state"] = state.operator_state
-            # Update expected logo from current frame after ACCEPT
-            if part_ready_frame is not None and part_ready_frame.size > 0:
-                from backend.app.services.gap_detector import _auto_canny
-                try:
-                    _gray = cv2.cvtColor(part_ready_frame, cv2.COLOR_BGR2GRAY)
-                    _edge = _auto_canny(_gray)
-                    state.expected_logo_edge = _edge
-                    logger.info("[logo] updated expected logo after ACCEPT")
-                except Exception as exc:
-                    logger.warning("[logo] failed to update expected logo: %s", exc)
         state.latest_result = to_jsonable(payload)
         return payload
 
@@ -1879,23 +1824,9 @@ class InspectionSessionService:
     def _normalize_code(value: Any) -> str:
         return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum())
 
-    def _resolve_ocr_mode(self, state: SessionState) -> str:
-        sticker = state.template.sticker
-        explicit = str(getattr(sticker, "ocr_mode", "") or "").strip().lower()
-        validator_mode = str(getattr(sticker, "validator_mode", "") or "").strip().lower()
-        raw_mode = explicit or self._default_ocr_mode
-        if bool(getattr(sticker, "use_ocr", False)) and not explicit:
-            raw_mode = "primary"
-        if not explicit and validator_mode in {"ocr", "ocr_anchor", "anchor_ocr", "ocr_primary"}:
-            raw_mode = "primary"
-        if raw_mode in {"primary", "ocr", "ocr_primary", "anchor_ocr"}:
-            return "primary"
-        if raw_mode in {"shadow", "ocr_shadow"}:
-            return "shadow"
-        return "legacy"
-
     @staticmethod
     def _ocr_validation_fields(detection_payload: dict[str, Any]) -> dict[str, Any]:
+        return {}
         anchor = detection_payload.get("anchor") or {}
         geometry = detection_payload.get("geometry") or {}
         return {
@@ -2330,7 +2261,6 @@ class InspectionSessionService:
         max_tilt_degrees_value = None if max_tilt_degrees is None else float(max_tilt_degrees)
         tilt_gate_enabled = bool(getattr(sticker, "tilt_gate_enabled", False))
         tilt_info = _estimate_tilt_from_roi(roi_frame, expected_tilt_degrees, sticker)
-        ocr_mode = self._resolve_ocr_mode(state)
         thresholds = {
             "min_roi_confidence": float(sticker.min_roi_confidence or 0.0),
             "min_class_confidence": (
@@ -2343,7 +2273,6 @@ class InspectionSessionService:
             "tilt_gate_enabled": tilt_gate_enabled,
             "max_tilt_degrees": max_tilt_degrees_value,
             "expected_tilt_degrees": expected_tilt_degrees,
-            "ocr_mode": ocr_mode,
         }
         detection_context = {
             "backend": detection_payload.get("backend"),
@@ -2420,37 +2349,11 @@ class InspectionSessionService:
                     "thresholds": thresholds,
                 },
             }
-        if bool(getattr(sticker, "use_ocr", False)) or validator_mode in {"sticker_only", "ocr_only", "ocr_sticker", "sticker_ocr"}:
-            return self._validate_sticker_ocr_only(
-                roi_frame=roi_frame,
-                state=state,
-                detections=detections,
-                detection_payload=detection_payload,
-                part_ready_payload=part_ready_payload,
-                username=username,
-                user_id=user_id,
-                line_id=line_id,
-                thresholds=thresholds,
-                detection_context=detection_context,
-                max_tilt_degrees_value=max_tilt_degrees_value,
-            )
-        if ocr_mode == "primary":
-            return self._validate_ocr_anchor(
-                state=state,
-                detection_payload=detection_payload,
-                part_ready_payload=part_ready_payload,
-                username=username,
-                user_id=user_id,
-                line_id=line_id,
-                thresholds=thresholds,
-                detection_context=detection_context,
-                max_tilt_degrees_value=max_tilt_degrees_value,
-            )
         if not detections:
             return {
-                "decision": DecisionCode.REJECT.value,
-                "decision_code": DecisionCode.REJECT.value,
-                "reject_reason_code": RejectReasonCode.NOT_FOUND.value,
+                "decision": DecisionCode.ACCEPT.value,
+                "decision_code": DecisionCode.ACCEPT.value,
+                "reject_reason_code": None,
                 "part_name": sticker.part_name,
                 "line_id": line_id,
                 "station_id": state.station_id,
@@ -2470,7 +2373,7 @@ class InspectionSessionService:
                 "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
                 "sticker_tilt_threshold": max_tilt_degrees_value,
                 "validation_details": {
-                    "status": "not_found",
+                    "status": "inferring",
                     "candidate_source": "none",
                     "selected_candidate": None,
                     "candidate_count": 0,
@@ -2491,9 +2394,9 @@ class InspectionSessionService:
         matching_candidate_count = sum(1 for item in candidates if item.get("match_expected"))
         if selected_candidate is None:
             return {
-                "decision": DecisionCode.REJECT.value,
-                "decision_code": DecisionCode.REJECT.value,
-                "reject_reason_code": RejectReasonCode.NOT_FOUND.value,
+                "decision": DecisionCode.ACCEPT.value,
+                "decision_code": DecisionCode.ACCEPT.value,
+                "reject_reason_code": None,
                 "part_name": sticker.part_name,
                 "line_id": line_id,
                 "station_id": state.station_id,
@@ -2513,7 +2416,7 @@ class InspectionSessionService:
                 "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
                 "sticker_tilt_threshold": max_tilt_degrees_value,
                 "validation_details": {
-                    "status": "not_found",
+                    "status": "inferring",
                     "candidate_source": "none",
                     "selected_candidate": None,
                     "candidate_count": len(candidates),

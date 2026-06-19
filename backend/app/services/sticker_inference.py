@@ -980,31 +980,14 @@ class StickerInferenceService:
                 "class_names": list(vision.classes or []),
                 "detections": [],
                 "anchor": {},
-                "ocr": {"status": "skipped", "engine": self._resolve_ocr_engine(vision)},
+                "ocr": {"status": "disabled", "engine": "disabled"},
                 "geometry": {},
                 "fallback_reason": "empty_roi",
             }
 
-        validator_mode = str(getattr(sticker_rule, "validator_mode", "") or "").strip().lower() if sticker_rule is not None else ""
-        use_sticker_only = bool(getattr(sticker_rule, "use_ocr", False)) or validator_mode in {
-            "sticker_only",
-            "ocr_only",
-            "ocr_sticker",
-            "sticker_ocr",
-        }
-
         mode = self._resolve_mode()
         if mode == "classic":
-            payload = self._predict_classic(image, vision, expected_class)
-            if use_sticker_only:
-                return self._augment_with_ocr_only(
-                    payload, image, vision,
-                    expected_class=expected_class, sticker_rule=sticker_rule,
-                )
-            return self._augment_with_anchor_ocr(
-                payload, image, vision,
-                expected_class=expected_class, sticker_rule=sticker_rule,
-            )
+            return self._predict_classic(image, vision, expected_class)
 
         # Auto-detect TFLite from file extension when mode is "auto"
         if mode == "auto":
@@ -1025,81 +1008,42 @@ class StickerInferenceService:
         # TFLite mode: CPU-only, no GPU device resolution needed
         if mode == "tflite":
             try:
-                payload = self._get_backend("tflite").predict(image, vision, expected_class=expected_class)
-                if use_sticker_only:
-                    return self._augment_with_ocr_only(
-                        payload, image, vision,
-                        expected_class=expected_class, sticker_rule=sticker_rule,
-                    )
-                return self._augment_with_anchor_ocr(
-                    payload, image, vision,
-                    expected_class=expected_class, sticker_rule=sticker_rule,
-                )
+                return self._get_backend("tflite").predict(image, vision, expected_class=expected_class)
             except (FileNotFoundError, ValueError, AttributeError) as exc:
-                raise  # misconfiguration — propagate
+                raise
             except Exception as exc:
                 logging.warning("TFLite inference failed, fallback to classic: %s", exc)
                 payload = self._predict_classic(image, vision, expected_class)
                 payload["fallback_reason"] = f"tflite_error: {exc}"
-                return self._augment_with_anchor_ocr(
-                    payload, image, vision,
-                    expected_class=expected_class, sticker_rule=sticker_rule,
-                )
+                return payload
 
         # ONNX mode: CPU-only via onnxruntime
         if mode == "onnx":
             try:
-                payload = self._get_backend("onnx").predict(image, vision, expected_class=expected_class)
-                if use_sticker_only:
-                    return self._augment_with_ocr_only(
-                        payload, image, vision,
-                        expected_class=expected_class, sticker_rule=sticker_rule,
-                    )
-                return self._augment_with_anchor_ocr(
-                    payload, image, vision,
-                    expected_class=expected_class, sticker_rule=sticker_rule,
-                )
+                return self._get_backend("onnx").predict(image, vision, expected_class=expected_class)
             except (FileNotFoundError, ValueError, AttributeError) as exc:
-                raise  # misconfiguration — propagate
+                raise
             except Exception as exc:
                 logging.warning("ONNX inference failed, fallback to classic: %s", exc)
                 payload = self._predict_classic(image, vision, expected_class)
                 payload["fallback_reason"] = f"onnx_error: {exc}"
-                return self._augment_with_anchor_ocr(
-                    payload, image, vision,
-                    expected_class=expected_class, sticker_rule=sticker_rule,
-                )
+                return payload
 
         # OpenVINO mode: Intel CPU optimized
         if mode == "openvino":
             try:
-                payload = self._get_backend("openvino").predict(image, vision, expected_class=expected_class)
-                if use_sticker_only:
-                    return self._augment_with_ocr_only(payload, image, vision,
-                        expected_class=expected_class, sticker_rule=sticker_rule)
-                return self._augment_with_anchor_ocr(payload, image, vision,
-                    expected_class=expected_class, sticker_rule=sticker_rule)
+                return self._get_backend("openvino").predict(image, vision, expected_class=expected_class)
             except (FileNotFoundError, ValueError, AttributeError) as exc:
-                raise  # misconfiguration — propagate
+                raise
             except Exception as exc:
                 logging.warning("OpenVINO inference failed, fallback to classic: %s", exc)
                 payload = self._predict_classic(image, vision, expected_class)
                 payload["fallback_reason"] = f"openvino_error: {exc}"
-                return self._augment_with_anchor_ocr(payload, image, vision,
-                    expected_class=expected_class, sticker_rule=sticker_rule)
+                return payload
 
         # Ultralytics mode (auto/ultralytics)
         try:
-            payload = self._get_backend("ultralytics").predict(image, vision, expected_class=expected_class)
-            if use_sticker_only:
-                return self._augment_with_ocr_only(
-                    payload, image, vision,
-                    expected_class=expected_class, sticker_rule=sticker_rule,
-                )
-            return self._augment_with_anchor_ocr(
-                payload, image, vision,
-                expected_class=expected_class, sticker_rule=sticker_rule,
-            )
+            return self._get_backend("ultralytics").predict(image, vision, expected_class=expected_class)
         except Exception as exc:
             if mode == "ultralytics":
                 raise
@@ -1112,18 +1056,4 @@ class StickerInferenceService:
             payload["device_backend"] = device_resolution.backend
             payload["device_fallback_reason"] = device_resolution.fallback_reason or str(exc)
             payload["gpu_available"] = device_resolution.gpu_available
-            if use_sticker_only:
-                return self._augment_with_ocr_only(
-                    payload,
-                    image,
-                    vision,
-                    expected_class=expected_class,
-                    sticker_rule=sticker_rule,
-                )
-            return self._augment_with_anchor_ocr(
-                payload,
-                image,
-                vision,
-                expected_class=expected_class,
-                sticker_rule=sticker_rule,
-            )
+            return payload
