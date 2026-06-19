@@ -136,28 +136,27 @@ class TemplatesTab:
         # Sticker-specific fields (shown in sticker mode, hidden in component mode)
         a._sticker_fields_start = 9
         a._entry(wizard, 9, 0, "Expected Class", a.preset_expected_class_var, columnspan=3)
-        a._entry(wizard, 10, 0, "Sticker Code", a.preset_expected_code_var, columnspan=3)
 
-        a._entry(wizard, 11, 0, "Max Tilt Degrees", a.preset_max_tilt_var, columnspan=2)
+        a._entry(wizard, 10, 0, "Max Tilt Degrees", a.preset_max_tilt_var, columnspan=2)
         ttk.Checkbutton(wizard, text="Aktifkan cek miring", variable=a.preset_tilt_gate_var).grid(
-            row=11, column=2, sticky="w", padx=(0, 12), pady=5,
+            row=10, column=2, sticky="w", padx=(0, 12), pady=5,
         )
 
-        a._entry(wizard, 12, 0, "Gap Threshold (0-1)", a.preset_gap_threshold_var, columnspan=2)
+        a._entry(wizard, 11, 0, "Gap Threshold (0-1)", a.preset_gap_threshold_var, columnspan=2)
 
         # Reference patch buttons
         ref_btn_row = ttk.Frame(wizard)
-        ref_btn_row.grid(row=13, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 4))
+        ref_btn_row.grid(row=12, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 4))
         ttk.Button(ref_btn_row, text="Capture Reference", command=a._capture_part_ready_ref).pack(side="left", padx=(0, 6))
         ttk.Button(ref_btn_row, text="Upload Reference", command=a._upload_part_ready_ref).pack(side="left")
         a.gap_ref_status_label = ttk.Label(wizard, text="Referensi: belum dikonfigurasi", foreground="gray")
-        a.gap_ref_status_label.grid(row=14, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 6))
+        a.gap_ref_status_label.grid(row=13, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 6))
 
         ttk.Label(wizard, text="Rotation\\xB0\\n(0/90/180/270)", foreground="gray").grid(
-            row=12, column=2, sticky="w", padx=(12, 4), pady=5,
+            row=11, column=2, sticky="w", padx=(12, 4), pady=5,
         )
         rot_entry = ttk.Entry(wizard, textvariable=a.preset_camera_rotation_var, width=8)
-        rot_entry.grid(row=12, column=3, sticky="w", padx=(0, 12), pady=5)
+        rot_entry.grid(row=11, column=3, sticky="w", padx=(0, 12), pady=5)
 
         # Visual ROI picker
         self._build_roi_picker(a, wizard)
