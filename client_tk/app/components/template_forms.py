@@ -737,10 +737,6 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.model_inference_fps_var.set(str(vision.get("inference_fps", 4)))
         self.model_imgsz_var.set(str(vision.get("imgsz", 640)))
         self.model_classes_var.set(",".join(str(item) for item in (vision.get("classes") or [])))
-        self.ocr_engine_var.set(str(vision.get("ocr_engine") or "default"))
-        self.ocr_language_var.set(str(vision.get("ocr_language") or "eng"))
-        self.ocr_psm_var.set(str(vision.get("ocr_psm", 7)))
-        self.ocr_allowlist_var.set(str(vision.get("ocr_allowlist") or ""))
         self.text_anchor_class_var.set(str(vision.get("text_anchor_class") or "text_anchor"))
         self.center_dot_class_var.set(str(vision.get("center_dot_class") or "center_dot"))
         self.anchor_crop_padding_var.set(str(vision.get("anchor_crop_padding_ratio", 0.08)))
@@ -757,19 +753,6 @@ class TemplateEditorForm(ctk.CTkFrame):
         self.sticker_max_offset_y_var.set("" if sticker.get("max_offset_y") is None else str(sticker.get("max_offset_y")))
         self.sticker_expected_center_x_var.set("" if sticker.get("expected_center_x") is None else str(sticker.get("expected_center_x")))
         self.sticker_expected_center_y_var.set("" if sticker.get("expected_center_y") is None else str(sticker.get("expected_center_y")))
-        self.sticker_use_ocr_var.set(bool(sticker.get("use_ocr", False)))
-        self.sticker_ocr_expected_code_var.set(str(sticker.get("ocr_expected_code") or ""))
-        self.sticker_ocr_flip_fallback_var.set(bool(sticker.get("ocr_flip_fallback", True)))
-        self.sticker_ocr_mode_var.set(str(sticker.get("ocr_mode") or ""))
-        self.sticker_ocr_expected_text_var.set(str(sticker.get("ocr_expected_text") or ""))
-        self.sticker_ocr_min_conf_var.set("" if sticker.get("ocr_min_confidence") is None else str(sticker.get("ocr_min_confidence")))
-        self.sticker_ocr_regex_var.set(str(sticker.get("ocr_regex") or ""))
-        self.sticker_expected_dot_x_var.set("" if sticker.get("expected_dot_x") is None else str(sticker.get("expected_dot_x")))
-        self.sticker_expected_dot_y_var.set("" if sticker.get("expected_dot_y") is None else str(sticker.get("expected_dot_y")))
-        self.sticker_max_anchor_offset_x_var.set("" if sticker.get("max_anchor_offset_x") is None else str(sticker.get("max_anchor_offset_x")))
-        self.sticker_max_anchor_offset_y_var.set("" if sticker.get("max_anchor_offset_y") is None else str(sticker.get("max_anchor_offset_y")))
-        self.sticker_anchor_min_conf_var.set("" if sticker.get("anchor_min_confidence") is None else str(sticker.get("anchor_min_confidence")))
-        self.sticker_dot_min_conf_var.set("" if sticker.get("dot_min_confidence") is None else str(sticker.get("dot_min_confidence")))
         self.sticker_commit_stable_frames_var.set(str(sticker.get("commit_stable_frames") or "5"))
         _settle = sticker.get("part_ready_settle_ms")
         self.sticker_settle_ms_var.set("" if _settle is None else str(_settle))
@@ -831,13 +814,6 @@ class TemplateEditorForm(ctk.CTkFrame):
                 "inference_fps": _float_or_none(self.model_inference_fps_var.get()) or 4.0,
                 "imgsz": _int_or_none(self.model_imgsz_var.get()) or 640,
                 "classes": classes,
-                "enable_ergonomic_check": False,
-                "ergonomic_pose_model_path": None,
-                "ergonomic_min_keypoint_conf": 0.35,
-                "ocr_engine": self.ocr_engine_var.get().strip() or "default",
-                "ocr_language": self.ocr_language_var.get().strip() or "eng",
-                "ocr_psm": _int_or_none(self.ocr_psm_var.get()) or 7,
-                "ocr_allowlist": self.ocr_allowlist_var.get().strip(),
                 "text_anchor_class": self.text_anchor_class_var.get().strip() or "text_anchor",
                 "center_dot_class": self.center_dot_class_var.get().strip() or "center_dot",
                 "anchor_crop_padding_ratio": _float_or_none(self.anchor_crop_padding_var.get()) if _float_or_none(self.anchor_crop_padding_var.get()) is not None else 0.08,
@@ -861,15 +837,7 @@ class TemplateEditorForm(ctk.CTkFrame):
                 "max_offset_y": _float_or_none(self.sticker_max_offset_y_var.get()),
                 "expected_center_x": _float_or_none(self.sticker_expected_center_x_var.get()),
                 "expected_center_y": _float_or_none(self.sticker_expected_center_y_var.get()),
-                "use_ocr": bool(self.sticker_use_ocr_var.get()),
-                "ocr_expected_code": self.sticker_ocr_expected_code_var.get().strip(),
-                "ocr_flip_fallback": bool(self.sticker_ocr_flip_fallback_var.get()),
-                "ocr_mode": self.sticker_ocr_mode_var.get().strip() or None,
-                "ocr_expected_text": self.sticker_ocr_expected_text_var.get().strip() or None,
-                "ocr_min_confidence": _float_or_none(self.sticker_ocr_min_conf_var.get()),
-                "ocr_regex": self.sticker_ocr_regex_var.get().strip() or None,
-                "ocr_canonical_map": {},
-                "anchor_min_confidence": _float_or_none(self.sticker_anchor_min_conf_var.get()),
+                "part_ready_settle_ms": _int_or_none(self.sticker_settle_ms_var.get()),
                 "dot_min_confidence": _float_or_none(self.sticker_dot_min_conf_var.get()),
                 "expected_dot_x": _float_or_none(self.sticker_expected_dot_x_var.get()),
                 "expected_dot_y": _float_or_none(self.sticker_expected_dot_y_var.get()),
@@ -905,10 +873,6 @@ class TemplateEditorForm(ctk.CTkFrame):
                     "inference_fps": 4,
                     "imgsz": 640,
                     "classes": [],
-                    "ocr_engine": "default",
-                    "ocr_language": "eng",
-                    "ocr_psm": 7,
-                    "ocr_allowlist": "",
                     "text_anchor_class": "text_anchor",
                     "center_dot_class": "center_dot",
                     "anchor_crop_padding_ratio": 0.08,
@@ -930,20 +894,6 @@ class TemplateEditorForm(ctk.CTkFrame):
                     "min_class_confidence": None,
                     "max_offset_x": 80,
                     "max_offset_y": 80,
-                    "use_ocr": False,
-                    "ocr_expected_code": "",
-                    "ocr_flip_fallback": True,
-                    "ocr_mode": None,
-                    "ocr_expected_text": None,
-                    "ocr_min_confidence": None,
-                    "ocr_regex": None,
-                    "ocr_canonical_map": {},
-                    "anchor_min_confidence": None,
-                    "dot_min_confidence": None,
-                    "expected_dot_x": None,
-                    "expected_dot_y": None,
-                    "max_anchor_offset_x": None,
-                    "max_anchor_offset_y": None,
                     "part_ready_settle_ms": None,
                     "tilt_gate_enabled": False,
                     "expected_tilt_degrees": 0.0,
