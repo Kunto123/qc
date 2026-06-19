@@ -2067,6 +2067,16 @@ class InspectionSessionService:
             reject_reason = RejectReasonCode.OUT_OF_POSITION.value
         elif offset_limit_y is not None and abs(offset_y) > float(offset_limit_y):
             reject_reason = RejectReasonCode.OUT_OF_POSITION.value
+
+        # Only allow hard reject reasons; suppress all others
+        _hard_rejects = {
+            RejectReasonCode.WRONG_TYPE.value,
+            RejectReasonCode.OUT_OF_ANGLE.value,
+            RejectReasonCode.COMMIT_TIMEOUT.value,
+        }
+        if reject_reason is not None and reject_reason not in _hard_rejects:
+            reject_reason = None
+
         decision = DecisionCode.ACCEPT.value if reject_reason is None else DecisionCode.REJECT.value
         status = "accepted" if reject_reason is None else reject_reason.lower()
         bbox = dict((selected_candidate or {}).get("bbox") or {}) or None
@@ -2283,76 +2293,78 @@ class InspectionSessionService:
                     "thresholds": thresholds,
                 },
             }
-        if not part_ready_payload.get("part_ready", False):
-            return {
-                "decision": DecisionCode.REJECT.value,
-                "decision_code": DecisionCode.REJECT.value,
-                "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
-                "part_name": sticker.part_name,
-                "line_id": line_id,
-                "station_id": state.station_id,
-                # Contract: data1 = part_ready confidence, data2 = sticker confidence
-                "data1": part_ready_payload.get("part_ready_confidence"),
-                "data2": None,
-                "targets": [],
-                "operator_user_id": user_id,
-                "mp_check": username,
-                "detected_class": None,
-                "expected_class": sticker.expected_class,
-                "sticker_confidence": None,
-                "sticker_bbox": None,
-                "sticker_backend": detection_context["backend"],
-                "sticker_tilt_angle": tilt_info.get("angle_degrees"),
-                "sticker_tilt_expected": tilt_info.get("expected_tilt_degrees"),
-                "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
-                "sticker_tilt_threshold": max_tilt_degrees_value,
-                "validation_details": {
-                    "status": "part_not_ready",
-                    "candidate_source": "none",
-                    "selected_candidate": None,
-                    "candidate_count": len(detections),
-                    "matching_candidate_count": 0,
-                    "expected_center": None,
-                    "tilt": tilt_info,
-                    "thresholds": thresholds,
-                },
-            }
-        if not detections:
-            return {
-                # No sticker detected yet → NOT a final result. Keep inferring
-                # (non-hard reject → pending in commit gate) instead of ACCEPT.
-                "decision": DecisionCode.REJECT.value,
-                "decision_code": DecisionCode.REJECT.value,
-                "reject_reason_code": RejectReasonCode.NOT_FOUND.value,
-                "part_name": sticker.part_name,
-                "line_id": line_id,
-                "station_id": state.station_id,
-                # Contract: data1 = part_ready confidence, data2 = sticker confidence
-                "data1": part_ready_payload.get("part_ready_confidence"),
-                "data2": None,
-                "targets": [],
-                "operator_user_id": user_id,
-                "mp_check": username,
-                "detected_class": None,
-                "expected_class": sticker.expected_class,
-                "sticker_confidence": None,
-                "sticker_bbox": None,
-                "sticker_backend": detection_context["backend"],
-                "sticker_tilt_angle": tilt_info.get("angle_degrees"),
-                "sticker_tilt_expected": tilt_info.get("expected_tilt_degrees"),
-                "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
-                "sticker_tilt_threshold": max_tilt_degrees_value,
-                "validation_details": {
-                    "status": "inferring",
-                    "candidate_source": "none",
-                    "selected_candidate": None,
-                    "candidate_count": 0,
-                    "matching_candidate_count": 0,
-                    "expected_center": None,
-                    "tilt": tilt_info,
-                    "thresholds": thresholds,
-                },
-            }
+#         if not part_ready_payload.get("part_ready", False):
+#             return {
+#                 "decision": DecisionCode.REJECT.value,
+#                 "decision_code": DecisionCode.REJECT.value,
+#                 "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
+#                 "part_name": sticker.part_name,
+#                 "line_id": line_id,
+#                 "station_id": state.station_id,
+#                 # Contract: data1 = part_ready confidence, data2 = sticker confidence
+#                 "data1": part_ready_payload.get("part_ready_confidence"),
+#                 "data2": None,
+#                 "targets": [],
+#                 "operator_user_id": user_id,
+#                 "mp_check": username,
+#                 "detected_class": None,
+#                 "expected_class": sticker.expected_class,
+#                 "sticker_confidence": None,
+#                 "sticker_bbox": None,
+#                 "sticker_backend": detection_context["backend"],
+#                 "sticker_tilt_angle": tilt_info.get("angle_degrees"),
+#                 "sticker_tilt_expected": tilt_info.get("expected_tilt_degrees"),
+#                 "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
+#                 "sticker_tilt_threshold": max_tilt_degrees_value,
+#                 "validation_details": {
+#                     "status": "part_not_ready",
+#                     "candidate_source": "none",
+#                     "selected_candidate": None,
+#                     "candidate_count": len(detections),
+#                     "matching_candidate_count": 0,
+#                     "expected_center": None,
+#                     "tilt": tilt_info,
+#                     "thresholds": thresholds,
+#                 },
+#             }
+        # NOTE: Do NOT return early on no detections — let flow continue to
+        # _validate_sticker which handles selected_candidate=None as NOT_FOUND,
+        # and the commit gate will keep it as pending (never auto-commit).
+        # Returning here bypasses the commit gate and causes immediate REJECT.
+        #
+        # if not detections:
+        #     return {
+        #         "decision": DecisionCode.REJECT.value,
+        #         "decision_code": DecisionCode.REJECT.value,
+        #         "reject_reason_code": RejectReasonCode.NOT_FOUND.value,
+        #         "part_name": sticker.part_name,
+        #         "line_id": line_id,
+        #         "station_id": state.station_id,
+        #         "data1": part_ready_payload.get("part_ready_confidence"),
+        #         "data2": None,
+        #         "targets": [],
+        #         "operator_user_id": user_id,
+        #         "mp_check": username,
+        #         "detected_class": None,
+        #         "expected_class": sticker.expected_class,
+        #         "sticker_confidence": None,
+        #         "sticker_bbox": None,
+        #         "sticker_backend": detection_context["backend"],
+        #         "sticker_tilt_angle": tilt_info.get("angle_degrees"),
+        #         "sticker_tilt_expected": tilt_info.get("expected_tilt_degrees"),
+        #         "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
+        #         "sticker_tilt_threshold": max_tilt_degrees_value,
+        #         "validation_details": {
+        #             "status": "inferring",
+        #             "candidate_source": "none",
+        #             "selected_candidate": None,
+        #             "candidate_count": 0,
+        #             "matching_candidate_count": 0,
+        #             "expected_center": None,
+        #             "tilt": tilt_info,
+        #             "thresholds": thresholds,
+        #         },
+        #     }
 
         candidates, expected_center = self._build_validation_candidate_summaries(
             detections,
