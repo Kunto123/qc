@@ -36,10 +36,6 @@ class VisionConfig:
     enable_ergonomic_check: bool = False
     ergonomic_pose_model_path: str | None = None
     ergonomic_min_keypoint_conf: float = 0.35
-    ocr_engine: str = "default"
-    ocr_language: str = "eng"
-    ocr_psm: int = 7
-    ocr_allowlist: str = ""
     text_anchor_class: str = "text_anchor"
     center_dot_class: str = "center_dot"
     anchor_crop_padding_ratio: float = 0.08
@@ -95,20 +91,6 @@ class StickerRule:
     expected_center_y: float | None = None
     expected_tilt_degrees: float = 0.0
     max_tilt_degrees: float | None = None
-    use_ocr: bool = False
-    ocr_expected_code: str = ""
-    ocr_flip_fallback: bool = True
-    ocr_mode: str | None = None
-    ocr_expected_text: str | None = None
-    ocr_min_confidence: float | None = None
-    ocr_regex: str | None = None
-    ocr_canonical_map: dict[str, str] = field(default_factory=dict)
-    anchor_min_confidence: float | None = None
-    dot_min_confidence: float | None = None
-    expected_dot_x: float | None = None
-    expected_dot_y: float | None = None
-    max_anchor_offset_x: float | None = None
-    max_anchor_offset_y: float | None = None
     tilt_gate_enabled: bool = False
     edge_roi_tolerance_px: int = 10
     edge_search_padding_ratio: float = 0.10
@@ -192,11 +174,8 @@ def _pick_roi_payload(payload: dict[str, Any], *keys: str) -> dict[str, Any]:
 _VALID_STICKER_FIELDS = {
     "part_name", "expected_class", "enabled", "validator_mode", "min_roi_confidence",
     "min_class_confidence", "max_offset_x", "max_offset_y", "expected_center_x",
-    "expected_center_y", "expected_tilt_degrees", "max_tilt_degrees", "use_ocr",
-    "ocr_expected_code", "ocr_flip_fallback", "ocr_mode", "ocr_expected_text",
-    "ocr_min_confidence", "ocr_regex", "ocr_canonical_map", "anchor_min_confidence",
-    "dot_min_confidence", "expected_dot_x", "expected_dot_y", "max_anchor_offset_x",
-    "max_anchor_offset_y", "tilt_gate_enabled", "edge_roi_tolerance_px",
+    "expected_center_y", "expected_tilt_degrees", "max_tilt_degrees",
+    "tilt_gate_enabled", "edge_roi_tolerance_px",
     "edge_search_padding_ratio", "morph_kernel_width", "morph_kernel_height",
     "min_text_aspect_ratio", "commit_stable_frames", "part_ready_settle_ms",
     "part_ready_settle_frames", "white_hsv_lower", "white_hsv_upper",
@@ -248,6 +227,8 @@ def template_from_dict(payload: dict[str, Any]) -> InspectionTemplate:
     part_ready_roi_payload = {k: v for k, v in part_ready_roi_payload.items() if k in _ROI_ALLOWED}
     sticker_roi_payload = {k: v for k, v in sticker_roi_payload.items() if k in _ROI_ALLOWED}
     _sticker_raw = dict(payload.get("sticker") or {})
+    _vision_raw = payload.get("vision") or {}
+    _vision_filtered = {k: v for k, v in _vision_raw.items() if k in VisionConfig.__slots__}
     _sticker_filtered = {k: v for k, v in _sticker_raw.items() if k in _VALID_STICKER_FIELDS}
     return InspectionTemplate(
         id=payload.get("id"),
@@ -259,7 +240,7 @@ def template_from_dict(payload: dict[str, Any]) -> InspectionTemplate:
         camera=CameraDefaults(**(payload.get("camera") or {})),
         part_ready_roi=RoiGeometry(**part_ready_roi_payload),
         sticker_roi=RoiGeometry(**sticker_roi_payload),
-        vision=VisionConfig(**(payload.get("vision") or {})),
+        vision=VisionConfig(**_vision_filtered),
         part_ready=PartReadyConfig(**(payload.get("part_ready") or {})),
         sticker=StickerRule(**_sticker_filtered),
         persistence=PersistenceConfig(**(payload.get("persistence") or {})),

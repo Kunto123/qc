@@ -39,11 +39,6 @@ class AppConfig:
     postgresql_schema: str = os.getenv("POSTGRESQL_SCHEMA", "public").strip() or "public"
     postgresql_sslmode: str = os.getenv("POSTGRESQL_SSLMODE", "prefer").strip().lower() or "prefer"
     sticker_inference_mode: str = os.getenv("QC_SUITE_STICKER_INFERENCE_MODE", "auto").strip().lower() or "auto"
-    sticker_ocr_mode: str = os.getenv("QC_SUITE_STICKER_OCR_MODE", "legacy").strip().lower() or "legacy"
-    sticker_ocr_required: bool = os.getenv("QC_SUITE_STICKER_OCR_REQUIRED", "0").strip() == "1"
-    sticker_ocr_fail_fast: bool = os.getenv("QC_SUITE_STICKER_OCR_FAIL_FAST", "0").strip() == "1"
-    default_ocr_engine: str = os.getenv("QC_SUITE_OCR_ENGINE", "disabled").strip().lower() or "disabled"
-    default_ocr_min_confidence: float = max(0.0, min(1.0, float(os.getenv("QC_SUITE_OCR_MIN_CONFIDENCE", "0.70"))))
     default_sticker_model_path: str = DEFAULT_STICKER_MODEL_PATH
     training_engine_mode: str = os.getenv("QC_SUITE_TRAINING_ENGINE_MODE", "real").strip().lower() or "real"
     training_timeout_minutes: int = max(1, int(os.getenv("QC_SUITE_TRAINING_TIMEOUT_MINUTES", "30")))

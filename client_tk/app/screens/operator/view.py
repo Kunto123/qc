@@ -150,7 +150,6 @@ class OperatorScreen(ctk.CTkFrame):
         self.action_buttons = [
             ctk.CTkButton(self.action_bar, text="Start", command=self._start_production, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
             ctk.CTkButton(self.action_bar, text="Stop", command=self._stop_production, fg_color="#7f1d1d", hover_color="#991b1b", text_color="#fef2f2"),
-            ctk.CTkButton(self.action_bar, text="Release", command=self._manual_release, fg_color="#b45309", hover_color="#92400e", text_color="#fffbeb"),
         ]
 
         self.template_box = ctk.CTkFrame(self.top_bar, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
@@ -1548,38 +1547,8 @@ class OperatorScreen(ctk.CTkFrame):
         self.display_source.set("Right View: Live Camera + ROIs")
         self._update_status_badges()
 
-    def _start_production(self) -> None:
-        if not self.template_version_value.get().strip():
-            self._auto_start_first_template()
-        if self.capture.get_latest_frame() is None and not self._start_camera():
-            return
-        if self.state.active_session:
-            self.info_var.set("Production inspection is already running.")
-            return
-        self._start_session()
-
-    def _stop_production(self) -> None:
-        if self.state.active_session:
-            self._stop_session()
-        self._stop_camera()
-
-    def _manual_release(self) -> None:
-        """Neutral release: unclamp current part + reset cycle without committing."""
-        session = self.state.active_session or {}
-        session_id = session.get("session_id")
-        if not session_id:
-            self.info_var.set("Tidak ada sesi aktif untuk di-release.")
-            return
-        try:
-            self.api.manual_release(session_id)
-            self.info_var.set("Part di-release (netral, tanpa commit).")
-        except Exception as exc:  # noqa: BLE001
-            self.info_var.set(OperatorScreen._friendly_error(exc, "Gagal release part"))
-
     def _start_session(self) -> None:
-        if self.capture.get_latest_frame() is None:
-            messagebox.showwarning("Session", "Start camera dan tunggu frame pertama dulu.")
-            return
+        """Start a new inspection session (assumes camera is ready and template is selected)."""
         template_version_id = int(self.template_version_value.get() or 0)
         if not template_version_id:
             messagebox.showerror("Session", "Template version wajib diisi.")
@@ -1590,7 +1559,6 @@ class OperatorScreen(ctk.CTkFrame):
         except ValueError as exc:
             messagebox.showerror("Session", str(exc))
             return
-        # Use camera_rotation_value which is synced from template detail
         _rot = float(self.camera_rotation_value.get() or 0)
         payload = self.api.create_session(
             {
@@ -1612,7 +1580,6 @@ class OperatorScreen(ctk.CTkFrame):
         self.state.cache["sticker_detection"] = None
         self.state.cache["last_committed_result"] = None
         self._auth_error_notified = False
-        # Set camera status callback for auto-reconnect display
         self.capture.set_status_callback(self._on_camera_status)
         with self._lock:
             self._latest_payload = None
@@ -1625,15 +1592,11 @@ class OperatorScreen(ctk.CTkFrame):
         for _lbl in self.breakdown_labels.values():
             _lbl.configure(text="0")
         self.recent_list.delete(0, "end")
-        # Live view: langsung tampilkan frame dari camera (tanpa upload)
-        # Inference: jalan di background thread setiap 200ms
         _current_frame = self.capture.get_latest_frame()
         if _current_frame is not None:
             self._show_cached_overlay_or_frame(_current_frame)
         else:
             self.main_view.reset()
-
-        # Start inference thread (setiap 200ms)
         self._inference_running = True
         self._inference_thread = threading.Thread(
             target=self._inference_loop,
@@ -1642,7 +1605,6 @@ class OperatorScreen(ctk.CTkFrame):
             daemon=True,
         )
         self._inference_thread.start()
-
         upload_interval_ms = self._resolve_upload_interval_ms()
         infer_fps_actual = round(1000.0 / upload_interval_ms, 1)
         preview_fps_actual = round(1000.0 / self._preview_interval_ms, 1)
@@ -1650,6 +1612,20 @@ class OperatorScreen(ctk.CTkFrame):
             f"Session running: {payload['session_id']} "
             f"(inference @ {upload_interval_ms}ms / {infer_fps_actual} fps | preview @ {preview_fps_actual} fps)"
         )
+        self._refresh_context_summary()
+        self._update_status_badges()
+
+    def _start_production(self) -> None:
+        if not self.template_version_value.get().strip():
+            self._auto_start_first_template()
+        if self.capture.get_latest_frame() is None and not self._start_camera():
+            return
+        if self.state.active_session:
+            self.info_var.set("Production inspection is already running.")
+            return
+        self._start_session()
+
+    def _stop_production(self) -> None:
         self._refresh_context_summary()
         self._update_status_badges()
 

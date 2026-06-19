@@ -52,10 +52,8 @@ class ResultPanel(ctk.CTkFrame):
         self.sticker_backend_var = self._build_field(self.sticker_frame, 3, "Backend")
         self.candidate_source_var = self._build_field(self.sticker_frame, 4, "Candidate Source")
         self.offset_var = self._build_field(self.sticker_frame, 5, "Offset")
-        self.ocr_text_var = self._build_field(self.sticker_frame, 6, "OCR Text")
-        self.ocr_confidence_var = self._build_field(self.sticker_frame, 7, "OCR Confidence")
-        self.anchor_offset_var = self._build_field(self.sticker_frame, 8, "Anchor Offset")
-        self.pose_angle_var = self._build_field(self.sticker_frame, 9, "Pose Angle")
+        self.anchor_offset_var = self._build_field(self.sticker_frame, 6, "Anchor Offset")
+        self.pose_angle_var = self._build_field(self.sticker_frame, 7, "Pose Angle")
 
         self.component_frame = self._build_section("Component Count")
         self.comp_mode_var = self._build_field(self.component_frame, 0, "Mode")
@@ -267,16 +265,6 @@ class ResultPanel(ctk.CTkFrame):
                 f"x={_format_metric(anchor_offset.get('x'), precision=2)}, "
                 f"y={_format_metric(anchor_offset.get('y'), precision=2)}"
             )
-        ocr_payload = display_details.get("ocr") or {}
-        ocr_text = display_validation.get("ocr_text") or ocr_payload.get("canonical_text") or ocr_payload.get("text")
-        ocr_confidence = display_validation.get("ocr_confidence")
-        if ocr_confidence is None:
-            ocr_confidence = ocr_payload.get("confidence")
-        ocr_payload = display_details.get("ocr") or {}
-        ocr_text = display_validation.get("ocr_text") or ocr_payload.get("canonical_text") or ocr_payload.get("text")
-        ocr_confidence = display_validation.get("ocr_confidence")
-        if ocr_confidence is None:
-            ocr_confidence = ocr_payload.get("confidence")
         pose_angle = display_validation.get("pose_angle")
         if pose_angle is None:
             pose_angle = (display_details.get("geometry") or {}).get("pose_angle")
@@ -291,8 +279,6 @@ class ResultPanel(ctk.CTkFrame):
         self.sticker_backend_var.configure(text=str(backend))
         self.candidate_source_var.configure(text=str(display_details.get("candidate_source") or "-"))
         self.offset_var.configure(text=offset_text)
-        self.ocr_text_var.configure(text=str(ocr_text or "-"))
-        self.ocr_confidence_var.configure(text=_format_metric(ocr_confidence, precision=4))
         self.anchor_offset_var.configure(text=anchor_offset_text)
         self.pose_angle_var.configure(text="-" if pose_angle is None else f"{_format_metric(pose_angle, precision=2)} deg")
 
@@ -351,8 +337,6 @@ class ResultPanel(ctk.CTkFrame):
             self.sticker_backend_var,
             self.candidate_source_var,
             self.offset_var,
-            self.ocr_text_var,
-            self.ocr_confidence_var,
             self.anchor_offset_var,
             self.pose_angle_var,
             self.raw_detection_count_var,
