@@ -151,6 +151,11 @@ class InspectionSessionService:
             if app_config is not None
             else False
         )
+        self._inference_cache_grace_ms: int = (
+            max(0, int(app_config.inference_cache_grace_ms))
+            if app_config is not None
+            else 300
+        )
         self._plc_clamp_feedback_timeout_ms = (
             max(0, int(getattr(app_config, "plc_clamp_feedback_timeout_ms", 1500)))
             if app_config is not None
@@ -1060,8 +1065,45 @@ class InspectionSessionService:
                     "gpu_available": inference_payload.get("gpu_available"),
                 }
             )
+            # Cache valid inference result for hand-obstruction handling
+            _detected_cls = sticker_detection.get("detected_class")
+            if _detected_cls and not sticker_detection.get("skipped", False):
+                state.last_valid_inference = {
+                    "detected_class": _detected_cls,
+                    "confidence": sticker_detection.get("confidence"),
+                    "bbox": sticker_detection.get("bbox"),
+                    "inference_payload": inference_payload,
+                    "sticker_detection": sticker_detection,
+                }
+                state.last_valid_inference_ts = monotonic()
         else:
-            _skip_reason = (
+            # Part not ready — check if we have a fresh cached inference result
+            # (e.g., hand obstructing during commit wait). Use it if within grace window.
+            _cache_age_ms = (monotonic() - state.last_valid_inference_ts) * 1000.0 if state.last_valid_inference_ts > 0 else float("inf")
+            if state.last_valid_inference is not None and _cache_age_ms < self._inference_cache_grace_ms:
+                logger.debug(
+                    "[inference] using cached result (age=%.0fms, class=%s) due to part_ready drop",
+                    _cache_age_ms, state.last_valid_inference.get("detected_class"),
+                )
+                _cached_inf = state.last_valid_inference
+                sticker_detection = self._build_sticker_detection_payload(
+                    _cached_inf["inference_payload"].get("detections") or [],
+                    skipped=False,
+                    backend=str(_cached_inf["inference_payload"].get("backend") or "cached"),
+                    model_path=_cached_inf["inference_payload"].get("model_path"),
+                    meta_path=_cached_inf["inference_payload"].get("meta_path"),
+                    class_names=_cached_inf["inference_payload"].get("class_names") or [],
+                    fallback_reason=_cached_inf["inference_payload"].get("fallback_reason"),
+                    raw_detection_count=_cached_inf["inference_payload"].get("raw_detection_count"),
+                    allowed_labels_filter=_cached_inf["inference_payload"].get("allowed_labels_filter"),
+                    anchor=_cached_inf["inference_payload"].get("anchor"),
+                    ocr=_cached_inf["inference_payload"].get("ocr"),
+                    geometry=_cached_inf["inference_payload"].get("geometry"),
+                )
+                sticker_detection["from_cache"] = True
+                sticker_detection["cache_age_ms"] = round(_cache_age_ms, 1)
+            else:
+                _skip_reason = (
                 "part_ready_settling"
                 if _raw_part_ready and not part_ready_settled
                 else str(clamp_payload.get("status") or "clamping")
