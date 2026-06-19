@@ -2340,9 +2340,11 @@ class InspectionSessionService:
             }
         if not detections:
             return {
-                "decision": DecisionCode.ACCEPT.value,
-                "decision_code": DecisionCode.ACCEPT.value,
-                "reject_reason_code": None,
+                # No sticker detected yet → NOT a final result. Keep inferring
+                # (non-hard reject → pending in commit gate) instead of ACCEPT.
+                "decision": DecisionCode.REJECT.value,
+                "decision_code": DecisionCode.REJECT.value,
+                "reject_reason_code": RejectReasonCode.NOT_FOUND.value,
                 "part_name": sticker.part_name,
                 "line_id": line_id,
                 "station_id": state.station_id,
@@ -2383,9 +2385,11 @@ class InspectionSessionService:
         matching_candidate_count = sum(1 for item in candidates if item.get("match_expected"))
         if selected_candidate is None:
             return {
-                "decision": DecisionCode.ACCEPT.value,
-                "decision_code": DecisionCode.ACCEPT.value,
-                "reject_reason_code": None,
+                # Detections exist but none usable → not a final result.
+                # Keep inferring (non-hard reject → pending) instead of ACCEPT.
+                "decision": DecisionCode.REJECT.value,
+                "decision_code": DecisionCode.REJECT.value,
+                "reject_reason_code": RejectReasonCode.NOT_FOUND.value,
                 "part_name": sticker.part_name,
                 "line_id": line_id,
                 "station_id": state.station_id,
