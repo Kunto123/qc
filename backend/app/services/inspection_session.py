@@ -1186,7 +1186,13 @@ class InspectionSessionService:
         if _is_accept:                           # real detection came back
             state.policy_holdover_expires_at = None  # cancel holdover on re-detection
 
-        if _policy_key == state.last_policy_key:
+        if _is_non_hard_reject:
+            # Non-hard reject is pure noise — do NOT touch any stability counters.
+            # We must not increment policy_stable_frames (would falsely accumulate
+            # toward hard_reject_stable_frames threshold) and must not reset
+            # last_policy_key (would break an existing accept streak).
+            pass
+        elif _policy_key == state.last_policy_key:
             state.policy_stable_frames += 1
         elif _in_holdover:
             # During holdover: don't reset counters, treat gap as noise
@@ -1202,7 +1208,12 @@ class InspectionSessionService:
         # inference result has actually changed (generation counter advanced).
         # This prevents the same cached result from being counted as multiple
         # stable frames on slow PCs where inference takes >500ms.
-        if _effective_is_accept:
+        if _is_non_hard_reject:
+            # Non-hard reject is pure noise — do NOT touch any accept counters.
+            # The system must keep inferring; non-hard reject should not break an
+            # existing accept streak.
+            pass
+        elif _effective_is_accept:
             if state.inference_result_generation > state.inference_last_counted_generation:
                 # New inference result since last counted — record it
                 state.inference_last_counted_generation = state.inference_result_generation
@@ -1225,7 +1236,8 @@ class InspectionSessionService:
                     state.inference_accept_first_ts = _now_s
             # else: same generation — don't double-count
         else:
-            # Not an accept — reset generation-based counters
+            # Known hard-reject reason (not non-hard, not accept) — reset counters
+            # This breaks an existing accept streak (hard reject blocks commit).
             state.inference_accept_count = 0
             state.inference_accept_first_ts = 0.0
             state.inference_last_counted_generation = -1
@@ -1237,6 +1249,10 @@ class InspectionSessionService:
         if _effective_is_accept:
             if state.accept_cycle_started_at is None:
                 state.accept_cycle_started_at = _now_policy
+        elif _is_non_hard_reject:
+            # Non-hard reject is pure noise — do NOT reset cycle timer.
+            # The grace period must keep running from the last real ACCEPT.
+            pass
         elif not _is_accept and not _in_holdover:
             # True non-accept (holdover fully expired) — reset cycle timer
             state.accept_cycle_started_at = None
