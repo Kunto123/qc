@@ -2606,7 +2606,13 @@ class InspectionSessionService:
         if commit_ready:
             # Check consecutive reject threshold
             decision = str(validation.get("decision") or "").strip().upper()
-            if decision == DecisionCode.REJECT.value and self._max_consecutive_rejects > 0:
+            reject_reason = str(validation.get("reject_reason_code") or "").strip().upper()
+            is_timeout_reject = reject_reason == RejectReasonCode.COMMIT_TIMEOUT.value
+            if (
+                decision == DecisionCode.REJECT.value
+                and self._max_consecutive_rejects > 0
+                and not is_timeout_reject
+            ):
                 # Increment consecutive reject counter
                 state.consecutive_reject_count = int(getattr(state, "consecutive_reject_count", 0)) + 1
                 if state.consecutive_reject_count < self._max_consecutive_rejects:
@@ -2619,8 +2625,9 @@ class InspectionSessionService:
                 else:
                     # Reached threshold — commit reject and reset counter
                     state.consecutive_reject_count = 0
-            elif decision == DecisionCode.ACCEPT.value:
-                # Accept always commits immediately, reset reject counter
+            elif decision == DecisionCode.ACCEPT.value or is_timeout_reject:
+                # Accept and COMMIT_TIMEOUT always commit immediately — no debounce needed.
+                # COMMIT_TIMEOUT is guaranteed valid (part settled for reject_timeout_ms without accept).
                 state.consecutive_reject_count = 0
 
             state.current_event_committed = True
