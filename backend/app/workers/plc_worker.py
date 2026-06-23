@@ -173,8 +173,11 @@ class PlcWorker:
             self._adapter.connect()
             self._adapter.all_off(self._num_channels)
         except Exception as exc:
-            logger.error("[plc-worker] start failed: %s", exc)
-            return
+            # Don't abort: start the worker anyway so it self-heals once the port
+            # is available (poll loop reconnects + writes lazy-connect on demand).
+            logger.warning(
+                "[plc-worker] initial connect failed (%s) — starting anyway, will retry", exc
+            )
         self._state = "IDLE"
         self._thread = threading.Thread(target=self._loop, name="qc-plc-worker", daemon=True)
         self._thread.start()
