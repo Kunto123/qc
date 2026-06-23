@@ -61,6 +61,10 @@ class PartReadyConfig:
     hsv_upper: list[int] = field(default_factory=lambda: [180, 255, 80])
     stable_ms: int = 500
     release_ms: int = 300
+    ema_alpha: float = 0.3
+    hsv_adaptive: bool = False
+    hsv_adaptive_alpha: float = 0.1
+    hsv_adaptive_min_ratio: float = 0.85
 
 
 @dataclass(slots=True)
