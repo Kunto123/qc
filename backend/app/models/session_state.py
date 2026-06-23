@@ -39,6 +39,10 @@ class SessionState:
     recent_events: list[dict[str, Any]] = field(default_factory=list)
     last_committed_result: dict[str, Any] | None = None
     part_ready_ratio_history: list[float] = field(default_factory=list)
+    part_ready_ema_ratio: float = 0.0
+    # Adaptive HSV thresholds — updated at runtime when hsv_adaptive=True
+    hsv_adaptive_lower: list[float] | None = None
+    hsv_adaptive_upper: list[float] | None = None
     last_overlay_b64: str | None = None
     # Settle-time debounce: timestamp of the first frame where part_ready was True
     # in the current ready-run.  Reset to None whenever part_ready becomes False or

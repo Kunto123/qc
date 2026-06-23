@@ -22,7 +22,7 @@ from backend.app.repositories.inspection_results_repository import InspectionRes
 from backend.app.repositories.profiles_repository import ProfilesRepository
 from backend.app.repositories.reject_log_repository import RejectLogRepository
 from backend.app.services.operator_state_machine import OperatorInspectionStateMachine
-from backend.app.services.part_ready_detector import evaluate_color_profile_match, evaluate_hsv_black_ratio
+from backend.app.services.part_ready_detector import evaluate_color_profile_match, evaluate_hsv_black_ratio, _hsv_bounds
 from backend.app.services.sticker_inference import StickerInferenceService
 from backend.app.services.template_runtime import TemplateRuntimeService
 from backend.app.services.text_tilt import estimate_white_text_tilt
@@ -535,6 +535,9 @@ class InspectionSessionService:
         )
         if after_part_ready_signature != before_part_ready_signature:
             state.part_ready_ratio_history.clear()
+            state.part_ready_ema_ratio = 0.0
+            state.hsv_adaptive_lower = None
+            state.hsv_adaptive_upper = None
         return self._session_payload(state)
 
     def get_latest_preview(self) -> dict[str, Any] | None:
@@ -1403,6 +1406,12 @@ class InspectionSessionService:
             state.inference_accept_count = 0
             state.inference_last_counted_generation = -1
             state.inference_accept_first_ts = 0.0
+            # Reset ratio history — prevent stale ratios from contaminating next cycle
+            state.part_ready_ratio_history.clear()
+            state.part_ready_ema_ratio = 0.0
+            # Reset adaptive HSV thresholds — start fresh for next cycle
+            state.hsv_adaptive_lower = None
+            state.hsv_adaptive_upper = None
             # Notify PLC worker of inspection decision
             # Only commit to PLC for accept or hard reject (not non-hard reject)
             decision = validation.get("decision", "")
@@ -1818,12 +1827,16 @@ class InspectionSessionService:
             }
         evaluation = evaluate_color_profile_match(frame, config=config, profile=record["profile"])
         raw_ratio = float(evaluation["match_ratio"])
-        _PART_READY_WINDOW = 5
-        history = state.part_ready_ratio_history
-        history.append(raw_ratio)
-        if len(history) > _PART_READY_WINDOW:
-            del history[0]
-        smoothed_ratio = round(sum(history) / len(history), 6)
+        # EMA smoothing — more responsive to current conditions than simple average
+        _ema_alpha = max(0.0, min(1.0, float(getattr(config, "ema_alpha", 0.3) or 0.3)))
+        if state.part_ready_ema_ratio == 0.0:
+            # First reading in cycle — initialize EMA with raw value
+            state.part_ready_ema_ratio = raw_ratio
+        else:
+            state.part_ready_ema_ratio = round(
+                _ema_alpha * raw_ratio + (1.0 - _ema_alpha) * state.part_ready_ema_ratio, 6
+            )
+        smoothed_ratio = state.part_ready_ema_ratio
         resolved_min = float(evaluation["min_match_ratio"])
         ready = smoothed_ratio >= resolved_min
         return {
@@ -1840,15 +1853,87 @@ class InspectionSessionService:
         }
 
     def _evaluate_part_ready_hsv(self, frame, state: SessionState, config) -> dict[str, Any]:
-        """Legacy HSV black ratio."""
-        evaluation = evaluate_hsv_black_ratio(frame, config)
+        """Legacy HSV black ratio with optional adaptive threshold."""
+        # ── Adaptive HSV threshold ──
+        # When enabled, slowly adjust hsv_lower/hsv_upper toward the current
+        # frame's actual HSV distribution so the threshold tracks lighting drift.
+        _hsv_adaptive = bool(getattr(config, "hsv_adaptive", False))
+        _adaptive_alpha = max(0.0, min(1.0, float(getattr(config, "hsv_adaptive_alpha", 0.1) or 0.1)))
+        _adaptive_min_ratio = float(getattr(config, "hsv_adaptive_min_ratio", 0.85) or 0.85)
+        if _hsv_adaptive and frame is not None and getattr(frame, "size", 0) > 0:
+            try:
+                from backend.app.services.part_ready_detector import compute_hsv_reference_from_roi
+                _live_ref = compute_hsv_reference_from_roi(frame)
+                _live_lower = _live_ref["hsv_lower"]
+                _live_upper = _live_ref["hsv_upper"]
+                if state.hsv_adaptive_lower is None:
+                    # First frame — initialize from config defaults
+                    state.hsv_adaptive_lower = list(_hsv_bounds(getattr(config, "hsv_lower", None), (0, 0, 0)))
+                    state.hsv_adaptive_upper = list(_hsv_bounds(getattr(config, "hsv_upper", None), (180, 255, 80)))
+                else:
+                    # EMA update toward live reference
+                    state.hsv_adaptive_lower = [
+                        round((1.0 - _adaptive_alpha) * state.hsv_adaptive_lower[i] + _adaptive_alpha * _live_lower[i], 1)
+                        for i in range(3)
+                    ]
+                    state.hsv_adaptive_upper = [
+                        round((1.0 - _adaptive_alpha) * state.hsv_adaptive_upper[i] + _adaptive_alpha * _live_upper[i], 1)
+                        for i in range(3)
+                    ]
+                # Only apply adaptive thresholds when current ratio is above minimum
+                # (prevents adapting to a wrong/no-part frame)
+                _raw_for_check = evaluate_hsv_black_ratio(frame, config)
+                if float(_raw_for_check["match_ratio"]) >= _adaptive_min_ratio:
+                    # Use adaptive bounds directly for re-evaluation
+                    import cv2 as _cv2
+                    import numpy as _np
+                    _hsv = _cv2.cvtColor(frame, _cv2.COLOR_BGR2HSV)
+                    _lower = _np.array(state.hsv_adaptive_lower, dtype=_np.uint8)
+                    _upper = _np.array(state.hsv_adaptive_upper, dtype=_np.uint8)
+                    _mask = _cv2.inRange(_hsv, _lower, _upper)
+                    _adaptive_ratio = float(_np.count_nonzero(_mask) / max(1, _mask.size))
+                    evaluation = {
+                        "enabled": True,
+                        "method": "hsv_black_ratio",
+                        "part_ready": _adaptive_ratio >= _adaptive_min_ratio,
+                        "part_ready_confidence": round(_adaptive_ratio, 6),
+                        "decision": DecisionCode.ACCEPT.value if _adaptive_ratio >= _adaptive_min_ratio else DecisionCode.REJECT.value,
+                        "reject_reason_code": None if _adaptive_ratio >= _adaptive_min_ratio else RejectReasonCode.PART_NOT_READY.value,
+                        "status": "ready" if _adaptive_ratio >= _adaptive_min_ratio else "not_ready",
+                        "match_ratio": round(_adaptive_ratio, 6),
+                        "raw_match_ratio": round(_adaptive_ratio, 6),
+                        "mean_distance": None,
+                        "distance_threshold": None,
+                        "min_match_ratio": _adaptive_min_ratio,
+                        "color_profile_id": getattr(config, "color_profile_id", None),
+                        "colorspace": "HSV",
+                        "hsv_lower": list(state.hsv_adaptive_lower),
+                        "hsv_upper": list(state.hsv_adaptive_upper),
+                        "hsv_adaptive": True,
+                    }
+                else:
+                    evaluation = _raw_for_check
+                    evaluation["hsv_adaptive"] = True
+                    evaluation["hsv_lower"] = list(state.hsv_adaptive_lower)
+                    evaluation["hsv_upper"] = list(state.hsv_adaptive_upper)
+            except Exception:
+                # Fallback to static evaluation on any error
+                evaluation = evaluate_hsv_black_ratio(frame, config)
+                evaluation["hsv_adaptive"] = False
+        else:
+            evaluation = evaluate_hsv_black_ratio(frame, config)
+            evaluation["hsv_adaptive"] = False
+
         raw_ratio = float(evaluation["match_ratio"])
-        _PART_READY_WINDOW = 5
-        history = state.part_ready_ratio_history
-        history.append(raw_ratio)
-        if len(history) > _PART_READY_WINDOW:
-            del history[0]
-        smoothed_ratio = round(sum(history) / len(history), 6)
+        # EMA smoothing — more responsive to current conditions than simple average
+        _ema_alpha = max(0.0, min(1.0, float(getattr(config, "ema_alpha", 0.3) or 0.3)))
+        if state.part_ready_ema_ratio == 0.0:
+            state.part_ready_ema_ratio = raw_ratio
+        else:
+            state.part_ready_ema_ratio = round(
+                _ema_alpha * raw_ratio + (1.0 - _ema_alpha) * state.part_ready_ema_ratio, 6
+            )
+        smoothed_ratio = state.part_ready_ema_ratio
         resolved_min = float(evaluation["min_match_ratio"])
         ready = smoothed_ratio >= resolved_min
         evaluation.update({
