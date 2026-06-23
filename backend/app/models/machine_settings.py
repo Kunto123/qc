@@ -13,7 +13,7 @@ from typing import Any
 class PlcConnectionConfig:
     enabled: bool = False
     dry_run: bool = True
-    transport: str = "tcp"  # "tcp" | "rtu"
+    transport: str = "tcp"  # "tcp" | "rtu" | "fx"
     host: str = "127.0.0.1"
     port: int = 5020
     serial_port: str = ""

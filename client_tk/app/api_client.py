@@ -574,7 +574,13 @@ class ApiClient:
         return self._put("/machine-settings", payload)
 
     def seed_machine_settings(self, force: bool = True) -> dict:
-        return self._post(f"/machine-settings/seed?force={'1' if force else '0'}", {})
+        # Pass force as a query param (not embedded in the path) — embedding "?force=1"
+        # in the path while the transport also sets query_string raises
+        # "Query string is defined in the path and as an argument".
+        return self._request_json(
+            "POST", "/machine-settings/seed",
+            params={"force": "1" if force else "0"}, payload={},
+        )
 
     def get_plc_diagnostics(self) -> dict:
         return self._get("/machine-settings/plc/diagnostics")

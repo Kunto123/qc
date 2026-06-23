@@ -148,7 +148,7 @@ class AppConfig:
     # QC_SUITE_PLC_ENABLED=1  — activate the PLC worker (default off).
     # QC_SUITE_PLC_DRY_RUN=1  — log commands only, no real socket (default on so
     #   accidentally enabling PLC without hardware never opens a TCP connection).
-    # QC_SUITE_PLC_TRANSPORT=tcp|rtu — choose Modbus TCP gateway vs serial RTU relay.
+    # QC_SUITE_PLC_TRANSPORT=tcp|rtu|fx — choose Modbus TCP gateway vs serial RTU relay vs FX Computer Link.
     # QC_SUITE_PLC_HOST / QC_SUITE_PLC_PORT — Modbus TCP endpoint or gateway address.
     # QC_SUITE_PLC_SERIAL_PORT / BAUDRATE / PARITY / BYTESIZE / STOPBITS — RTU serial line.
     # QC_SUITE_PLC_TIMEOUT_MS — socket connect/send timeout.
