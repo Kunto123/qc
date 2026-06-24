@@ -2,12 +2,20 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 import customtkinter as ctk
 
 from client_tk.app.components.roi_picker_canvas import RoiPickerCanvas
 from client_tk.app.components.scrollable_frame import ScrollableFrame
+
+
+def _float_or_default(value, default):
+    """Parse a string value to float, returning default if empty or invalid."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 from client_tk.app.theme import (
     ACCENT,
     ACCENT_HOVER,
@@ -133,6 +141,10 @@ class TemplatesTab:
 
         a._entry(wizard, 8, 0, "Confidence Threshold", a.preset_conf_threshold_var, columnspan=3)
 
+        # Mean-Std threshold variables (initialized lazily on first method change)
+        a.preset_mean_max_var = tk.StringVar(value="105.0")
+        a.preset_std_max_var = tk.StringVar(value="35.0")
+
         # Sticker-specific fields (shown in sticker mode, hidden in component mode)
         a._sticker_fields_start = 9
         a._entry(wizard, 9, 0, "Expected Class", a.preset_expected_class_var, columnspan=3)
@@ -143,14 +155,42 @@ class TemplatesTab:
         )
 
         a._entry(wizard, 11, 0, "Gap Threshold (0-1)", a.preset_gap_threshold_var, columnspan=2)
+        # Track gap threshold widgets for show/hide based on method
+        a._gap_threshold_widgets = []
+        for _r in (11,):
+            try:
+                for w in wizard.grid_slaves(row=_r):
+                    a._gap_threshold_widgets.append(w)
+            except Exception:
+                pass
 
-        # Reference patch buttons
+        # Part-ready method selector
+        ttk.Label(wizard, text="Part Ready Method").grid(row=12, column=0, sticky="w", padx=(12, 8), pady=5)
+        a.preset_part_ready_method_var = tk.StringVar(value="gap_template_match")
+        method_combo = ttk.Combobox(
+            wizard,
+            textvariable=a.preset_part_ready_method_var,
+            values=["gap_template_match", "mean_std_threshold"],
+            width=20,
+            state="readonly",
+        )
+        method_combo.grid(row=12, column=1, columnspan=2, sticky="w", padx=(0, 12), pady=5)
+        a.preset_part_ready_method_var.trace_add("write", lambda *_: self._on_part_ready_method_changed(a))
+        a.preset_part_ready_method_var.trace_add("write", lambda *_: self._on_method_or_mode_changed(a))
+        a.preset_validator_mode_var.trace_add("write", lambda *_: self._on_method_or_mode_changed(a))
+        # Mean-Std threshold fields (shown only when method=mean_std_threshold)
+        a._mean_std_fields_start = 13
+        a._entry(wizard, 13, 0, "MEAN_MAX", a.preset_mean_max_var, columnspan=2)
+        a._entry(wizard, 14, 0, "STD_MAX", a.preset_std_max_var, columnspan=2)
+        a._mean_std_field_rows = [13, 14]
+
+        # Reference patch buttons — shift down to row 15
         ref_btn_row = ttk.Frame(wizard)
-        ref_btn_row.grid(row=12, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 4))
+        ref_btn_row.grid(row=15, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 4))
         ttk.Button(ref_btn_row, text="Capture Reference", command=a._capture_part_ready_ref).pack(side="left", padx=(0, 6))
         ttk.Button(ref_btn_row, text="Upload Reference", command=a._upload_part_ready_ref).pack(side="left")
         a.gap_ref_status_label = ttk.Label(wizard, text="Referensi: belum dikonfigurasi", foreground="gray")
-        a.gap_ref_status_label.grid(row=13, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 6))
+        a.gap_ref_status_label.grid(row=16, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 6))
 
         ttk.Label(wizard, text="Rotation\\xB0\\n(0/90/180/270)", foreground="gray").grid(
             row=11, column=2, sticky="w", padx=(12, 4), pady=5,
@@ -164,12 +204,9 @@ class TemplatesTab:
         # Component ROI editor (only visible in component_count mode)
         self._build_component_roi_editor(a, wizard)
 
-        # Logo reference capture (only visible in sticker mode)
-        self._build_logo_capture(a, wizard)
-
         # Action buttons
         btn_row = ttk.Frame(wizard)
-        btn_row.grid(row=21, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 6))
+        btn_row.grid(row=22, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 6))
         btn_row.columnconfigure(0, weight=1)
         btn_row.columnconfigure(0, weight=1)
 
@@ -207,16 +244,66 @@ class TemplatesTab:
 
         # Keep references to part ready reference widgets (capture/upload ref, status label)
         # These are hidden in component_counter mode since part ready uses Modbus sensor only
+        # Now at rows 15 (ref buttons) and 16 (status label) — shifted for method selector
         a._part_ready_ref_widgets = []
-        for _r in (13, 14):
+        for _r in (15, 16):
             try:
                 for w in wizard.grid_slaves(row=_r):
                     a._part_ready_ref_widgets.append(w)
             except Exception:
                 pass
 
+        # Keep references to mean-std threshold fields (shown only when method=mean_std_threshold)
+        a._mean_std_field_widgets = []
+        for _r in (13, 14):
+            try:
+                for w in wizard.grid_slaves(row=_r):
+                    a._mean_std_field_widgets.append(w)
+            except Exception:
+                pass
+
         # Initial mode sync
         a.preset_validator_mode_var.trace_add("write", lambda *_: self._on_mode_changed(a))
+
+    def _on_method_or_mode_changed(self, a) -> None:
+        """Show/hide fields based on method and mode."""
+        method = a.preset_part_ready_method_var.get()
+        show_mean_std = (method == "mean_std_threshold")
+        # Show/hide mean_std threshold fields
+        for w in getattr(a, "_mean_std_field_widgets", []):
+            w.grid() if show_mean_std else w.grid_remove()
+        # Show/hide gap threshold field (only for gap_template_match)
+        show_gap = (method == "gap_template_match")
+        for w in getattr(a, "_gap_threshold_widgets", []):
+            w.grid() if show_gap else w.grid_remove()
+        # Show/hide calibration section based on method
+        if show_mean_std:
+            a._calib_mean_std_frame.grid()
+        else:
+            a._calib_mean_std_frame.grid_remove()
+
+    def _on_part_ready_method_changed(self, a) -> None:
+        """Show/hide mean-std threshold fields based on part ready method."""
+        method = a.preset_part_ready_method_var.get()
+        show_mean_std = (method == "mean_std_threshold")
+        for w in getattr(a, "_mean_std_field_widgets", []):
+            if show_mean_std:
+                w.grid()
+            else:
+                w.grid_remove()
+        # Also show/hide reference buttons & gap threshold based on method
+        show_ref = (method == "gap_template_match")
+        for w in getattr(a, "_part_ready_ref_widgets", []):
+            if show_ref:
+                w.grid()
+            else:
+                w.grid_remove()
+        # Show/hide gap threshold entry (row 11) — only relevant for gap_template_match
+        for w in getattr(a, "_gap_threshold_widgets", []):
+            if show_ref:
+                w.grid()
+            else:
+                w.grid_remove()
 
     def _on_mode_changed(self, a) -> None:
         """Show/hide fields based on validation mode."""
@@ -231,11 +318,9 @@ class TemplatesTab:
         if mode == "component_count":
             a._comp_editor_frame.grid()
             a._add_comp_roi_btn.grid()
-            a._logo_frame.grid_remove()
         else:
             a._comp_editor_frame.grid_remove()
             a._add_comp_roi_btn.grid_remove()
-            a._logo_frame.grid()
         # Show/hide sticker and part-ready ROI on canvas based on mode
         if hasattr(a, "preset_roi_picker"):
             a.preset_roi_picker.set_sticker_visible(mode != "component_count")
@@ -243,19 +328,20 @@ class TemplatesTab:
         # ROI picker panel stays visible in both modes (used for component ROIs in counter mode)
         # But update its selector to show component ROIs vs sticker/part-ready ROIs
         self._update_roi_selector_dropdown(a)
-        # Show/hide part ready reference buttons (capture/upload ref, status label)
-        # Not needed in component_counter mode since part ready = Modbus sensor only
+        # Show/hide part ready reference buttons and mean-std fields
+        # In component_count mode, part ready = Modbus sensor only -- hide all
+        self._on_part_ready_method_changed(a)
+        _is_component = (mode == "component_count")
         for w in getattr(a, "_part_ready_ref_widgets", []):
-            if mode == "component_count":
-                w.grid_remove()
-            else:
-                w.grid()
+            w.grid_remove() if _is_component else w.grid()
+        for w in getattr(a, "_mean_std_field_widgets", []):
+            w.grid_remove() if _is_component else w.grid()
 
     # ------------------------------------------------------------------
     # ROI Picker
     def _build_roi_picker(self, a, wizard) -> None:
         roi_panel = ctk.CTkFrame(wizard, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        roi_panel.grid(row=16, column=0, columnspan=4, sticky="ew", padx=12, pady=(12, 2))
+        roi_panel.grid(row=17, column=0, columnspan=4, sticky="ew", padx=12, pady=(12, 2))
         roi_panel.columnconfigure(0, weight=1)
         a._roi_picker_panel = roi_panel
 
@@ -283,7 +369,8 @@ class TemplatesTab:
         a._add_comp_roi_btn.grid_remove()
 
         ttk.Button(roi_toolbar, text="Pick Image", command=a._pick_preset_roi_image).grid(row=0, column=3, padx=(0, 4))
-        ttk.Button(roi_toolbar, text="Capture from Camera", command=a._capture_preset_roi_from_camera).grid(row=0, column=4, padx=(0, 4))
+        a._live_cam_btn = ttk.Button(roi_toolbar, text="Start Live Camera", command=lambda: a._toggle_live_camera())
+        a._live_cam_btn.grid(row=0, column=4, padx=(0, 4))
         ttk.Button(roi_toolbar, text="Reset", command=a._reset_preset_roi).grid(row=0, column=5)
 
         a.preset_roi_picker = RoiPickerCanvas(roi_panel, "Drag/resize selected ROI on the image", size=(520, 292))
@@ -296,6 +383,47 @@ class TemplatesTab:
             rois.append(_roi)
         a.preset_roi_picker.set_component_rois(rois)
         a._on_preset_roi_selected()
+
+        # Mean Std Calibration section (collapsible)
+        a._calib_mean_std_frame = ctk.CTkFrame(roi_panel, fg_color=PANEL_ALT_BG, corner_radius=6, border_width=1, border_color=BORDER)
+        a._calib_mean_std_frame.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 8))
+        a._calib_mean_std_frame.columnconfigure(1, weight=1)
+
+        calib_header = ctk.CTkFrame(a._calib_mean_std_frame, fg_color="transparent")
+        calib_header.grid(row=0, column=0, columnspan=4, sticky="ew", padx=8, pady=(4, 2))
+        ctk.CTkLabel(calib_header, text="Mean-Std Calibration", font=("Segoe UI", 9, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w")
+
+        # Step 1: Empty
+        self._calib_step1_frame = ctk.CTkFrame(a._calib_mean_std_frame, fg_color="transparent")
+        self._calib_step1_frame.grid(row=1, column=0, columnspan=4, sticky="ew", padx=8, pady=1)
+        ctk.CTkButton(self._calib_step1_frame, text="1. Capture Empty (no part)", width=160, height=26,
+                      command=lambda: self._calib_capture(a, "empty")).grid(row=0, column=0, padx=(0, 4))
+        a._calib_empty_result = ctk.CTkLabel(self._calib_step1_frame, text="—", text_color=TEXT_SECONDARY, font=("Segoe UI", 9))
+        a._calib_empty_result.grid(row=0, column=1, sticky="w")
+
+        # Step 2: Part
+        self._calib_step2_frame = ctk.CTkFrame(a._calib_mean_std_frame, fg_color="transparent")
+        self._calib_step2_frame.grid(row=2, column=0, columnspan=4, sticky="ew", padx=8, pady=1)
+        ctk.CTkButton(self._calib_step2_frame, text="2. Capture Part (black)", width=160, height=26,
+                      command=lambda: self._calib_capture(a, "part")).grid(row=0, column=0, padx=(0, 4))
+        a._calib_part_result = ctk.CTkLabel(self._calib_step2_frame, text="—", text_color=TEXT_SECONDARY, font=("Segoe UI", 9))
+        a._calib_part_result.grid(row=0, column=1, sticky="w")
+
+        # Step 3: Sticker
+        self._calib_step3_frame = ctk.CTkFrame(a._calib_mean_std_frame, fg_color="transparent")
+        self._calib_step3_frame.grid(row=3, column=0, columnspan=4, sticky="ew", padx=8, pady=1)
+        ctk.CTkButton(self._calib_step3_frame, text="3. Capture Sticker", width=160, height=26,
+                      command=lambda: self._calib_capture(a, "sticker")).grid(row=0, column=0, padx=(0, 4))
+        a._calib_sticker_result = ctk.CTkLabel(self._calib_step3_frame, text="—", text_color=TEXT_SECONDARY, font=("Segoe UI", 9))
+        a._calib_sticker_result.grid(row=0, column=1, sticky="w")
+
+        # Result
+        self._calib_result_frame = ctk.CTkFrame(a._calib_mean_std_frame, fg_color="transparent")
+        self._calib_result_frame.grid(row=4, column=0, columnspan=4, sticky="ew", padx=8, pady=(4, 2))
+        a._calib_computed = ctk.CTkLabel(self._calib_result_frame, text="Capture all 3 to compute thresholds", text_color=TEXT_SECONDARY, font=("Segoe UI", 9))
+        a._calib_computed.grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(self._calib_result_frame, text="Apply", width=60, height=24, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                      text_color=TEXT_ON_ACCENT, command=lambda: self._calib_apply(a)).grid(row=0, column=3, sticky="e", padx=(8, 0))
 
         for var in (
             a.part_ready_roi_x_var,
@@ -313,7 +441,7 @@ class TemplatesTab:
     # Component ROI Editor
     def _build_component_roi_editor(self, a, wizard) -> None:
         a._comp_editor_frame = ctk.CTkFrame(wizard, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        a._comp_editor_frame.grid(row=18, column=0, columnspan=4, sticky="ew", padx=12, pady=(8, 4))
+        a._comp_editor_frame.grid(row=19, column=0, columnspan=4, sticky="ew", padx=12, pady=(8, 4))
         a._comp_editor_frame.columnconfigure(0, weight=1)
         a._comp_editor_frame.grid_remove()
 
@@ -347,7 +475,8 @@ class TemplatesTab:
                     "w": pr.get("w", 0.3), "h": pr.get("h", 0.3),
                     "rotation": pr.get("rotation", 0.0),
                 }
-        self._refresh_comp_roi_editor(a)
+        # Add the single new ROI widget without destroying all existing ones
+        self._build_single_comp_roi(a, a.preset_component_rois[idx], idx)
         self._update_roi_selector_dropdown(a)
         comp_name = a.preset_component_rois[idx].get("name", f"ROI {chr(65 + idx)}") if idx < len(a.preset_component_rois) else f"ROI {chr(65 + idx)}"
         a.preset_roi_choice_var.set(f"Component: {comp_name}")
@@ -370,17 +499,24 @@ class TemplatesTab:
             return
         a._comp_editor_frame.grid()
         a._add_comp_roi_btn.grid()
+        # Sync data model to picker
         rois = []
         for _cr in a.preset_component_rois:
             _roi = _cr.get("roi", {})
             _roi["name"] = _cr.get("name", "ROI")
             rois.append(_roi)
         a.preset_roi_picker.set_component_rois(rois)
+        # Only rebuild widgets if count changed
+        existing_count = len(a._comp_roi_list_frame.winfo_children())
+        if existing_count != len(a.preset_component_rois):
+            for widget in a._comp_roi_list_frame.winfo_children():
+                widget.destroy()
+            for roi_idx, roi_data in enumerate(a.preset_component_rois):
+                self._build_single_comp_roi(a, roi_data, roi_idx)
         self._update_roi_selector_dropdown(a)
-        for widget in a._comp_roi_list_frame.winfo_children():
-            widget.destroy()
-        for roi_idx, roi_data in enumerate(a.preset_component_rois):
-            self._build_single_comp_roi(a, roi_data, roi_idx)
+        # Set active ROI to first component so user can immediately interact
+        if a.preset_component_rois:
+            a.preset_roi_picker.set_active_roi("component:0")
 
     def _build_single_comp_roi(self, a, roi_data: dict, roi_idx: int) -> None:
         row_frame = ctk.CTkFrame(a._comp_roi_list_frame, fg_color=PANEL_ALT_BG, corner_radius=6, border_width=1, border_color=BORDER)
@@ -419,6 +555,17 @@ class TemplatesTab:
     def _on_comp_roi_name_changed(self, roi_idx: int, var: tk.StringVar) -> None:
         if roi_idx < len(self.admin.preset_component_rois):
             self.admin.preset_component_rois[roi_idx]["name"] = var.get()
+            # Sync name to canvas component ROIs so display name matches
+            picker = getattr(self.admin, "preset_roi_picker", None)
+            if picker is not None and roi_idx < len(picker._component_rois):
+                picker._component_rois[roi_idx]["name"] = var.get()
+                picker.redraw()
+            # Sync dropdown text
+            self._update_roi_selector_dropdown(self.admin)
+            # Re-set active ROI to maintain selection
+            kind = self.admin._preset_roi_kind()
+            if kind and kind.startswith("component:"):
+                self.admin.preset_roi_picker.set_active_roi(kind)
 
     def _on_comp_class_changed(self, roi_idx: int, cls_idx: int, var: tk.StringVar) -> None:
         if roi_idx < len(self.admin.preset_component_rois) and cls_idx < len(self.admin.preset_component_rois[roi_idx]["classes"]):
@@ -441,106 +588,24 @@ class TemplatesTab:
             self._refresh_comp_roi_editor(a)
 
     def _update_roi_selector_dropdown(self, a) -> None:
-        values = ["Part Ready ROI"]
         mode = a.preset_validator_mode_var.get()
         if mode == "component_count":
+            values = []
             for i, cr in enumerate(a.preset_component_rois):
                 name = cr.get("name", f"ROI {chr(65 + i)}")
                 values.append(f"Component: {name}")
+            # Only set choice to first if current choice is not in values
+            current = a.preset_roi_choice_var.get()
+            if current not in values and values:
+                a.preset_roi_choice_var.set(values[0])
         else:
-            values.append("Sticker ROI")
+            values = ["Part Ready ROI", "Sticker ROI"]
+            if a.preset_roi_choice_var.get() not in values:
+                a.preset_roi_choice_var.set("Part Ready ROI")
         a.preset_roi_selector.configure(values=values)
 
     # ------------------------------------------------------------------
     # Logo Capture
-    def _build_logo_capture(self, a, wizard) -> None:
-        a._logo_frame = ctk.CTkFrame(wizard, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        a._logo_frame.grid(row=19, column=0, columnspan=4, sticky="ew", padx=12, pady=(8, 4))
-        a._logo_frame.columnconfigure(0, weight=1)
-
-        logo_header = ctk.CTkFrame(a._logo_frame, fg_color="transparent")
-        logo_header.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
-        ctk.CTkLabel(logo_header, text="Logo Reference", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).pack(side="left")
-        ctk.CTkButton(logo_header, text="📸 Capture Logo", command=lambda: self._on_capture_logo(a),
-                       fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT,
-                       font=("Segoe UI", 9, "bold"), width=120, height=28).pack(side="right")
-
-        a._logo_status_label = ctk.CTkLabel(a._logo_frame, text="No logo reference captured", text_color=TEXT_SECONDARY, font=("Segoe UI", 8))
-        a._logo_status_label.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 8))
-
-        a._logo_editor_frame = ctk.CTkFrame(a._logo_frame, fg_color="transparent")
-        a._logo_editor_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 8))
-        a._logo_editor_frame.grid_remove()
-
-        _logo_fields = ctk.CTkFrame(a._logo_editor_frame, fg_color="transparent")
-        _logo_fields.grid(row=0, column=0, sticky="ew")
-        _logo_fields.columnconfigure(1, weight=1)
-        _logo_fields.columnconfigure(3, weight=1)
-        ctk.CTkLabel(_logo_fields, text="X:", text_color=TEXT_SECONDARY, font=("Segoe UI", 9)).grid(row=0, column=0, padx=(0, 4))
-        a._logo_x_var = tk.StringVar(value="0.0")
-        ctk.CTkEntry(_logo_fields, textvariable=a._logo_x_var, width=60, height=24).grid(row=0, column=1, padx=(0, 8))
-        ctk.CTkLabel(_logo_fields, text="Y:", text_color=TEXT_SECONDARY, font=("Segoe UI", 9)).grid(row=0, column=2, padx=(0, 4))
-        a._logo_y_var = tk.StringVar(value="0.0")
-        ctk.CTkEntry(_logo_fields, textvariable=a._logo_y_var, width=60, height=24).grid(row=0, column=3, padx=(0, 8))
-        ctk.CTkLabel(_logo_fields, text="W:", text_color=TEXT_SECONDARY, font=("Segoe UI", 9)).grid(row=1, column=0, padx=(0, 4), pady=(4, 0))
-        a._logo_w_var = tk.StringVar(value="0.1")
-        ctk.CTkEntry(_logo_fields, textvariable=a._logo_w_var, width=60, height=24).grid(row=1, column=1, padx=(0, 8), pady=(4, 0))
-        ctk.CTkLabel(_logo_fields, text="H:", text_color=TEXT_SECONDARY, font=("Segoe UI", 9)).grid(row=1, column=2, padx=(0, 4), pady=(4, 0))
-        a._logo_h_var = tk.StringVar(value="0.1")
-        ctk.CTkEntry(_logo_fields, textvariable=a._logo_h_var, width=60, height=24).grid(row=1, column=3, padx=(0, 8), pady=(4, 0))
-        _logo_btn_row = ctk.CTkFrame(a._logo_editor_frame, fg_color="transparent")
-        _logo_btn_row.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        ctk.CTkButton(_logo_btn_row, text="Save Logo", command=lambda: self._on_save_logo(a),
-                       fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT,
-                       font=("Segoe UI", 9, "bold"), width=80, height=28).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(_logo_btn_row, text="Cancel", command=lambda: self._on_cancel_logo(a),
-                       fg_color=BORDER, hover_color=PANEL_ALT_BG, text_color=TEXT_PRIMARY,
-                       font=("Segoe UI", 9), width=60, height=28).pack(side="left")
-
-    def _on_capture_logo(self, a) -> None:
-        frame = a._get_current_frame_for_logo()
-        if frame is None:
-            import tkinter.messagebox as msgbox
-            msgbox.showwarning("Logo Capture", "No frame available. Please load an image first.")
-            return
-        a._logo_editor_frame.grid()
-        a._logo_status_label.configure(text="Draw logo area and click Save", text_color=TEXT_PRIMARY)
-
-    def _on_save_logo(self, a) -> None:
-        try:
-            import cv2, numpy as np
-            from pathlib import Path
-            from backend.app.core.config import PROJECT_ROOT as project_root
-            x, y = float(a._logo_x_var.get()), float(a._logo_y_var.get())
-            w, h = float(a._logo_w_var.get()), float(a._logo_h_var.get())
-            frame = a._get_current_frame_for_logo()
-            if frame is None:
-                return
-            fh, fw = frame.shape[:2]
-            rx, ry = int(x * fw), int(y * fh)
-            rw, rh = int(w * fw), int(h * fh)
-            roi_frame = frame[ry:ry+rh, rx:rx+rw]
-            gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
-            _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            gray = _clahe.apply(gray)
-            median = float(np.median(gray))
-            low, high = int(max(0, 0.5 * median)), int(min(255, 1.5 * median))
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            edge_map = cv2.Canny(blurred, low, high)
-            ref_dir = Path(project_root) / "backend/app/assets/part_ready_refs"
-            ref_dir.mkdir(parents=True, exist_ok=True)
-            template_id = a.current_template_id or 0
-            save_path = ref_dir / f"{template_id}_logo.png"
-            cv2.imwrite(str(save_path), edge_map)
-            a._logo_editor_frame.grid_remove()
-            a._logo_status_label.configure(text=f"Logo saved: {save_path.name}", text_color=TEXT_PRIMARY)
-        except Exception as exc:
-            import tkinter.messagebox as msgbox
-            msgbox.showerror("Logo Capture", f"Failed to save logo: {exc}")
-
-    def _on_cancel_logo(self, a) -> None:
-        a._logo_editor_frame.grid_remove()
-        a._logo_status_label.configure(text="Logo capture cancelled", text_color=TEXT_SECONDARY)
 
     # ------------------------------------------------------------------
     # ROI changed callback
@@ -555,3 +620,105 @@ class TemplatesTab:
                 }
         else:
             a._on_preset_roi_changed(kind, roi)
+
+    # ------------------------------------------------------------------
+    # Mean-Std Calibration
+    # ------------------------------------------------------------------
+
+    def _toggle_calib_mean_std(self, a) -> None:
+        if self._calib_toggle_var.get():
+            a._calib_mean_std_frame.grid()
+        else:
+            a._calib_mean_std_frame.grid_remove()
+
+    def _calib_capture(self, a, step: str) -> None:
+        """Capture a frame from camera and compute mean/std for the current ROI."""
+        cam_idx = int(_float_or_default(a.preset_camera_index_var.get(), 0))
+        try:
+            from client_tk.app.services.camera_capture import CameraCaptureService
+            cam = CameraCaptureService()
+            cam.start(cam_idx)
+            import time
+            time.sleep(0.5)
+            frame = cam.get_latest_frame()
+            cam.stop()
+            if frame is None:
+                messagebox.showwarning("Calibration", "Camera returned no frame.")
+                return
+            # Apply camera rotation
+            _rot = float(_float_or_default(a.preset_camera_rotation_var.get(), 0))
+            if _rot != 0.0:
+                import cv2
+                h, w = frame.shape[:2]
+                center = (w // 2, h // 2)
+                M = cv2.getRotationMatrix2D(center, -_rot, 1.0)
+                cos_a = abs(M[0, 0])
+                sin_a = abs(M[0, 1])
+                new_w = int(h * sin_a + w * cos_a)
+                new_h = int(h * cos_a + w * sin_a)
+                M[0, 2] += (new_w - w) / 2
+                M[1, 2] += (new_h - h) / 2
+                frame = cv2.warpAffine(frame, M, (new_w, new_h), borderMode=cv2.BORDER_REPLICATE)
+        except Exception as exc:
+            messagebox.showerror("Calibration", f"Failed to capture: {exc}")
+            return
+
+        # Crop to part_ready ROI
+        roi_f = a._roi_payload_from_vars(
+            a.part_ready_roi_x_var, a.part_ready_roi_y_var,
+            a.part_ready_roi_w_var, a.part_ready_roi_h_var,
+            defaults={"x": 0.2, "y": 0.2, "w": 0.25, "h": 0.25},
+        )
+        fh, fw = frame.shape[:2]
+        x = max(0, int(roi_f["x"] * fw))
+        y = max(0, int(roi_f["y"] * fh))
+        w = max(1, int(roi_f["w"] * fw))
+        h = max(1, int(roi_f["h"] * fh))
+        x2 = min(fw, x + w)
+        y2 = min(fh, y + h)
+        crop = frame[y:y2, x:x2]
+
+        if crop.size == 0:
+            messagebox.showwarning("Calibration", "ROI crop is empty. Check ROI position.")
+            return
+
+        import cv2
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if len(crop.shape) == 3 else crop
+        mean_val = float(gray.mean())
+        std_val = float(gray.std())
+
+        if step == "empty":
+            a._calib_empty_mean = mean_val
+            a._calib_empty_result.configure(text=f"mean={mean_val:.1f}")
+        elif step == "part":
+            a._calib_part_mean = mean_val
+            a._calib_part_std = std_val
+            a._calib_part_result.configure(text=f"mean={mean_val:.1f}, std={std_val:.1f}")
+        elif step == "sticker":
+            a._calib_sticker_std = std_val
+            a._calib_sticker_result.configure(text=f"std={std_val:.1f}")
+
+        # Auto-compute if all 3 captured
+        if a._calib_empty_mean > 0 and a._calib_part_mean > 0 and a._calib_sticker_std > 0:
+            from backend.app.services.part_ready_detector import compute_mean_std_thresholds
+            result = compute_mean_std_thresholds(
+                a._calib_empty_mean, a._calib_part_mean,
+                a._calib_part_std, a._calib_sticker_std,
+            )
+            a._calib_computed.configure(
+                text=f"MEAN_MAX={result['mean_max']:.1f}, STD_MAX={result['std_max']:.1f} (gaps: mean={a._calib_empty_mean - a._calib_part_mean:.1f}, std={a._calib_sticker_std - a._calib_part_std:.1f})"
+            )
+
+    def _calib_apply(self, a) -> None:
+        """Apply computed thresholds to the template."""
+        if a._calib_empty_mean == 0 or a._calib_part_mean == 0 or a._calib_sticker_std == 0:
+            messagebox.showwarning("Calibration", "Capture all 3 conditions first.")
+            return
+        from backend.app.services.part_ready_detector import compute_mean_std_thresholds
+        result = compute_mean_std_thresholds(
+            a._calib_empty_mean, a._calib_part_mean,
+            a._calib_part_std, a._calib_sticker_std,
+        )
+        a.preset_mean_max_var.set(str(result["mean_max"]))
+        a.preset_std_max_var.set(str(result["std_max"]))
+        a._set_status(f"Applied mean_std thresholds: MEAN_MAX={result['mean_max']}, STD_MAX={result['std_max']}")

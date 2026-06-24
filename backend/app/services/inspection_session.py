@@ -1733,13 +1733,9 @@ class InspectionSessionService:
                 "gap_score": None,
             }
         method = str(getattr(config, "method", "gap_template_match") or "gap_template_match").strip().lower()
-        if method == "gap_template_match":
-            return self._evaluate_part_ready_gap(frame, state, config)
-        if method == "color_profile_match":
-            return self._evaluate_part_ready_color(frame, state, config)
-        if method == "hsv_black_ratio":
-            return self._evaluate_part_ready_hsv(frame, state, config)
-        # Default: gap template match
+        if method == "mean_std_threshold":
+            return self._evaluate_part_ready_mean_std(frame, state, config)
+        # Default: gap_template_match
         return self._evaluate_part_ready_gap(frame, state, config)
 
     def _evaluate_part_ready_gap(self, frame, state: SessionState, config) -> dict[str, Any]:
@@ -1939,6 +1935,39 @@ class InspectionSessionService:
         evaluation.update({
             "part_ready": ready,
             "part_ready_confidence": smoothed_ratio,
+            "decision": DecisionCode.ACCEPT.value if ready else DecisionCode.REJECT.value,
+            "reject_reason_code": None if ready else RejectReasonCode.PART_NOT_READY.value,
+            "status": "ready" if ready else "not_ready",
+            "match_ratio": smoothed_ratio,
+            "raw_match_ratio": raw_ratio,
+        })
+        return evaluation
+
+    def _evaluate_part_ready_mean_std(self, frame, state: SessionState, config) -> dict[str, Any]:
+        """"Mean + Std threshold classification.
+
+        Classifies the ROI into empty / part_normal / sticker based on
+        grayscale mean and standard deviation, with EMA smoothing.
+        """
+        from backend.app.services.part_ready_detector import evaluate_mean_std_threshold
+
+        evaluation = evaluate_mean_std_threshold(frame, config)
+
+        # EMA smoothing on the classification confidence (std_value)
+        _ema_alpha = max(0.0, min(1.0, float(getattr(config, "ema_alpha", 0.3) or 0.3)))
+        raw_ratio = float(evaluation["match_ratio"])
+        if state.part_ready_ema_ratio == 0.0:
+            state.part_ready_ema_ratio = raw_ratio
+        else:
+            state.part_ready_ema_ratio = round(
+                _ema_alpha * raw_ratio + (1.0 - _ema_alpha) * state.part_ready_ema_ratio, 6
+            )
+        smoothed_ratio = state.part_ready_ema_ratio
+
+        ready = bool(evaluation["part_ready"])
+        evaluation.update({
+            "part_ready": ready,
+            "part_ready_confidence": round(float(evaluation.get("std_value", 0.0)), 2) if ready else round(255.0 - float(evaluation.get("mean_value", 0.0)), 2),
             "decision": DecisionCode.ACCEPT.value if ready else DecisionCode.REJECT.value,
             "reject_reason_code": None if ready else RejectReasonCode.PART_NOT_READY.value,
             "status": "ready" if ready else "not_ready",

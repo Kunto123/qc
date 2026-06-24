@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+# FIX_VERSION_MARKER: 2026-06-24-v3 — this line confirms the fix is loaded. If you see this in error, new code is running.
 from typing import Any
 
 
@@ -48,7 +49,6 @@ class PartReadyConfig:
     method: str = "gap_template_match"
     gap_match_threshold: float = 0.85
     gap_ref_path: str | None = None
-    logo_ref_path: str | None = None
     gap_ref_type: str = "raw"
     gap_hsv_lower: list[int] = field(default_factory=lambda: [90, 50, 50])
     gap_hsv_upper: list[int] = field(default_factory=lambda: [130, 255, 255])
@@ -65,6 +65,14 @@ class PartReadyConfig:
     hsv_adaptive: bool = False
     hsv_adaptive_alpha: float = 0.1
     hsv_adaptive_min_ratio: float = 0.85
+    mean_max: float = 105.0
+    std_max: float = 35.0
+    # Calibration raw data — captured from 3 conditions, used to auto-compute mean_max/std_max
+    calibration_empty_mean: float = 0.0   # mean when ROI is empty (no part)
+    calibration_part_mean: float = 0.0     # mean when black part is present
+    calibration_part_std: float = 0.0      # std when black part is present
+    calibration_sticker_std: float = 0.0   # std when sticker is on part
+    logo_ref_path: str | None = None  # deprecated, ignored — kept for backward compat with old DB data
 
 
 @dataclass(slots=True)
@@ -175,6 +183,17 @@ def _pick_roi_payload(payload: dict[str, Any], *keys: str) -> dict[str, Any]:
     return {}
 
 
+_VALID_PART_READY_FIELDS = {
+    "enabled", "method", "gap_match_threshold", "gap_ref_path", "logo_ref_path",
+    "gap_ref_type", "gap_hsv_lower", "gap_hsv_upper", "gap_padding_px",
+    "color_profile_id", "colorspace", "distance_threshold", "min_match_ratio",
+    "hsv_lower", "hsv_upper", "stable_ms", "release_ms",
+    "ema_alpha", "hsv_adaptive", "hsv_adaptive_alpha", "hsv_adaptive_min_ratio",
+    "mean_max", "std_max",
+    "calibration_empty_mean", "calibration_part_mean",
+    "calibration_part_std", "calibration_sticker_std",
+}
+
 _VALID_STICKER_FIELDS = {
     "part_name", "expected_class", "enabled", "validator_mode", "min_roi_confidence",
     "min_class_confidence", "max_offset_x", "max_offset_y", "expected_center_x",
@@ -225,6 +244,7 @@ def _parse_component_rois(payload: dict[str, Any]) -> list[ComponentRoiRule]:
 
 
 def template_from_dict(payload: dict[str, Any]) -> InspectionTemplate:
+    """Parse template dict. Version: 2026-06-24-fix-v4-THIS-IS-THE-NEW-CODE"""
     part_ready_roi_payload = _pick_roi_payload(payload, "part_ready_roi", "roi", "sticker_roi")
     sticker_roi_payload = _pick_roi_payload(payload, "sticker_roi", "roi", "part_ready_roi")
     # Strip unknown keys that RoiGeometry doesn't accept (e.g. 'height' from old DB data)
@@ -234,6 +254,8 @@ def template_from_dict(payload: dict[str, Any]) -> InspectionTemplate:
     _vision_raw = payload.get("vision") or {}
     _vision_filtered = {k: v for k, v in _vision_raw.items() if k in VisionConfig.__slots__}
     _sticker_filtered = {k: v for k, v in _sticker_raw.items() if k in _VALID_STICKER_FIELDS}
+    _part_ready_raw = payload.get("part_ready") or {}
+    _part_ready_filtered = {k: v for k, v in _part_ready_raw.items() if k in _VALID_PART_READY_FIELDS}
     return InspectionTemplate(
         id=payload.get("id"),
         version_id=payload.get("version_id"),
@@ -245,7 +267,7 @@ def template_from_dict(payload: dict[str, Any]) -> InspectionTemplate:
         part_ready_roi=RoiGeometry(**part_ready_roi_payload),
         sticker_roi=RoiGeometry(**sticker_roi_payload),
         vision=VisionConfig(**_vision_filtered),
-        part_ready=PartReadyConfig(**(payload.get("part_ready") or {})),
+        part_ready=PartReadyConfig(**_part_ready_filtered),
         sticker=StickerRule(**_sticker_filtered),
         persistence=PersistenceConfig(**(payload.get("persistence") or {})),
         component_rois=_parse_component_rois(payload),

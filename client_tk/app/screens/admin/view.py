@@ -170,6 +170,10 @@ class AdminScreen(ctk.CTkFrame):
         self.validator_mode_var = tk.StringVar(value="sticker")  # "sticker" or "component_count"
         self.preset_validator_mode_var = tk.StringVar(value="sticker")
         self.preset_component_rois: list = []
+        self._calib_empty_mean: float = 0.0
+        self._calib_part_mean: float = 0.0
+        self._calib_part_std: float = 0.0
+        self._calib_sticker_std: float = 0.0
         self.preset_model_classes_var = tk.StringVar()
         self.preset_name_var = tk.StringVar()
         self.preset_description_var = tk.StringVar()
@@ -917,6 +921,10 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_max_tilt_var.set("" if sticker.get("max_tilt_degrees") is None else str(sticker.get("max_tilt_degrees")))
         self.preset_tilt_gate_var.set(bool(sticker.get("tilt_gate_enabled", False)))
         self.preset_gap_threshold_var.set(str(part_ready.get("gap_match_threshold", 0.85)))
+        # Part ready method and mean-std thresholds
+        self.preset_part_ready_method_var.set(str(part_ready.get("method", "gap_template_match")))
+        self.preset_mean_max_var.set(str(part_ready.get("mean_max", 105.0)))
+        self.preset_std_max_var.set(str(part_ready.get("std_max", 35.0)))
         # Update gap ref status label
         _gap_ref_path = detail.get("gap_ref_path") or part_ready.get("gap_ref_path")
         _gap_ref_type = part_ready.get("gap_ref_type", "raw")
@@ -982,8 +990,27 @@ class AdminScreen(ctk.CTkFrame):
 
     # Visual preset ROI picker
 
-    def _preset_roi_kind(self) -> str:
-        return "part_ready" if self.preset_roi_choice_var.get().strip() == "Part Ready ROI" else "sticker"
+    def _preset_roi_kind(self) -> str | None:
+        choice = self.preset_roi_choice_var.get().strip()
+        if choice == "Part Ready ROI":
+            return "part_ready"
+        if choice == "Sticker ROI":
+            return "sticker"
+        if choice.startswith("Component:"):
+            # Extract index from the dropdown position, not from name match
+            # This avoids name mismatch issues
+            try:
+                values = self.preset_roi_selector.cget("values")
+                for i, val in enumerate(values):
+                    if val == choice:
+                        # val format is "Component: {name}", index is i-0 (0-based in component list)
+                        # But we need to figure out which component index this corresponds to
+                        # Since dropdown lists components in order, index = position in dropdown
+                        if i < len(self.preset_component_rois):
+                            return f"component:{i}"
+            except Exception:
+                pass
+        return None
 
     def _roi_payload_from_vars(
         self,
@@ -1005,6 +1032,11 @@ class AdminScreen(ctk.CTkFrame):
                                 part_ready_rotation: float | None = None,
                                 sticker_rotation: float | None = None) -> None:
         if not hasattr(self, "preset_roi_picker"):
+            return
+        mode = self.preset_validator_mode_var.get()
+        if mode == "component_count":
+            # In component mode, only sync active ROI kind, don't touch positions
+            self.preset_roi_picker.set_active_roi(self._preset_roi_kind())
             return
         _pr_rot = (part_ready_rotation if part_ready_rotation is not None
                    else self.preset_roi_picker.get_roi("part_ready").get("rotation", 0.0))
@@ -1035,7 +1067,12 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_roi_picker.set_active_roi(self._preset_roi_kind())
 
     def _on_preset_roi_selected(self, _event=None) -> None:
-        self._sync_preset_roi_picker()
+        kind = self._preset_roi_kind()
+        if kind is not None and kind.startswith("component:"):
+            # Component mode: just set active ROI, don't overwrite positions
+            self.preset_roi_picker.set_active_roi(kind)
+        else:
+            self._sync_preset_roi_picker()
 
     def _on_preset_roi_changed(self, kind: str, roi: dict) -> None:
         target = (
@@ -1109,6 +1146,25 @@ class AdminScreen(ctk.CTkFrame):
                 cap_service.stop()
             except Exception:
                 pass
+
+    def _toggle_live_camera(self) -> None:
+        """Toggle live camera feed on the ROI picker canvas."""
+        picker = getattr(self, "preset_roi_picker", None)
+        if picker is None:
+            messagebox.showwarning("Camera", "ROI picker not initialized.")
+            return
+        if getattr(picker, "_cam_running", False):
+            picker.stop_live_camera()
+            self._live_cam_btn.configure(text="Start Live Camera")
+            self._set_status("Live camera stopped.")
+        else:
+            cam_idx = int(_float_or_default(self.preset_camera_index_var.get(), 0))
+            try:
+                picker.start_live_camera(cam_idx)
+                self._live_cam_btn.configure(text="Stop Live Camera")
+                self._set_status(f"Live camera {cam_idx} started. Drag ROIs on the live feed.")
+            except Exception as exc:
+                messagebox.showerror("Camera", f"Failed to start camera {cam_idx}: {exc}")
 
     def _reset_preset_roi(self) -> None:
         kind = self._preset_roi_kind()
@@ -1194,6 +1250,13 @@ class AdminScreen(ctk.CTkFrame):
             messagebox.showerror("Preset", str(exc))
     def save_and_deploy_preset(self) -> None:
         """Save current template as new version and deploy."""
+        # Stop live camera if running to prevent thread leak
+        _picker = getattr(self, "preset_roi_picker", None)
+        if _picker is not None and getattr(_picker, "_cam_running", False):
+            try:
+                _picker.stop_live_camera()
+            except Exception:
+                pass
         try:
             payload = self._preset_payload()
         except ValueError as exc:
@@ -1441,11 +1504,13 @@ class AdminScreen(ctk.CTkFrame):
             },
             "part_ready": {
                 "enabled": True,
-                "method": "gap_template_match",
+                "method": self.preset_part_ready_method_var.get(),
                 "gap_match_threshold": _float_or_default(self.preset_gap_threshold_var.get(), 0.85),
                 "gap_ref_path": self._get_existing_gap_ref_path(),
                 "stable_ms": 500,
                 "release_ms": 300,
+                "mean_max": _float_or_default(self.preset_mean_max_var.get(), 105.0),
+                "std_max": _float_or_default(self.preset_std_max_var.get(), 35.0),
             },
             "sticker": {
                 "part_name": expected_class,

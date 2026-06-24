@@ -269,6 +269,43 @@ class RoiPickerCanvas(ctk.CTkFrame):
         self._canvas.configure(bg="#0f172a")
 
     # ------------------------------------------------------------------
+    # Live Camera
+    # ------------------------------------------------------------------
+
+    def start_live_camera(self, camera_index: int = 0) -> None:
+        """Start capturing from camera and displaying on canvas."""
+        import threading
+        if hasattr(self, "_cam_thread") and self._cam_thread.is_alive():
+            self.stop_live_camera()
+        self._cam_running = True
+        self._cam = cv2.VideoCapture(camera_index)
+        if not self._cam.isOpened():
+            raise RuntimeError(f"Cannot open camera {camera_index}")
+        self._cam_thread = threading.Thread(target=self._cam_loop, daemon=True)
+        self._cam_thread.start()
+
+    def stop_live_camera(self) -> None:
+        """Stop live camera feed."""
+        self._cam_running = False
+        if hasattr(self, "_cam_thread"):
+            self._cam_thread.join(timeout=2.0)
+        if hasattr(self, "_cam") and self._cam is not None:
+            self._cam.release()
+            self._cam = None
+
+    def _cam_loop(self) -> None:
+        """Background thread: read frames and schedule redraw."""
+        while getattr(self, "_cam_running", False):
+            ret, frame = self._cam.read()
+            if not ret:
+                continue
+            self._source_frame = frame
+            try:
+                self.after(33, self.redraw)
+            except tk.TclError:
+                break
+
+    # ------------------------------------------------------------------
     # Draw
     # ------------------------------------------------------------------
 

@@ -349,6 +349,14 @@ class ApiClient:
     def delete_profile(self, profile_id: int) -> dict:
         return self._delete(f"/calibration/profiles/{profile_id}")
 
+    def compute_mean_std_threshold(self, empty_b64: str, part_b64: str, sticker_b64: str) -> dict:
+        """Send 3 calibration images to compute MEAN_MAX and STD_MAX thresholds."""
+        return self._post("/calibration/mean-std-threshold", {
+            "empty": empty_b64,
+            "part": part_b64,
+            "sticker": sticker_b64,
+        })
+
     def list_datasets(self) -> list[dict]:
         return self._get("/datasets")
 
