@@ -39,6 +39,10 @@ class SessionState:
     recent_events: list[dict[str, Any]] = field(default_factory=list)
     last_committed_result: dict[str, Any] | None = None
     part_ready_ratio_history: list[float] = field(default_factory=list)
+    part_ready_ema_ratio: float = 0.0
+    # Adaptive HSV thresholds — updated at runtime when hsv_adaptive=True
+    hsv_adaptive_lower: list[float] | None = None
+    hsv_adaptive_upper: list[float] | None = None
     last_overlay_b64: str | None = None
     # Settle-time debounce: timestamp of the first frame where part_ready was True
     # in the current ready-run.  Reset to None whenever part_ready becomes False or
@@ -77,6 +81,10 @@ class SessionState:
     # Hysteresis counter: number of consecutive settled frames.
     # Reset to 0 when part_ready/presence is lost.
     settle_frame_count: int = 0
+    # Timestamp when part first became settled (consecutive_part_ready_frames >= threshold).
+    # Used for reject timeout: if no accept-commit within reject_timeout_ms, reject as COMMIT_TIMEOUT.
+    # Reset to None when PLC returns to IDLE or when part leaves.
+    part_ready_settled_at: datetime | None = None
     # Inference cooldown: timestamp (ms) of last inference run.
     # Prevents inference from running more than once per second.
     consecutive_part_ready_frames: int = 0
@@ -117,3 +125,14 @@ class SessionState:
     awaiting_part_removal_after_commit: bool = False
     policy_holdover_expires_at: datetime | None = None
     part_absent_started_at: datetime | None = None
+    # ── Component Count Mode ──
+    component_count_history: list = field(default_factory=list)
+    # ── Logo Anti-Reclamp ──
+    expected_logo_edge: object = None  # np.ndarray | None
+    # ── Inference Result Cache for Hand-Obstruction Handling ──
+    # When YOLO detects a valid class but part_ready drops temporarily (e.g., hand
+    # obstructing during commit wait), we cache the last valid inference result and
+    # timestamp. If part_ready returns within the grace window, we use the cached
+    # result instead of re-running inference (which might fail due to obstruction).
+    last_valid_inference: dict[str, Any] | None = None
+    last_valid_inference_ts: float = 0.0  # monotonic timestamp

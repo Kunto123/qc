@@ -257,6 +257,9 @@ class ApiClient:
     def stop_session(self, session_id: str) -> dict:
         return self._post(f"/inspection/sessions/{session_id}/stop", {})
 
+    def manual_release(self, session_id: str) -> dict:
+        return self._post(f"/inspection/sessions/{session_id}/release", {})
+
     def push_frame(self, session_id: str, image_b64: str, *, response_mode: str | None = None) -> dict:
         payload: dict[str, object] = {"image_b64": image_b64}
         if response_mode:
@@ -345,6 +348,14 @@ class ApiClient:
 
     def delete_profile(self, profile_id: int) -> dict:
         return self._delete(f"/calibration/profiles/{profile_id}")
+
+    def compute_mean_std_threshold(self, empty_b64: str, part_b64: str, sticker_b64: str) -> dict:
+        """Send 3 calibration images to compute MEAN_MAX and STD_MAX thresholds."""
+        return self._post("/calibration/mean-std-threshold", {
+            "empty": empty_b64,
+            "part": part_b64,
+            "sticker": sticker_b64,
+        })
 
     def list_datasets(self) -> list[dict]:
         return self._get("/datasets")
@@ -559,3 +570,34 @@ class ApiClient:
     def delete_workstation(self, machine_id: str) -> dict:
         safe_id = quote(machine_id, safe="")
         return self._delete(f"/workstations/{safe_id}")
+
+    # ------------------------------------------------------------------
+    # Machine / PLC Settings
+    # ------------------------------------------------------------------
+
+    def get_machine_settings(self) -> dict:
+        return self._get("/machine-settings")
+
+    def update_machine_settings(self, payload: dict) -> dict:
+        return self._put("/machine-settings", payload)
+
+    def seed_machine_settings(self, force: bool = True) -> dict:
+        # Pass force as a query param (not embedded in the path) — embedding "?force=1"
+        # in the path while the transport also sets query_string raises
+        # "Query string is defined in the path and as an argument".
+        return self._request_json(
+            "POST", "/machine-settings/seed",
+            params={"force": "1" if force else "0"}, payload={},
+        )
+
+    def get_plc_diagnostics(self) -> dict:
+        return self._get("/machine-settings/plc/diagnostics")
+
+    def test_plc_coil(self, address: int, duration_ms: int, confirm: bool = True) -> dict:
+        return self._post(
+            "/machine-settings/plc/test-coil",
+            {"address": address, "duration_ms": duration_ms, "confirm": "yes" if confirm else "no"},
+        )
+
+    def plc_all_off(self) -> dict:
+        return self._post("/machine-settings/plc/all-off", {})

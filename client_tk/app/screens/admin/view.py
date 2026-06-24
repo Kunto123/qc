@@ -27,6 +27,7 @@ from client_tk.app.screens.admin.tabs.operators_tab import OperatorsTab
 from client_tk.app.screens.admin.tabs.models_tab import ModelsTab
 from client_tk.app.screens.admin.tabs.calibration_tab import CalibrationTab
 from client_tk.app.screens.admin.tabs.results_tab import ResultsTab
+from client_tk.app.screens.admin.tabs.machine_settings_tab import MachineSettingsTab
 from client_tk.app.theme import (
     ACCENT,
     ACCENT_HOVER,
@@ -166,7 +167,14 @@ class AdminScreen(ctk.CTkFrame):
 
         self.status_var = tk.StringVar(value="Admin ready.")
         self.refresh_time_var = tk.StringVar(value="")
-
+        self.validator_mode_var = tk.StringVar(value="sticker")  # "sticker" or "component_count"
+        self.preset_validator_mode_var = tk.StringVar(value="sticker")
+        self.preset_component_rois: list = []
+        self._calib_empty_mean: float = 0.0
+        self._calib_part_mean: float = 0.0
+        self._calib_part_std: float = 0.0
+        self._calib_sticker_std: float = 0.0
+        self.preset_model_classes_var = tk.StringVar()
         self.preset_name_var = tk.StringVar()
         self.preset_description_var = tk.StringVar()
         self.preset_model_choice_var = tk.StringVar()
@@ -174,10 +182,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_model_meta_path_var = tk.StringVar()
         self.preset_runtime_var = tk.StringVar(value="auto")
         self.preset_conf_threshold_var = tk.StringVar(value="0.25")
-        self.preset_expected_code_var = tk.StringVar()
         self.preset_expected_class_var = tk.StringVar()
-        self.preset_use_ocr_var = tk.BooleanVar(value=False)
-        self.preset_ocr_flip_fallback_var = tk.BooleanVar(value=True)
         self.preset_max_tilt_var = tk.StringVar(value="")
         self.preset_tilt_gate_var = tk.BooleanVar(value=False)
         self.preset_gap_threshold_var = tk.StringVar(value="0.85")
@@ -272,7 +277,7 @@ class AdminScreen(ctk.CTkFrame):
     def _build_tabs(self) -> None:
         notebook = ctk.CTkTabview(self, fg_color=APP_BG, corner_radius=0)
         notebook.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
-        for tab_name in ("Templates", "Data", "Training", "Models", "Calibration", "Operators", "Monitor"):
+        for tab_name in ("Templates", "Data", "Training", "Models", "Calibration", "Operators", "Monitor", "Machine Settings"):
             notebook.add(tab_name)
 
         original_tab = notebook.tab
@@ -303,6 +308,7 @@ class AdminScreen(ctk.CTkFrame):
         self.calibration_tab = notebook.tab("Calibration")
         self.operators_tab = notebook.tab("Operators")
         self.monitor_tab = notebook.tab("Monitor")
+        self.plc_settings_tab = notebook.tab("Machine Settings")
 
         self._build_presets_tab()
         self._build_data_tab()
@@ -311,6 +317,7 @@ class AdminScreen(ctk.CTkFrame):
         self._build_calibration_tab()
         self._build_operators_tab()
         self._build_monitor_tab()
+        self._build_plc_settings_tab()
 
     def _build_status_bar(self) -> None:
         status_bar = ctk.CTkFrame(self, fg_color=APP_BG, corner_radius=0)
@@ -335,6 +342,9 @@ class AdminScreen(ctk.CTkFrame):
 
     def _build_monitor_tab(self) -> None:
         ResultsTab(self, self.monitor_tab)
+
+    def _build_plc_settings_tab(self) -> None:
+        MachineSettingsTab(self, self.plc_settings_tab)
     # ------------------------------------------------------------------
     # Refresh and render
     def refresh_all(self) -> None:
@@ -558,13 +568,23 @@ class AdminScreen(ctk.CTkFrame):
             self.preset_table.insert("", "end", iid="__empty__", values=("-", "No presets.", "", ""))
             return
         for item in active_items:
+            # Get latest template name from cache (falls back to deployment snapshot)
+            template_id = int(item.get("template_id") or 0)
+            latest_name = item.get("template_name") or ""
+            if template_id > 0:
+                tpl = next(
+                    (t for t in self._templates_cache if int(t.get("id") or 0) == template_id),
+                    None,
+                )
+                if tpl:
+                    latest_name = tpl.get("name") or latest_name
             self.preset_table.insert(
                 "",
                 "end",
                 iid=f"dep:{item.get('id')}",
                 values=(
                     f"D{item.get('id')}",
-                    _safe_text(item.get("template_name")),
+                    _safe_text(latest_name),
                     _safe_text(item.get("template_version_id")),
                     "ACTIVE",
                 ),
@@ -830,10 +850,8 @@ class AdminScreen(ctk.CTkFrame):
             self.preset_table.focus("")
         self.preset_name_var.set("")
         self.preset_description_var.set("")
+        self.preset_expected_class_var.set("")
         self.preset_conf_threshold_var.set("0.25")
-        self.preset_expected_code_var.set("")
-        self.preset_use_ocr_var.set(False)
-        self.preset_ocr_flip_fallback_var.set(True)
         self.preset_max_tilt_var.set("")
         self.preset_tilt_gate_var.set(False)
         self.preset_gap_threshold_var.set("0.85")
@@ -899,13 +917,14 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_description_var.set(str(detail.get("description") or ""))
         sticker = detail.get("sticker") or {}
         part_ready = detail.get("part_ready") or {}
-        self.preset_expected_code_var.set(str(sticker.get("ocr_expected_code") or sticker.get("ocr_expected_text") or ""))
         self.preset_expected_class_var.set(str(sticker.get("expected_class") or ""))
-        self.preset_use_ocr_var.set(bool(sticker.get("use_ocr", False)))
-        self.preset_ocr_flip_fallback_var.set(bool(sticker.get("ocr_flip_fallback", True)))
         self.preset_max_tilt_var.set("" if sticker.get("max_tilt_degrees") is None else str(sticker.get("max_tilt_degrees")))
         self.preset_tilt_gate_var.set(bool(sticker.get("tilt_gate_enabled", False)))
         self.preset_gap_threshold_var.set(str(part_ready.get("gap_match_threshold", 0.85)))
+        # Part ready method and mean-std thresholds
+        self.preset_part_ready_method_var.set(str(part_ready.get("method", "gap_template_match")))
+        self.preset_mean_max_var.set(str(part_ready.get("mean_max", 105.0)))
+        self.preset_std_max_var.set(str(part_ready.get("std_max", 35.0)))
         # Update gap ref status label
         _gap_ref_path = detail.get("gap_ref_path") or part_ready.get("gap_ref_path")
         _gap_ref_type = part_ready.get("gap_ref_type", "raw")
@@ -971,8 +990,27 @@ class AdminScreen(ctk.CTkFrame):
 
     # Visual preset ROI picker
 
-    def _preset_roi_kind(self) -> str:
-        return "part_ready" if self.preset_roi_choice_var.get().strip() == "Part Ready ROI" else "sticker"
+    def _preset_roi_kind(self) -> str | None:
+        choice = self.preset_roi_choice_var.get().strip()
+        if choice == "Part Ready ROI":
+            return "part_ready"
+        if choice == "Sticker ROI":
+            return "sticker"
+        if choice.startswith("Component:"):
+            # Extract index from the dropdown position, not from name match
+            # This avoids name mismatch issues
+            try:
+                values = self.preset_roi_selector.cget("values")
+                for i, val in enumerate(values):
+                    if val == choice:
+                        # val format is "Component: {name}", index is i-0 (0-based in component list)
+                        # But we need to figure out which component index this corresponds to
+                        # Since dropdown lists components in order, index = position in dropdown
+                        if i < len(self.preset_component_rois):
+                            return f"component:{i}"
+            except Exception:
+                pass
+        return None
 
     def _roi_payload_from_vars(
         self,
@@ -994,6 +1032,11 @@ class AdminScreen(ctk.CTkFrame):
                                 part_ready_rotation: float | None = None,
                                 sticker_rotation: float | None = None) -> None:
         if not hasattr(self, "preset_roi_picker"):
+            return
+        mode = self.preset_validator_mode_var.get()
+        if mode == "component_count":
+            # In component mode, only sync active ROI kind, don't touch positions
+            self.preset_roi_picker.set_active_roi(self._preset_roi_kind())
             return
         _pr_rot = (part_ready_rotation if part_ready_rotation is not None
                    else self.preset_roi_picker.get_roi("part_ready").get("rotation", 0.0))
@@ -1024,7 +1067,12 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_roi_picker.set_active_roi(self._preset_roi_kind())
 
     def _on_preset_roi_selected(self, _event=None) -> None:
-        self._sync_preset_roi_picker()
+        kind = self._preset_roi_kind()
+        if kind is not None and kind.startswith("component:"):
+            # Component mode: just set active ROI, don't overwrite positions
+            self.preset_roi_picker.set_active_roi(kind)
+        else:
+            self._sync_preset_roi_picker()
 
     def _on_preset_roi_changed(self, kind: str, roi: dict) -> None:
         target = (
@@ -1099,6 +1147,25 @@ class AdminScreen(ctk.CTkFrame):
             except Exception:
                 pass
 
+    def _toggle_live_camera(self) -> None:
+        """Toggle live camera feed on the ROI picker canvas."""
+        picker = getattr(self, "preset_roi_picker", None)
+        if picker is None:
+            messagebox.showwarning("Camera", "ROI picker not initialized.")
+            return
+        if getattr(picker, "_cam_running", False):
+            picker.stop_live_camera()
+            self._live_cam_btn.configure(text="Start Live Camera")
+            self._set_status("Live camera stopped.")
+        else:
+            cam_idx = int(_float_or_default(self.preset_camera_index_var.get(), 0))
+            try:
+                picker.start_live_camera(cam_idx)
+                self._live_cam_btn.configure(text="Stop Live Camera")
+                self._set_status(f"Live camera {cam_idx} started. Drag ROIs on the live feed.")
+            except Exception as exc:
+                messagebox.showerror("Camera", f"Failed to start camera {cam_idx}: {exc}")
+
     def _reset_preset_roi(self) -> None:
         kind = self._preset_roi_kind()
         if kind == "part_ready":
@@ -1150,6 +1217,18 @@ class AdminScreen(ctk.CTkFrame):
             version_id = int(saved.get("version_id") or saved.get("current_version_id") or 0)
             self.current_template_id = template_id
             self.current_template_version_id = version_id
+            # Update template_name in existing active deployment records
+            new_name = payload.get("name", "").strip()
+            if new_name and hasattr(self, "_deployments_cache"):
+                for dep in self._deployments_cache:
+                    if int(dep.get("template_id") or 0) == template_id and dep.get("is_active"):
+                        try:
+                            self.api.update_deployment(
+                                int(dep.get("id") or 0),
+                                {"template_name": new_name},
+                            )
+                        except Exception:
+                            pass
             # Reload exact version detail to wizard form so values reflect the update
             try:
                 if version_id:
@@ -1171,13 +1250,21 @@ class AdminScreen(ctk.CTkFrame):
             messagebox.showerror("Preset", str(exc))
     def save_and_deploy_preset(self) -> None:
         """Save current template as new version and deploy."""
+        # Stop live camera if running to prevent thread leak
+        _picker = getattr(self, "preset_roi_picker", None)
+        if _picker is not None and getattr(_picker, "_cam_running", False):
+            try:
+                _picker.stop_live_camera()
+            except Exception:
+                pass
         try:
             payload = self._preset_payload()
         except ValueError as exc:
             messagebox.showerror("Preset", str(exc))
             return
         try:
-            if self.current_template_id:
+            is_update = bool(self.current_template_id)
+            if is_update:
                 saved = self.api.update_template(self.current_template_id, payload)
             else:
                 saved = self.api.create_template(payload)
@@ -1197,6 +1284,20 @@ class AdminScreen(ctk.CTkFrame):
                     "template_version_id": version_id,
                 }
             )
+            # Update template_name in existing active deployment records
+            # This keeps the name in sync when renaming a deployed template
+            if is_update:
+                new_name = payload.get("name", "").strip()
+                if new_name and hasattr(self, "_deployments_cache"):
+                    for dep in self._deployments_cache:
+                        if int(dep.get("template_id") or 0) == template_id and dep.get("is_active"):
+                            try:
+                                self.api.update_deployment(
+                                    int(dep.get("id") or 0),
+                                    {"template_name": new_name},
+                                )
+                            except Exception:
+                                pass
         except Exception as exc:
             messagebox.showerror("Preset", str(exc))
             return
@@ -1342,17 +1443,18 @@ class AdminScreen(ctk.CTkFrame):
 
     def _preset_payload(self) -> dict:
         name = self.preset_name_var.get().strip()
-        expected_code = self.preset_expected_code_var.get().strip()
         expected_class = self.preset_expected_class_var.get().strip()
         model_path = self.preset_model_path_var.get().strip()
         if not name:
             raise ValueError("Preset name is required.")
         if not model_path:
             raise ValueError("Model is required.")
-        if not expected_code:
-            raise ValueError("Sticker code is required.")
-        if not expected_class:
-            raise ValueError("Expected class is required.")
+        mode = self.preset_validator_mode_var.get()
+        if mode == "component_count":
+            expected_class = expected_class or ""
+        else:
+            if not expected_class:
+                raise ValueError("Expected class is required.")
         max_tilt = None
         if self.preset_max_tilt_var.get().strip():
             max_tilt = _float_or_default(self.preset_max_tilt_var.get(), 5.0)
@@ -1391,14 +1493,10 @@ class AdminScreen(ctk.CTkFrame):
                 "stream_fps": 10.0,
                 "inference_fps": 4.0,
                 "imgsz": 640,
-                "classes": [expected_class],
+                "classes": [c.strip() for c in self.preset_model_classes_var.get().split(",") if c.strip()] or [expected_class],
                 "enable_ergonomic_check": False,
                 "ergonomic_pose_model_path": None,
                 "ergonomic_min_keypoint_conf": 0.35,
-                "ocr_engine": "default",
-                "ocr_language": "eng",
-                "ocr_psm": 13,
-                "ocr_allowlist": "",
                 "text_anchor_class": "text_anchor",
                 "center_dot_class": "center_dot",
                 "anchor_crop_padding_ratio": 0.08,
@@ -1406,17 +1504,19 @@ class AdminScreen(ctk.CTkFrame):
             },
             "part_ready": {
                 "enabled": True,
-                "method": "gap_template_match",
+                "method": self.preset_part_ready_method_var.get(),
                 "gap_match_threshold": _float_or_default(self.preset_gap_threshold_var.get(), 0.85),
                 "gap_ref_path": self._get_existing_gap_ref_path(),
                 "stable_ms": 500,
                 "release_ms": 300,
+                "mean_max": _float_or_default(self.preset_mean_max_var.get(), 105.0),
+                "std_max": _float_or_default(self.preset_std_max_var.get(), 35.0),
             },
             "sticker": {
-                "part_name": expected_code,
+                "part_name": expected_class,
                 "expected_class": expected_class,
                 "enabled": True,
-                "validator_mode": "sticker_only" if self.preset_use_ocr_var.get() else "ml_detection",
+                "validator_mode": "ml_detection",
                 "min_roi_confidence": 0.0,
                 "min_class_confidence": None,
                 "max_offset_x": 80,
@@ -1425,20 +1525,6 @@ class AdminScreen(ctk.CTkFrame):
                 "expected_center_y": None,
                 "expected_tilt_degrees": 0.0,
                 "max_tilt_degrees": max_tilt,
-                "use_ocr": bool(self.preset_use_ocr_var.get()),
-                "ocr_expected_code": expected_code,
-                "ocr_flip_fallback": bool(self.preset_ocr_flip_fallback_var.get()),
-                "ocr_mode": None,
-                "ocr_expected_text": expected_code,
-                "ocr_min_confidence": None,
-                "ocr_regex": None,
-                "ocr_canonical_map": {},
-                "anchor_min_confidence": None,
-                "dot_min_confidence": None,
-                "expected_dot_x": None,
-                "expected_dot_y": None,
-                "max_anchor_offset_x": None,
-                "max_anchor_offset_y": None,
                 "tilt_gate_enabled": bool(self.preset_tilt_gate_var.get()),
                 "commit_stable_frames": 1,
                 "part_ready_settle_ms": None,

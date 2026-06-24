@@ -112,6 +112,9 @@ def update_deployment(deployment_id: int):
         updates["template_name"] = str((version.get("template") or {}).get("name") or current.get("template_name") or "")
         updates["version_number"] = int(version.get("version_number") or current.get("version_number") or 0)
 
+    if "template_name" in payload:
+        updates["template_name"] = str(payload.get("template_name") or "").strip()
+
     actor = getattr(g, "current_user", None)
     if actor is not None:
         updates["deployed_by"] = actor.id

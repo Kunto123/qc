@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import base64
+
 from flask import Blueprint, jsonify, request
+import cv2
+import numpy as np
 
 from backend.app.core.container import profiles_repo
 from backend.app.core.http import require_auth, require_roles
@@ -110,4 +114,64 @@ def delete_profile(profile_id: int):
     if not ok:
         return jsonify({"error": "Profile not found"}), 404
     return jsonify({"deleted": True, "id": profile_id})
+
+
+@calibration_blueprint.post("/mean-std-threshold")
+@require_roles(UserRole.ADMIN)
+def compute_mean_std_threshold():
+    """Compute MEAN_MAX and STD_MAX from 3 calibration images.
+
+    Expected JSON payload:
+    {
+      "empty": "<base64 image — ROI kosong, no part>",
+      "part": "<base64 image — part hitam polos>",
+      "sticker": "<base64 image — part + sticker>"
+    }
+
+    Returns computed thresholds and per-condition statistics.
+    """
+    payload = request.get_json(force=True) or {}
+    required_keys = ("empty", "part", "sticker")
+    missing = [k for k in required_keys if not payload.get(k)]
+    if missing:
+        return jsonify({"error": f"Missing required images: {missing}"}), 400
+
+    def _decode_and_stats(b64_str: str) -> dict[str, float]:
+        raw = base64.b64decode(b64_str)
+        arr = np.frombuffer(raw, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("Invalid image data")
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        return {"mean": round(float(gray.mean()), 4), "std": round(float(gray.std()), 4)}
+
+    try:
+        empty_stats = _decode_and_stats(str(payload["empty"]))
+        part_stats = _decode_and_stats(str(payload["part"]))
+        sticker_stats = _decode_and_stats(str(payload["sticker"]))
+    except (ValueError, Exception) as exc:
+        return jsonify({"error": f"Image processing failed: {exc}"}), 400
+
+    mean_max = round((empty_stats["mean"] + part_stats["mean"]) / 2.0, 2)
+    std_max = round((part_stats["std"] + sticker_stats["std"]) / 2.0, 2)
+
+    return jsonify({
+        "mean_max": mean_max,
+        "std_max": std_max,
+        "conditions": {
+            "empty": empty_stats,
+            "part": part_stats,
+            "sticker": sticker_stats,
+        },
+        "gaps": {
+            "mean_gap": round(empty_stats["mean"] - part_stats["mean"], 2),
+            "std_gap": round(sticker_stats["std"] - part_stats["std"], 2),
+        },
+        "recommendation": {
+            "mean_max_safe": round(mean_max * 0.9, 2),
+            "mean_max_tight": round(mean_max * 1.1, 2),
+            "std_max_safe": round(std_max * 0.9, 2),
+            "std_max_tight": round(std_max * 1.1, 2),
+        },
+    })
 

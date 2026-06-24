@@ -39,11 +39,6 @@ class AppConfig:
     postgresql_schema: str = os.getenv("POSTGRESQL_SCHEMA", "public").strip() or "public"
     postgresql_sslmode: str = os.getenv("POSTGRESQL_SSLMODE", "prefer").strip().lower() or "prefer"
     sticker_inference_mode: str = os.getenv("QC_SUITE_STICKER_INFERENCE_MODE", "auto").strip().lower() or "auto"
-    sticker_ocr_mode: str = os.getenv("QC_SUITE_STICKER_OCR_MODE", "legacy").strip().lower() or "legacy"
-    sticker_ocr_required: bool = os.getenv("QC_SUITE_STICKER_OCR_REQUIRED", "0").strip() == "1"
-    sticker_ocr_fail_fast: bool = os.getenv("QC_SUITE_STICKER_OCR_FAIL_FAST", "0").strip() == "1"
-    default_ocr_engine: str = os.getenv("QC_SUITE_OCR_ENGINE", "disabled").strip().lower() or "disabled"
-    default_ocr_min_confidence: float = max(0.0, min(1.0, float(os.getenv("QC_SUITE_OCR_MIN_CONFIDENCE", "0.70"))))
     default_sticker_model_path: str = DEFAULT_STICKER_MODEL_PATH
     training_engine_mode: str = os.getenv("QC_SUITE_TRAINING_ENGINE_MODE", "real").strip().lower() or "real"
     training_timeout_minutes: int = max(1, int(os.getenv("QC_SUITE_TRAINING_TIMEOUT_MINUTES", "30")))
@@ -67,6 +62,10 @@ class AppConfig:
     # Templates that explicitly set part_ready_settle_ms (including 0 to bypass) ignore it.
     # Default 0 = no settle (backward compatible).
     part_ready_settle_ms_default: int = max(0, int(os.getenv("QC_SUITE_PART_READY_SETTLE_MS", "0")))
+    # Reject timeout (ms): max time after part settled before auto-reject.
+    # If no accept-commit happens within this window, part is rejected as COMMIT_TIMEOUT.
+    # Default 15000 = 15 seconds. Set to 0 to disable timeout reject.
+    reject_timeout_ms: int = max(0, int(os.getenv("QC_SUITE_REJECT_TIMEOUT_MS", "15000")))
     # Consecutive reject threshold — number of consecutive reject decisions required
     # before a reject is actually committed (PLC reject). 0 = immediate (no delay).
     # Set to 2-3 to allow operator to reposition sticker before final reject.
@@ -77,11 +76,12 @@ class AppConfig:
     # 0 = legacy behavior (latch resets immediately when raw drops).
     part_ready_release_ms_default: int = max(0, int(os.getenv("QC_SUITE_PART_READY_RELEASE_MS", "300")))
     # ── Inspection Policy ──
-    # Hard reject reasons: only these trigger PLC buzzer/reject.
-    # Non-hard reject reasons (NOT_FOUND, WRONG_TYPE, etc.) become pending/adjust
-    # without PLC commit. Comma-separated list of RejectReasonCode values.
+    # Hard reject reasons: only these (plus COMMIT_TIMEOUT safety-net) are terminal —
+    # they commit + trigger PLC reclamp. Everything else (NOT_FOUND, gap, low conf, etc.)
+    # stays pending so the system keeps inferring until ACCEPT. Comma-separated
+    # list of RejectReasonCode values.
     inspect_hard_reject_reasons: str = os.getenv(
-        "QC_SUITE_INSPECT_HARD_REJECT_REASONS", "OUT_OF_ANGLE"
+        "QC_SUITE_INSPECT_HARD_REJECT_REASONS", "OUT_OF_ANGLE,WRONG_TYPE"
     ).strip()
     # Commit grace period (ms): minimum time after inference starts before any
     # commit (accept or hard reject) is allowed. This gives operator time to
@@ -92,6 +92,10 @@ class AppConfig:
     accept_stable_frames: int = max(1, int(os.getenv("QC_SUITE_ACCEPT_STABLE_FRAMES", "1")))
     # accept: minimal stable elapsed ms before commit (default 200).
     accept_stable_ms: int = max(0, int(os.getenv("QC_SUITE_ACCEPT_STABLE_MS", "200")))
+    # Inference cache grace period (ms): if part_ready drops temporarily (e.g., hand
+    # obstructing during commit wait), use cached inference result if within this
+    # window. Default 300ms. Set 0 to disable.
+    inference_cache_grace_ms: int = max(0, int(os.getenv("QC_SUITE_INFERENCE_CACHE_GRACE_MS", "300")))
     # Detection holdover: when ACCEPT transitions to NOT_FOUND briefly,
     # hold the ACCEPT state for this duration before resetting stability.
     # 0 = disabled (legacy: reset immediately on key change).
@@ -144,7 +148,7 @@ class AppConfig:
     # QC_SUITE_PLC_ENABLED=1  — activate the PLC worker (default off).
     # QC_SUITE_PLC_DRY_RUN=1  — log commands only, no real socket (default on so
     #   accidentally enabling PLC without hardware never opens a TCP connection).
-    # QC_SUITE_PLC_TRANSPORT=tcp|rtu — choose Modbus TCP gateway vs serial RTU relay.
+    # QC_SUITE_PLC_TRANSPORT=tcp|rtu|fx — choose Modbus TCP gateway vs serial RTU relay vs FX Computer Link.
     # QC_SUITE_PLC_HOST / QC_SUITE_PLC_PORT — Modbus TCP endpoint or gateway address.
     # QC_SUITE_PLC_SERIAL_PORT / BAUDRATE / PARITY / BYTESIZE / STOPBITS — RTU serial line.
     # QC_SUITE_PLC_TIMEOUT_MS — socket connect/send timeout.

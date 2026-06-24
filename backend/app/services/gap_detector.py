@@ -43,6 +43,53 @@ def get_ref_path(template_id: int) -> Path:
     return ref_dir / f"{template_id}.png"
 
 
+def get_logo_ref_path(template_id: int) -> Path:
+    """Get the file path for a template's logo reference patch."""
+    ref_dir = Path(project_root) / PART_READY_REF_DIR
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    return ref_dir / f"{template_id}_logo.png"
+
+
+def load_logo_ref(ref_path: str | None = None, template_id: int | None = None) -> np.ndarray | None:
+    """Load logo reference edge map from disk. Returns None if file missing."""
+    if ref_path:
+        p = Path(ref_path)
+        if p.is_file():
+            img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+            return img if img is not None else None
+    if template_id is not None:
+        p = get_logo_ref_path(template_id)
+        if p.is_file():
+            img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+            return img if img is not None else None
+    return None
+
+
+def save_logo_ref(frame_bgr: np.ndarray, roi: dict, save_path: str) -> tuple[bool, str]:
+    """Crop logo ROI from frame, convert to edge map, save as PNG."""
+    try:
+        rx, ry = int(roi.get("x", 0)), int(roi.get("y", 0))
+        rw, rh = int(roi.get("w", 0)), int(roi.get("h", 0))
+        if rw <= 0 or rh <= 0:
+            return False, f"ROI dimensions invalid: w={rw} h={rh}"
+        fh, fw = frame_bgr.shape[:2]
+        rx = max(0, min(rx, fw - 1))
+        ry = max(0, min(ry, fh - 1))
+        rw = min(rw, fw - rx)
+        rh = min(rh, fh - ry)
+        roi_frame = frame_bgr[ry:ry+rh, rx:rx+rw]
+        if roi_frame.size == 0:
+            return False, "ROI region empty"
+        gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+        edge_map = _auto_canny(gray)
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(save_path, edge_map)
+        return True, ""
+    except Exception as exc:
+        _logger.warning("save_logo_ref failed: %s", exc, exc_info=True)
+        return False, str(exc)
+
+
 def load_ref_patch(ref_path: str | None, template_id: int | None = None) -> np.ndarray | None:
     """Load reference patch PNG from disk. Returns None if file missing."""
     if ref_path:

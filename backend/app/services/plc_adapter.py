@@ -10,7 +10,9 @@ Referensi: D:/pythonmodbus/testall.py
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 import time
 from abc import ABC, abstractmethod
 
@@ -19,6 +21,16 @@ try:
 except ModuleNotFoundError:
     ModbusSerialClient = None
     ModbusTcpClient = None
+
+try:
+    from fxplc.client.FXPLCClient import FXPLCClient
+    from fxplc.transports.TransportSerial import TransportSerial
+except ImportError:
+    # Catch ImportError (not just ModuleNotFoundError) so a partial/namespace
+    # install or a missing fxplc dependency (e.g. pyserial) degrades gracefully
+    # instead of crashing app startup. The FX adapter raises a clear error on use.
+    FXPLCClient = None  # type: ignore[assignment]
+    TransportSerial = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -211,11 +223,192 @@ class ModbusTcpPlcAdapter(PlcAdapter):
         return [bool(resp.bits[i]) for i in range(count)]
 
 
+class FXComputerLinkPlcAdapter(PlcAdapter):
+    """FX Computer Link (fxplc) adapter — bridge async fxplc to sync PlcAdapter.
+
+    Uses a dedicated event loop on its own thread + persistent connection.
+    All calls are serialized through the single loop thread, matching the
+    single-threaded PLC worker: no race conditions.
+    """
+
+    def __init__(
+        self,
+        port: str = "COM3",
+        baudrate: int = 38400,
+        timeout: float = 2.0,
+    ):
+        if FXPLCClient is None or TransportSerial is None:
+            raise RuntimeError(
+                "fxplc is not installed. Install via: "
+                "pip install git+https://github.com/KrystianD/fxplc.git"
+            )
+        self._port = port
+        self._baudrate = baudrate
+        self._timeout = timeout
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_thread: threading.Thread | None = None
+        self._client: FXPLCClient | None = None
+        self._transport = None  # TransportSerial — kept so we can close the serial port
+        self._connected: bool = False
+        self._lock = threading.Lock()
+
+    def connect(self) -> None:
+        """Start the event loop thread and open serial connection.
+
+        Safe to call again after a failed connect (e.g. wrong/unplugged COM port):
+        the event loop is reused instead of leaking a new thread each retry.
+        """
+        with self._lock:
+            if self._connected and self._client is not None:
+                return
+            # Reuse a still-running loop; only start one if needed.
+            if self._loop is None or self._loop.is_closed():
+                self._loop = asyncio.new_event_loop()
+                self._loop_thread = threading.Thread(
+                    target=self._loop.run_forever,
+                    name="qc-fxplc-loop",
+                    daemon=True,
+                )
+                self._loop_thread.start()
+            try:
+                # TransportSerial + FXPLCClient are SYNC constructors (pyserial opens
+                # the port in __init__). They must NOT go through _run_sync (which
+                # expects a coroutine). The event loop is only used for the async
+                # read_bit/write_bit calls later.
+                self._transport = TransportSerial(
+                    self._port, baudrate=self._baudrate, timeout=self._timeout
+                )
+                self._client = FXPLCClient(self._transport)
+            except Exception:
+                # Close any half-opened serial handle so the port is freed and the
+                # next connect() doesn't hit "Access is denied" on its own leak.
+                self._close_transport_quietly()
+                self._client = None
+                self._connected = False
+                raise
+            self._connected = True
+            logger.info(
+                "[plc-fx] connected (port=%s, baudrate=%d, timeout=%.1fs)",
+                self._port,
+                self._baudrate,
+                self._timeout,
+            )
+
+    def disconnect(self) -> None:
+        """Close serial connection and stop the event loop thread."""
+        with self._lock:
+            self._client = None
+            self._close_transport_quietly()
+            self._connected = False
+            if self._loop is not None:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._loop_thread is not None:
+                self._loop_thread.join(timeout=3.0)
+                self._loop_thread = None
+            if self._loop is not None:
+                self._loop.close()
+                self._loop = None
+            logger.info("[plc-fx] disconnected from %s", self._port)
+
+    def is_connected(self) -> bool:
+        return self._connected and self._client is not None
+
+    def _ensure_connected(self) -> None:
+        """Lazily (re)connect on demand. Raises the REAL underlying serial error
+        (port busy / access denied / not found) instead of a generic 'not connected',
+        so failures surfaced via test-coil / writes are actionable."""
+        if self._client is not None:
+            return
+        self.connect()  # may raise the underlying serial error
+        if self._client is None:
+            raise RuntimeError(f"[plc-fx] not connected (port={self._port})")
+
+    def write_coil(self, address: int, value: bool) -> None:
+        self._ensure_connected()
+        fx_label = f"Y{format(address, 'o')}"
+        self._run_sync(self._client.write_bit(fx_label, bool(value)))
+        time.sleep(0.05)
+
+    def write_coils(self, coils: dict[int, bool]) -> None:
+        for addr, val in coils.items():
+            self.write_coil(addr, val)
+
+    def read_inputs(self, address: int = 0, count: int = 8) -> list[bool]:
+        self._ensure_connected()
+        result: list[bool] = []
+        for i in range(address, address + count):
+            fx_label = f"X{format(i, 'o')}"
+            try:
+                bit = self._run_sync(self._client.read_bit(fx_label))
+                result.append(bool(bit))
+            except Exception as exc:
+                logger.warning(
+                    "[plc-fx] read_bit %s failed: %s — filling False", fx_label, exc
+                )
+                result.append(False)
+        return result
+
+    def all_off(self, num_channels: int = 4) -> None:
+        """Turn off Y0..Ynum_channels-1."""
+        for i in range(num_channels):
+            try:
+                self.write_coil(i, False)
+            except Exception as exc:
+                logger.error("[plc-fx] all_off coil %d failed: %s", i, exc)
+        logger.info("[plc-fx] all_off done (%d channels)", num_channels)
+
+    def status(self) -> dict:
+        return {
+            "adapter": type(self).__name__,
+            "connected": self.is_connected(),
+            "transport": "fx",
+            "port": self._port,
+        }
+
+    # ── Internal helpers ──────────────────────────────────────────────
+
+    def _close_transport_quietly(self) -> None:
+        """Close the serial transport if open, swallowing errors. Releases COM port."""
+        t = self._transport
+        self._transport = None
+        if t is None:
+            return
+        for closer in ("close", "disconnect"):
+            fn = getattr(t, closer, None)
+            if callable(fn):
+                try:
+                    fn()
+                    return
+                except Exception:
+                    pass
+        # Fallback: close the underlying pyserial object if exposed.
+        for attr in ("_serial", "serial", "ser"):
+            s = getattr(t, attr, None)
+            if s is not None and hasattr(s, "close"):
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+    def _run_sync(self, coro):
+        """Submit a coroutine to the dedicated loop and block until done."""
+        if self._loop is None or self._loop.is_closed():
+            raise RuntimeError("[plc-fx] event loop is not running")
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result(timeout=max(self._timeout, 5.0))
+
+
 def build_plc_adapter(config) -> PlcAdapter:
     """Factory: pilih adapter berdasarkan config."""
     if config.plc_dry_run:
         return DryRunPlcAdapter()
 
+    if config.plc_transport == "fx":
+        return FXComputerLinkPlcAdapter(
+            port=config.plc_serial_port or "COM3",
+            baudrate=config.plc_serial_baudrate,
+            timeout=config.plc_timeout_ms / 1000.0,
+        )
     if config.plc_transport == "rtu":
         return ModbusRtuPlcAdapter(
             port=config.plc_serial_port or "COM7",

@@ -697,7 +697,6 @@ class UiSmokeTest(unittest.TestCase):
             screen.preset_line_var.set("LINE-A")
             screen.preset_station_var.set("ST-01")
             screen.preset_model_path_var.set("data/models/sticker.pt")
-            screen.preset_expected_code_var.set("K0W-HB0")
             screen.preset_expected_class_var.set("K0W-HB0")
 
             screen.save_and_deploy_preset()
@@ -786,7 +785,6 @@ class UiSmokeTest(unittest.TestCase):
             screen.preset_station_var.set("ST-01")
             screen.preset_model_path_var.set("data/models/sticker.pt")
             screen.preset_conf_threshold_var.set("0.42")
-            screen.preset_expected_code_var.set("K0W-HB0")
             screen.preset_expected_class_var.set("K0W-HB0")
 
             screen.save_and_deploy_preset()
