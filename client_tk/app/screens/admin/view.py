@@ -1075,6 +1075,9 @@ class AdminScreen(ctk.CTkFrame):
             self._sync_preset_roi_picker()
 
     def _on_preset_roi_changed(self, kind: str, roi: dict) -> None:
+        # Ignore component ROIs — they are handled by _on_comp_roi_picker_changed
+        if kind is not None and kind.startswith("component:"):
+            return
         target = (
             (self.part_ready_roi_x_var, self.part_ready_roi_y_var, self.part_ready_roi_w_var, self.part_ready_roi_h_var)
             if kind == "part_ready"
@@ -1511,6 +1514,7 @@ class AdminScreen(ctk.CTkFrame):
                 "release_ms": 300,
                 "mean_max": _float_or_default(self.preset_mean_max_var.get(), 105.0),
                 "std_max": _float_or_default(self.preset_std_max_var.get(), 35.0),
+                "min_match_ratio": _float_or_default(self.preset_min_match_ratio_var.get(), 0.5),
             },
             "sticker": {
                 "part_name": expected_class,

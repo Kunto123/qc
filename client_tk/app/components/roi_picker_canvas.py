@@ -478,7 +478,8 @@ class RoiPickerCanvas(ctk.CTkFrame):
             try:
                 idx = int(kind.split(":")[1])
                 if 0 <= idx < len(self._component_rois):
-                    self._component_rois[idx] = normalized
+                    existing_name = self._component_rois[idx].get("name", "")
+                    self._component_rois[idx] = {**normalized, "name": existing_name}
                 else:
                     return
             except (ValueError, IndexError):

@@ -144,6 +144,7 @@ class TemplatesTab:
         # Mean-Std threshold variables (initialized lazily on first method change)
         a.preset_mean_max_var = tk.StringVar(value="105.0")
         a.preset_std_max_var = tk.StringVar(value="35.0")
+        a.preset_min_match_ratio_var = tk.StringVar(value="0.5")
 
         # Sticker-specific fields (shown in sticker mode, hidden in component mode)
         a._sticker_fields_start = 9
@@ -182,15 +183,16 @@ class TemplatesTab:
         a._mean_std_fields_start = 13
         a._entry(wizard, 13, 0, "MEAN_MAX", a.preset_mean_max_var, columnspan=2)
         a._entry(wizard, 14, 0, "STD_MAX", a.preset_std_max_var, columnspan=2)
-        a._mean_std_field_rows = [13, 14]
+        a._entry(wizard, 15, 0, "Min Confidence (0-1)", a.preset_min_match_ratio_var, columnspan=2)
+        a._mean_std_field_rows = [13, 14, 15]
 
-        # Reference patch buttons — shift down to row 15
+        # Reference patch buttons — row 19 (after mean_std fields + spacing)
         ref_btn_row = ttk.Frame(wizard)
-        ref_btn_row.grid(row=15, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 4))
+        ref_btn_row.grid(row=19, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 4))
         ttk.Button(ref_btn_row, text="Capture Reference", command=a._capture_part_ready_ref).pack(side="left", padx=(0, 6))
         ttk.Button(ref_btn_row, text="Upload Reference", command=a._upload_part_ready_ref).pack(side="left")
         a.gap_ref_status_label = ttk.Label(wizard, text="Referensi: belum dikonfigurasi", foreground="gray")
-        a.gap_ref_status_label.grid(row=16, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 6))
+        a.gap_ref_status_label.grid(row=20, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 6))
 
         ttk.Label(wizard, text="Rotation\\xB0\\n(0/90/180/270)", foreground="gray").grid(
             row=11, column=2, sticky="w", padx=(12, 4), pady=5,
@@ -206,7 +208,7 @@ class TemplatesTab:
 
         # Action buttons
         btn_row = ttk.Frame(wizard)
-        btn_row.grid(row=22, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 6))
+        btn_row.grid(row=25, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 6))
         btn_row.columnconfigure(0, weight=1)
         btn_row.columnconfigure(0, weight=1)
 
@@ -244,9 +246,9 @@ class TemplatesTab:
 
         # Keep references to part ready reference widgets (capture/upload ref, status label)
         # These are hidden in component_counter mode since part ready uses Modbus sensor only
-        # Now at rows 15 (ref buttons) and 16 (status label) — shifted for method selector
+        # Now at rows 19 (ref buttons) and 20 (status label) — shifted for method selector + mean_std fields
         a._part_ready_ref_widgets = []
-        for _r in (15, 16):
+        for _r in (19, 20):
             try:
                 for w in wizard.grid_slaves(row=_r):
                     a._part_ready_ref_widgets.append(w)
@@ -255,7 +257,7 @@ class TemplatesTab:
 
         # Keep references to mean-std threshold fields (shown only when method=mean_std_threshold)
         a._mean_std_field_widgets = []
-        for _r in (13, 14):
+        for _r in (13, 14, 15):
             try:
                 for w in wizard.grid_slaves(row=_r):
                     a._mean_std_field_widgets.append(w)
@@ -341,7 +343,7 @@ class TemplatesTab:
     # ROI Picker
     def _build_roi_picker(self, a, wizard) -> None:
         roi_panel = ctk.CTkFrame(wizard, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        roi_panel.grid(row=17, column=0, columnspan=4, sticky="ew", padx=12, pady=(12, 2))
+        roi_panel.grid(row=21, column=0, columnspan=4, sticky="ew", padx=12, pady=(12, 2))
         roi_panel.columnconfigure(0, weight=1)
         a._roi_picker_panel = roi_panel
 
@@ -378,7 +380,7 @@ class TemplatesTab:
         a.preset_roi_picker.on_roi_changed = lambda kind, roi: self._on_comp_roi_picker_changed(a, kind, roi)
         rois = []
         for _cr in a.preset_component_rois:
-            _roi = _cr.get("roi", {})
+            _roi = dict(_cr.get("roi", {}))
             _roi["name"] = _cr.get("name", "ROI")
             rois.append(_roi)
         a.preset_roi_picker.set_component_rois(rois)
@@ -394,35 +396,35 @@ class TemplatesTab:
         ctk.CTkLabel(calib_header, text="Mean-Std Calibration", font=("Segoe UI", 9, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w")
 
         # Step 1: Empty
-        self._calib_step1_frame = ctk.CTkFrame(a._calib_mean_std_frame, fg_color="transparent")
-        self._calib_step1_frame.grid(row=1, column=0, columnspan=4, sticky="ew", padx=8, pady=1)
-        ctk.CTkButton(self._calib_step1_frame, text="1. Capture Empty (no part)", width=160, height=26,
+        step1_frame = ctk.CTkFrame(a._calib_mean_std_frame, fg_color="transparent")
+        step1_frame.grid(row=1, column=0, columnspan=4, sticky="ew", padx=8, pady=1)
+        ctk.CTkButton(step1_frame, text="1. Capture Empty (no part)", width=160, height=26,
                       command=lambda: self._calib_capture(a, "empty")).grid(row=0, column=0, padx=(0, 4))
-        a._calib_empty_result = ctk.CTkLabel(self._calib_step1_frame, text="—", text_color=TEXT_SECONDARY, font=("Segoe UI", 9))
+        a._calib_empty_result = ctk.CTkLabel(step1_frame, text="—", text_color=TEXT_SECONDARY, font=("Segoe UI", 9))
         a._calib_empty_result.grid(row=0, column=1, sticky="w")
 
         # Step 2: Part
-        self._calib_step2_frame = ctk.CTkFrame(a._calib_mean_std_frame, fg_color="transparent")
-        self._calib_step2_frame.grid(row=2, column=0, columnspan=4, sticky="ew", padx=8, pady=1)
-        ctk.CTkButton(self._calib_step2_frame, text="2. Capture Part (black)", width=160, height=26,
+        step2_frame = ctk.CTkFrame(a._calib_mean_std_frame, fg_color="transparent")
+        step2_frame.grid(row=2, column=0, columnspan=4, sticky="ew", padx=8, pady=1)
+        ctk.CTkButton(step2_frame, text="2. Capture Part (black)", width=160, height=26,
                       command=lambda: self._calib_capture(a, "part")).grid(row=0, column=0, padx=(0, 4))
-        a._calib_part_result = ctk.CTkLabel(self._calib_step2_frame, text="—", text_color=TEXT_SECONDARY, font=("Segoe UI", 9))
+        a._calib_part_result = ctk.CTkLabel(step2_frame, text="—", text_color=TEXT_SECONDARY, font=("Segoe UI", 9))
         a._calib_part_result.grid(row=0, column=1, sticky="w")
 
         # Step 3: Sticker
-        self._calib_step3_frame = ctk.CTkFrame(a._calib_mean_std_frame, fg_color="transparent")
-        self._calib_step3_frame.grid(row=3, column=0, columnspan=4, sticky="ew", padx=8, pady=1)
-        ctk.CTkButton(self._calib_step3_frame, text="3. Capture Sticker", width=160, height=26,
+        step3_frame = ctk.CTkFrame(a._calib_mean_std_frame, fg_color="transparent")
+        step3_frame.grid(row=3, column=0, columnspan=4, sticky="ew", padx=8, pady=1)
+        ctk.CTkButton(step3_frame, text="3. Capture Sticker", width=160, height=26,
                       command=lambda: self._calib_capture(a, "sticker")).grid(row=0, column=0, padx=(0, 4))
-        a._calib_sticker_result = ctk.CTkLabel(self._calib_step3_frame, text="—", text_color=TEXT_SECONDARY, font=("Segoe UI", 9))
+        a._calib_sticker_result = ctk.CTkLabel(step3_frame, text="—", text_color=TEXT_SECONDARY, font=("Segoe UI", 9))
         a._calib_sticker_result.grid(row=0, column=1, sticky="w")
 
         # Result
-        self._calib_result_frame = ctk.CTkFrame(a._calib_mean_std_frame, fg_color="transparent")
-        self._calib_result_frame.grid(row=4, column=0, columnspan=4, sticky="ew", padx=8, pady=(4, 2))
-        a._calib_computed = ctk.CTkLabel(self._calib_result_frame, text="Capture all 3 to compute thresholds", text_color=TEXT_SECONDARY, font=("Segoe UI", 9))
+        result_frame = ctk.CTkFrame(a._calib_mean_std_frame, fg_color="transparent")
+        result_frame.grid(row=4, column=0, columnspan=4, sticky="ew", padx=8, pady=(4, 2))
+        a._calib_computed = ctk.CTkLabel(result_frame, text="Capture all 3 to compute thresholds", text_color=TEXT_SECONDARY, font=("Segoe UI", 9))
         a._calib_computed.grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(self._calib_result_frame, text="Apply", width=60, height=24, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+        ctk.CTkButton(result_frame, text="Apply", width=60, height=24, fg_color=ACCENT, hover_color=ACCENT_HOVER,
                       text_color=TEXT_ON_ACCENT, command=lambda: self._calib_apply(a)).grid(row=0, column=3, sticky="e", padx=(8, 0))
 
         for var in (
@@ -441,7 +443,7 @@ class TemplatesTab:
     # Component ROI Editor
     def _build_component_roi_editor(self, a, wizard) -> None:
         a._comp_editor_frame = ctk.CTkFrame(wizard, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        a._comp_editor_frame.grid(row=19, column=0, columnspan=4, sticky="ew", padx=12, pady=(8, 4))
+        a._comp_editor_frame.grid(row=23, column=0, columnspan=4, sticky="ew", padx=12, pady=(8, 4))
         a._comp_editor_frame.columnconfigure(0, weight=1)
         a._comp_editor_frame.grid_remove()
 
@@ -502,7 +504,7 @@ class TemplatesTab:
         # Sync data model to picker
         rois = []
         for _cr in a.preset_component_rois:
-            _roi = _cr.get("roi", {})
+            _roi = dict(_cr.get("roi", {}))
             _roi["name"] = _cr.get("name", "ROI")
             rois.append(_roi)
         a.preset_roi_picker.set_component_rois(rois)
@@ -624,12 +626,6 @@ class TemplatesTab:
     # ------------------------------------------------------------------
     # Mean-Std Calibration
     # ------------------------------------------------------------------
-
-    def _toggle_calib_mean_std(self, a) -> None:
-        if self._calib_toggle_var.get():
-            a._calib_mean_std_frame.grid()
-        else:
-            a._calib_mean_std_frame.grid_remove()
 
     def _calib_capture(self, a, step: str) -> None:
         """Capture a frame from camera and compute mean/std for the current ROI."""

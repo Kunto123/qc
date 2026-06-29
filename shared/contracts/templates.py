@@ -56,7 +56,7 @@ class PartReadyConfig:
     color_profile_id: int | None = None
     colorspace: str = "LAB"
     distance_threshold: float | None = None
-    min_match_ratio: float | None = None
+    min_match_ratio: float = 0.5
     hsv_lower: list[int] = field(default_factory=lambda: [0, 0, 0])
     hsv_upper: list[int] = field(default_factory=lambda: [180, 255, 80])
     stable_ms: int = 500
