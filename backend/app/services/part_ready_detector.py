@@ -201,6 +201,10 @@ def evaluate_mean_std_threshold(frame, config) -> dict[str, Any]:
         std_ratio = max(0.0, 1.0 - (std_val / std_max))
         match_ratio = (mean_ratio + std_ratio) / 2.0
 
+    # min_match_ratio: minimum confidence (0-1) required to consider part ready
+    # Default 0.5 means at least 50% confidence needed
+    _min_confidence = float(getattr(config, "min_match_ratio", None) or 0.5)
+
     return {
         "enabled": True,
         "method": "mean_std_threshold",
@@ -215,5 +219,6 @@ def evaluate_mean_std_threshold(frame, config) -> dict[str, Any]:
         "std_value": round(std_val, 4),
         "mean_max": mean_max,
         "std_max": std_max,
+        "min_match_ratio": _min_confidence,
         "condition": condition,
     }
