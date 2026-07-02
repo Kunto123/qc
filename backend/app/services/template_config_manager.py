@@ -15,8 +15,6 @@ class TemplateConfigManager:
             "schema_version": 1,
             "template_id": f"template-{template.id or 'draft'}-v{template.version_id or template.version_number}",
             "name": template.name,
-            "line_id": sticker.line,
-            "station_id": sticker.station,
             "camera": {
                 "camera_index": template.camera.camera_index,
                 "width": template.camera.width,
@@ -50,14 +48,6 @@ class TemplateConfigManager:
                 "model_path": vision.model_path,
                 "model_meta_path": vision.model_meta_path,
                 "yolo_confidence": vision.conf_threshold,
-                "ocr": {
-                    "enabled": bool(getattr(sticker, "use_ocr", False)) or str(sticker.ocr_mode or "").lower() in {"primary", "ocr", "ocr_primary"},
-                    "engine": vision.ocr_engine,
-                    "expected_code": getattr(sticker, "ocr_expected_code", "") or sticker.ocr_expected_text or sticker.expected_class,
-                    "expected_text": sticker.ocr_expected_text or getattr(sticker, "ocr_expected_code", "") or sticker.expected_class,
-                    "min_confidence": sticker.ocr_min_confidence if sticker.ocr_min_confidence is not None else 0.70,
-                    "flip_fallback": bool(getattr(sticker, "ocr_flip_fallback", True)),
-                },
                 "tilt": {
                     "method": "white_text_min_area_rect",
                     "expected_degrees": sticker.expected_tilt_degrees,
@@ -79,6 +69,6 @@ class TemplateConfigManager:
     def validate_runtime_template(payload: dict[str, Any]) -> None:
         if not isinstance(payload, dict):
             raise ValueError("template.json payload must be an object.")
-        for key in ("schema_version", "name", "line_id", "station_id", "rois", "part_ready", "inspection"):
+        for key in ("schema_version", "name", "rois", "part_ready", "inspection"):
             if key not in payload:
                 raise ValueError(f"template.json missing required field: {key}")

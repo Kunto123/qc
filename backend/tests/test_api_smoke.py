@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import atexit
 import base64
@@ -923,6 +923,7 @@ class ApiSmokeTest(unittest.TestCase):
         session_payload = session_response.get_json()
         state = inspection_session_service._require_session(str(session_payload["session_id"]))
         state.part_ready_ratio_history[:] = [0.13, 0.44, 0.71]
+        state.part_ready_ema_ratio = 0.55
 
         roi_response = self.client.post(
             f"/inspection/sessions/{session_payload['session_id']}/roi",
@@ -930,7 +931,9 @@ class ApiSmokeTest(unittest.TestCase):
             headers=_headers(self.operator_token),
         )
         self.assertEqual(roi_response.status_code, 200, roi_response.get_json())
+        # Sticker ROI change should NOT clear ratio history or EMA
         self.assertEqual(state.part_ready_ratio_history, [0.13, 0.44, 0.71])
+        self.assertEqual(state.part_ready_ema_ratio, 0.55)
 
     def test_04d_roi_update_part_ready_clears_history(self) -> None:
         from backend.app.core.container import inspection_session_service
@@ -950,6 +953,7 @@ class ApiSmokeTest(unittest.TestCase):
         session_payload = session_response.get_json()
         state = inspection_session_service._require_session(str(session_payload["session_id"]))
         state.part_ready_ratio_history[:] = [0.13, 0.44, 0.71]
+        state.part_ready_ema_ratio = 0.55
 
         roi_response = self.client.post(
             f"/inspection/sessions/{session_payload['session_id']}/roi",
@@ -957,7 +961,9 @@ class ApiSmokeTest(unittest.TestCase):
             headers=_headers(self.operator_token),
         )
         self.assertEqual(roi_response.status_code, 200, roi_response.get_json())
+        # Part-ready ROI change should clear both history and EMA
         self.assertEqual(state.part_ready_ratio_history, [])
+        self.assertEqual(state.part_ready_ema_ratio, 0.0)
 
     def test_05_engineer_workstation_endpoints(self) -> None:
         dataset_name = f"dataset-{uuid4().hex[:8]}"

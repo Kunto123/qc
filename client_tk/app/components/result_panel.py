@@ -52,10 +52,18 @@ class ResultPanel(ctk.CTkFrame):
         self.sticker_backend_var = self._build_field(self.sticker_frame, 3, "Backend")
         self.candidate_source_var = self._build_field(self.sticker_frame, 4, "Candidate Source")
         self.offset_var = self._build_field(self.sticker_frame, 5, "Offset")
-        self.ocr_text_var = self._build_field(self.sticker_frame, 6, "OCR Text")
-        self.ocr_confidence_var = self._build_field(self.sticker_frame, 7, "OCR Confidence")
-        self.anchor_offset_var = self._build_field(self.sticker_frame, 8, "Anchor Offset")
-        self.pose_angle_var = self._build_field(self.sticker_frame, 9, "Pose Angle")
+        self.anchor_offset_var = self._build_field(self.sticker_frame, 6, "Anchor Offset")
+        self.pose_angle_var = self._build_field(self.sticker_frame, 7, "Pose Angle")
+
+        self.component_frame = self._build_section("Component Count")
+        self.comp_mode_var = self._build_field(self.component_frame, 0, "Mode")
+        self.comp_roi_summary_var = self._build_field(self.component_frame, 1, "ROI Summary")
+        self.comp_reject_reason_var = self._build_field(self.component_frame, 2, "Reject Reason")
+
+        # Track section frames for show/hide
+        self._part_ready_section = self.part_ready_frame.master
+        self._sticker_section = self.sticker_frame.master
+        self._component_section = self.component_frame.master
 
         self.debug_frame = self._build_section("Inference Debug")
         self.raw_detection_count_var = self._build_field(self.debug_frame, 0, "Raw Detections")
@@ -66,6 +74,8 @@ class ResultPanel(ctk.CTkFrame):
         self.response_mode_var = self._build_field(self.debug_frame, 5, "Response Mode")
         self.latency_total_var = self._build_field(self.debug_frame, 6, "Latency Total")
         self.latency_inference_var = self._build_field(self.debug_frame, 7, "Inference Time")
+        # Anchor for restoring section order on show/hide
+        self._debug_section = self.debug_frame.master
 
         self.commit_frame = self._build_section("Commit Details")
         self.reason_var = self._build_field(self.commit_frame, 0, "Reason")
@@ -76,6 +86,16 @@ class ResultPanel(ctk.CTkFrame):
         self.event_var = self._build_field(self.commit_frame, 5, "Event ID")
         self.commit_var = self._build_field(self.commit_frame, 6, "Committed At")
         self.bind("<Configure>", self._on_resize, add="+")
+
+    def set_mode(self, validator_mode: str) -> None:
+        """Show/hide validation sections based on template validator mode."""
+        mode = (validator_mode or "sticker").strip().lower()
+        show_component = mode == "component_count"
+        target_show = self._component_section if show_component else self._sticker_section
+        target_hide = self._sticker_section if show_component else self._component_section
+        target_hide.pack_forget()
+        if not target_show.winfo_manager():
+            target_show.pack(fill="x", padx=12, pady=(0, 10), before=self._debug_section)
 
     def _build_section(self, title: str) -> ctk.CTkFrame:
         section = ctk.CTkFrame(self, fg_color=PANEL_ALT_BG, corner_radius=12, border_width=1, border_color=BORDER)
@@ -139,6 +159,36 @@ class ResultPanel(ctk.CTkFrame):
         self.live_state_var.configure(text=str(payload.get("event_state") or "-").upper())
         self.live_decision_var.configure(text=str(live_validation.get("decision") or "-"))
         self.live_reason_var.configure(text=str(live_reason))
+
+        # Component count display
+        live_details = live_validation.get("validation_details") or {}
+        self._validator_mode = str(live_details.get("mode") or "sticker").strip().lower()
+        # Component count display
+        if self._validator_mode == "component_count":
+            comp_details = display_details.get("component_rois") or []
+            self.comp_mode_var.configure(text="Component Count")
+            if comp_details:
+                roi_summaries = []
+                for roi in comp_details:
+                    roi_name = roi.get("name", "?")
+                    classes = roi.get("classes", {})
+                    all_ok = roi.get("ok", False)
+                    status = "OK" if all_ok else "FAIL"
+                    if isinstance(classes, dict):
+                        cls_info = ", ".join(f"{v.get('detected_voted', '?')}/{v.get('target', '?')} {cn}" for cn, v in classes.items())
+                    else:
+                        cls_info = ", ".join(f"{c.get('detected_voted', '?')}/{c.get('target', '?')} {c.get('class_name', '?')}" for c in classes)
+                    roi_summaries.append(f"{status} {roi_name}: {cls_info}")
+                self.comp_roi_summary_var.configure(text=" | ".join(roi_summaries))
+            else:
+                self.comp_roi_summary_var.configure(text="No ROIs")
+            comp_reject = display_validation.get("reject_reason_code") or "-"
+            self.comp_reject_reason_var.configure(text=str(comp_reject))
+        else:
+            self.comp_mode_var.configure(text="QC Sticker")
+            self.comp_roi_summary_var.configure(text="-")
+            self.comp_reject_reason_var.configure(text="-")
+
         self.live_template_version_var.configure(text=str(live_session.get("template_version_id") or "-"))
         # Inference gate display
         _gate = live_inference_gate
@@ -159,8 +209,11 @@ class ResultPanel(ctk.CTkFrame):
         if _policy:
             _action = _policy.get("action", "-")
             _pending_r = _policy.get("pending_reason", "")
+            _plc_fault = _policy.get("plc_fault", False)
             _policy_text = f"{_action}"
-            if _pending_r and _action == "pending":
+            if _plc_fault:
+                _policy_text = "PLC FAULT — COMMIT BLOCKED"
+            elif _pending_r and _action == "pending":
                 _policy_text = f"WAITING: {_pending_r}"
         else:
             _policy_text = "-"
@@ -215,11 +268,6 @@ class ResultPanel(ctk.CTkFrame):
                 f"x={_format_metric(anchor_offset.get('x'), precision=2)}, "
                 f"y={_format_metric(anchor_offset.get('y'), precision=2)}"
             )
-        ocr_payload = display_details.get("ocr") or {}
-        ocr_text = display_validation.get("ocr_text") or ocr_payload.get("canonical_text") or ocr_payload.get("text")
-        ocr_confidence = display_validation.get("ocr_confidence")
-        if ocr_confidence is None:
-            ocr_confidence = ocr_payload.get("confidence")
         pose_angle = display_validation.get("pose_angle")
         if pose_angle is None:
             pose_angle = (display_details.get("geometry") or {}).get("pose_angle")
@@ -234,8 +282,6 @@ class ResultPanel(ctk.CTkFrame):
         self.sticker_backend_var.configure(text=str(backend))
         self.candidate_source_var.configure(text=str(display_details.get("candidate_source") or "-"))
         self.offset_var.configure(text=offset_text)
-        self.ocr_text_var.configure(text=str(ocr_text or "-"))
-        self.ocr_confidence_var.configure(text=_format_metric(ocr_confidence, precision=4))
         self.anchor_offset_var.configure(text=anchor_offset_text)
         self.pose_angle_var.configure(text="-" if pose_angle is None else f"{_format_metric(pose_angle, precision=2)} deg")
 
@@ -294,8 +340,6 @@ class ResultPanel(ctk.CTkFrame):
             self.sticker_backend_var,
             self.candidate_source_var,
             self.offset_var,
-            self.ocr_text_var,
-            self.ocr_confidence_var,
             self.anchor_offset_var,
             self.pose_angle_var,
             self.raw_detection_count_var,
@@ -313,5 +357,8 @@ class ResultPanel(ctk.CTkFrame):
             self.db_var,
             self.event_var,
             self.commit_var,
+            self.comp_mode_var,
+            self.comp_roi_summary_var,
+            self.comp_reject_reason_var,
         ):
             widget.configure(text="-")

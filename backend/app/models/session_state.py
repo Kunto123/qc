@@ -39,6 +39,10 @@ class SessionState:
     recent_events: list[dict[str, Any]] = field(default_factory=list)
     last_committed_result: dict[str, Any] | None = None
     part_ready_ratio_history: list[float] = field(default_factory=list)
+    part_ready_ema_ratio: float = 0.0
+    # Adaptive HSV thresholds — updated at runtime when hsv_adaptive=True
+    hsv_adaptive_lower: list[float] | None = None
+    hsv_adaptive_upper: list[float] | None = None
     last_overlay_b64: str | None = None
     # Settle-time debounce: timestamp of the first frame where part_ready was True
     # in the current ready-run.  Reset to None whenever part_ready becomes False or
@@ -61,12 +65,26 @@ class SessionState:
     inference_result_ts: float = 0.0
     inference_frame_counter: int = 0
     inference_thread_busy: bool = False
+    inference_submit_at: float = 0.0  # monotonic timestamp when last inference was submitted
     _inference_executor: concurrent.futures.ThreadPoolExecutor | None = None  # lazy-init per session
+    # Inference generation counter — incremented each time a new inference result
+    # is committed to the cache. Used by the accept gate to count distinct
+    # inference runs (not just repeated reads of the same cached result).
+    inference_result_generation: int = 0
+    inference_accept_count: int = 0
+    inference_accept_first_ts: float = 0.0
+    inference_last_counted_generation: int = -1
+    # Inference cache TTL (ms) — configurable per session from app config.
+    inference_cache_ttl_ms: int = 10000
     gap_ref_cache: dict[str, Any] = field(default_factory=dict)  # cache for loaded gap reference patches
     part_removed_seen_at: datetime | None = None
     # Hysteresis counter: number of consecutive settled frames.
     # Reset to 0 when part_ready/presence is lost.
     settle_frame_count: int = 0
+    # Timestamp when part first became settled (consecutive_part_ready_frames >= threshold).
+    # Used for reject timeout: if no accept-commit within reject_timeout_ms, reject as COMMIT_TIMEOUT.
+    # Reset to None when PLC returns to IDLE or when part leaves.
+    part_ready_settled_at: datetime | None = None
     # Inference cooldown: timestamp (ms) of last inference run.
     # Prevents inference from running more than once per second.
     consecutive_part_ready_frames: int = 0
@@ -96,9 +114,26 @@ class SessionState:
     # ── Inspection Policy Stability Tracking ──
     # Policy key = hash of (decision, reject_reason_code, detected_class, expected_class)
     # Used to track consecutive stable frames before commit.
+    # Cycle-level timestamp: when ACCEPT was first seen in this clamping cycle.
+    # Persists across detection gaps (bridges holdover expiry) — reset only on commit
+    # or when the cycle resets (part removed). Used for commit_grace_ms check.
+    accept_cycle_started_at: datetime | None = None
     last_policy_key: str = ""
     policy_stable_started_at: datetime | None = None
     policy_stable_frames: int = 0
     # After ACCEPT commit, wait for part to actually leave before allowing next cycle.
     awaiting_part_removal_after_commit: bool = False
+    policy_holdover_expires_at: datetime | None = None
     part_absent_started_at: datetime | None = None
+    # ── Component Count Mode ──
+    component_count_history: list = field(default_factory=list)
+    consecutive_component_ok: int = 0
+    # ── Logo Anti-Reclamp ──
+    expected_logo_edge: object = None  # np.ndarray | None
+    # ── Inference Result Cache for Hand-Obstruction Handling ──
+    # When YOLO detects a valid class but part_ready drops temporarily (e.g., hand
+    # obstructing during commit wait), we cache the last valid inference result and
+    # timestamp. If part_ready returns within the grace window, we use the cached
+    # result instead of re-running inference (which might fail due to obstruction).
+    last_valid_inference: dict[str, Any] | None = None
+    last_valid_inference_ts: float = 0.0  # monotonic timestamp

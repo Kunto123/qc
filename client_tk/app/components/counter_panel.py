@@ -8,13 +8,9 @@ from client_tk.app.theme import BORDER, PANEL_BG, TEXT_PRIMARY, TEXT_SECONDARY
 
 
 BREAKDOWN_ORDER = (
-    "NOT_FOUND",
+    "OUT_OF_ANGLE",
     "WRONG_TYPE",
-    "OUT_OF_POSITION",
-    "LOW_CLASS_CONF",
-    "LOW_ROI_CONF",
-    "PART_NOT_READY",
-    "ERROR",
+    "COMMIT_TIMEOUT",
 )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -19,7 +20,12 @@ class CameraCaptureService:
         self._reconnect_interval_s = 5.0
         self._last_frame_before_disconnect = None
         self._disconnect_notified = False
-        self._status_callback = None  # callable(status: str)
+        self._status_callback = None
+        self._epoch = 0  # generation token — incremented on each start()
+        # Transient-drop tolerance: allow N brief retries before declaring disconnect
+        self._max_consecutive_failures = int(os.getenv("QC_SUITE_CAMERA_MAX_CONSECUTIVE_FAILURES", "5"))
+        self._transient_retry_delay_s = float(os.getenv("QC_SUITE_CAMERA_TRANSIENT_RETRY_S", "0.1"))
+        self._consecutive_fail = 0
 
     def set_status_callback(self, callback) -> None:
         """Set callback for status updates: 'connected', 'reconnecting', 'error'."""
@@ -41,13 +47,18 @@ class CameraCaptureService:
         fps: float | None = None,
     ) -> None:
         self.stop()
+        with self._lock:
+            self._epoch += 1  # new generation
         self._camera_index = int(camera_index)
         self._reconnecting = False
         self._disconnect_notified = False
         self._last_frame_before_disconnect = None
+        self._consecutive_fail = 0
         self._open_camera(width, height, fps)
         self._running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="camera-capture")
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True, name="camera-capture"
+        )
         self._thread.start()
         self._notify_status("connected")
 
@@ -62,7 +73,11 @@ class CameraCaptureService:
         backend_candidates.append(None)
 
         for backend in backend_candidates:
-            capture = cv2.VideoCapture(self._camera_index) if backend is None else cv2.VideoCapture(self._camera_index, backend)
+            capture = (
+                cv2.VideoCapture(self._camera_index)
+                if backend is None
+                else cv2.VideoCapture(self._camera_index, backend)
+            )
             if capture.isOpened():
                 self._capture = capture
                 break
@@ -72,6 +87,17 @@ class CameraCaptureService:
             raise RuntimeError(f"Cannot open camera index {self._camera_index}")
         if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
             self._capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # Configurable exposure
+        _auto_exp = int(os.getenv("QC_SUITE_CAMERA_AUTO_EXPOSURE", "1"))
+        if _auto_exp == 0:
+            _exp_val = int(os.getenv("QC_SUITE_CAMERA_EXPOSURE_VALUE", "-6"))
+            try:
+                if hasattr(cv2, "CAP_PROP_AUTO_EXPOSURE"):
+                    self._capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+                if hasattr(cv2, "CAP_PROP_EXPOSURE"):
+                    self._capture.set(cv2.CAP_PROP_EXPOSURE, _exp_val)
+            except Exception:
+                pass
         if width is not None and int(width) > 0:
             self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
         if height is not None and int(height) > 0:
@@ -85,58 +111,83 @@ class CameraCaptureService:
         }
 
     def _loop(self) -> None:
-        """Main capture loop with auto-reconnect."""
-        while self._running:
+        """Main capture loop with auto-reconnect and epoch guard."""
+        my_epoch = self._epoch  # capture epoch at thread start
+        while True:
+            # Epoch guard: bail if start() was called again (new generation)
+            with self._lock:
+                if self._epoch != my_epoch or not self._running:
+                    return
+
             capture = self._capture
             if capture is None or not capture.isOpened():
                 # Camera disconnected — try to reconnect
-                if not self._reconnecting:
-                    self._reconnecting = True
-                    self._notify_status("reconnecting")
-                    # Save last frame for display during reconnect
-                    with self._lock:
+                with self._lock:
+                    if self._epoch != my_epoch or not self._running:
+                        return
+                    if not self._reconnecting:
+                        self._reconnecting = True
+                        self._notify_status("reconnecting")
                         self._last_frame_before_disconnect = (
                             self._frame.copy() if self._frame is not None else None
                         )
-                # Try reconnect every N seconds
                 time.sleep(self._reconnect_interval_s)
-                if not self._running:
-                    break
+                with self._lock:
+                    if self._epoch != my_epoch or not self._running:
+                        return
                 try:
                     self._open_camera(
                         width=int(self._actual_settings.get("width") or 0) or None,
                         height=int(self._actual_settings.get("height") or 0) or None,
                         fps=self._actual_settings.get("fps") or None,
                     )
-                    if self._capture is not None and self._capture.isOpened():
-                        self._reconnecting = False
-                        self._last_frame_before_disconnect = None
-                        self._disconnect_notified = False
-                        self._notify_status("connected")
-                        continue
+                    with self._lock:
+                        if self._epoch != my_epoch or not self._running:
+                            return
+                        if self._capture is not None and self._capture.isOpened():
+                            self._reconnecting = False
+                            self._last_frame_before_disconnect = None
+                            self._disconnect_notified = False
+                            self._notify_status("connected")
+                            continue
                 except Exception:
                     pass
                 continue
 
             ok, frame = capture.read()
+            with self._lock:
+                if self._epoch != my_epoch or not self._running:
+                    return
             if ok and frame is not None:
                 with self._lock:
                     self._frame = frame
+                    self._consecutive_fail = 0  # reset on good frame
             else:
-                # Frame read failed — camera may have disconnected
-                if not self._reconnecting:
-                    self._reconnecting = True
-                    self._notify_status("reconnecting")
-                    with self._lock:
+                # Frame read failed — could be transient (MSMF bandwidth) or real disconnect
+                self._consecutive_fail += 1
+                if self._consecutive_fail < self._max_consecutive_failures:
+                    # Transient drop: brief retry without releasing camera
+                    time.sleep(self._transient_retry_delay_s)
+                    continue
+                # Exceeded tolerance — treat as real disconnect
+                with self._lock:
+                    if self._epoch != my_epoch or not self._running:
+                        return
+                    if not self._reconnecting:
+                        self._reconnecting = True
+                        self._notify_status("reconnecting")
                         self._last_frame_before_disconnect = (
                             self._frame.copy() if self._frame is not None else None
                         )
-                # Release broken capture and try again next loop
                 try:
                     capture.release()
                 except Exception:
                     pass
-                self._capture = None
+                with self._lock:
+                    if self._epoch != my_epoch or not self._running:
+                        return
+                    self._capture = None
+                    self._consecutive_fail = 0
                 time.sleep(self._reconnect_interval_s)
 
     def get_latest_frame(self):
@@ -156,7 +207,7 @@ class CameraCaptureService:
                 pass
             self._capture = None
         self._reconnecting = False
-        return False  # Next _loop iteration will try to reconnect
+        return False
 
     @property
     def actual_settings(self) -> dict[str, float]:
@@ -176,16 +227,20 @@ class CameraCaptureService:
         return self._reconnecting
 
     def stop(self) -> None:
-        self._running = False
-        thread = self._thread
-        if self._capture is not None:
+        with self._lock:
+            self._running = False
+            self._epoch += 1  # invalidate current generation
+            capture = self._capture
+            self._capture = None
+        # Release capture outside lock to avoid blocking
+        if capture is not None:
             try:
-                self._capture.release()
+                capture.release()
             except Exception:
                 pass
-            self._capture = None
+        thread = self._thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=0.5)
+            thread.join(timeout=5.0)  # longer timeout; epoch guard ensures thread exits
         self._thread = None
         self._actual_settings = {}
         self._reconnecting = False

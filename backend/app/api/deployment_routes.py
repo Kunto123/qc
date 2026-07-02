@@ -3,6 +3,8 @@ from __future__ import annotations
 from flask import Blueprint, g, jsonify, request
 
 from backend.app.core.container import deployments_repo, templates_repo
+from pathlib import Path as _Path
+import json as _json
 from backend.app.core.http import require_auth, require_roles
 from shared.contracts.enums import UserRole
 
@@ -16,19 +18,35 @@ def deploy_template():
     payload = request.get_json(force=True) or {}
     template_id = int(payload.get("template_id") or 0)
     template_version_id = int(payload.get("template_version_id") or 0)
-    line_id = str(payload.get("line_id") or "").strip()
-    station_id = str(payload.get("station_id") or "").strip()
-    if not template_id or not template_version_id or not line_id or not station_id:
-        return jsonify({"error": "template_id, template_version_id, line_id, dan station_id wajib diisi"}), 400
+    if not template_id or not template_version_id:
+        return jsonify({"error": "template_id dan template_version_id wajib diisi"}), 400
     template = templates_repo.get_template(template_id)
     version = templates_repo.get_version(template_version_id)
     if template is None or version is None:
         return jsonify({"error": "Template or version not found"}), 404
+    # Fail-fast: validate model has meta JSON with class_names
+    _model_path = (version.get("vision") or {}).get("model_path", "")
+    if _model_path:
+        _p = _Path(_model_path)
+        _meta_candidates = [
+            _p.parent / (_p.stem + ".meta.json"),
+            _p.with_suffix(".json"),
+        ]
+        _meta_path = None
+        for _c in _meta_candidates:
+            if _c.exists():
+                _meta_path = str(_c)
+                break
+        if _meta_path:
+            try:
+                _meta = _json.loads(_Path(_meta_path).read_text(encoding="utf-8"))
+                if not _meta.get("class_names"):
+                    return jsonify({"error": f"Meta JSON tidak memiliki class_names: {_meta_path}"}), 400
+            except Exception as _exc:
+                return jsonify({"error": f"Meta JSON parse error: {_exc}"}), 400
     record = deployments_repo.deploy(
         template_id=template_id,
         template_version_id=template_version_id,
-        line_id=line_id,
-        station_id=station_id,
         deployed_by=None,
         template_name=template["name"],
         version_number=int(version["version_number"]),
@@ -45,11 +63,7 @@ def list_deployments():
 @deployment_blueprint.get("/active")
 @require_auth
 def get_active_deployment():
-    line_id = str(request.args.get("line_id") or "").strip()
-    station_id = str(request.args.get("station_id") or "").strip()
-    if not line_id or not station_id:
-        return jsonify({"error": "line_id and station_id are required"}), 400
-    record = deployments_repo.get_active(line_id, station_id)
+    record = deployments_repo.get_active()
     return jsonify({"deployment": record})
 
 
@@ -76,10 +90,6 @@ def update_deployment(deployment_id: int):
         return jsonify({"error": "Inactive deployment cannot be updated."}), 409
 
     updates: dict = {}
-    if "line_id" in payload:
-        updates["line_id"] = payload.get("line_id")
-    if "station_id" in payload:
-        updates["station_id"] = payload.get("station_id")
 
     if "template_version_id" in payload:
         try:
@@ -101,6 +111,9 @@ def update_deployment(deployment_id: int):
         updates["template_version_id"] = template_version_id
         updates["template_name"] = str((version.get("template") or {}).get("name") or current.get("template_name") or "")
         updates["version_number"] = int(version.get("version_number") or current.get("version_number") or 0)
+
+    if "template_name" in payload:
+        updates["template_name"] = str(payload.get("template_name") or "").strip()
 
     actor = getattr(g, "current_user", None)
     if actor is not None:

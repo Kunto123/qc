@@ -80,18 +80,16 @@ class _StubApi:
         payload["version_id"] = int(version_id)
         payload["version_number"] = int(version_id)
         payload["camera"]["camera_index"] = 1
-        payload["sticker"]["line"] = "LINE-TEMPLATE"
+        payload["sticker"]["part_name"] = "TEST_PART"
         return payload
 
-    def get_active_deployment(self, line_id: str, station_id: str):
+    def get_active_deployment(self):
         return {
             "deployment": {
                 "id": 1,
                 "template_id": 1,
                 "template_name": "QC Line A",
                 "template_version_id": 2,
-                "line_id": line_id,
-                "station_id": station_id,
                 "is_active": True,
             }
         }
@@ -101,8 +99,6 @@ class _StubApi:
             "session_id": "sess-ui-smoke",
             "template_name": "QC Line A",
             "template_version_id": int(payload.get("template_version_id") or 0),
-            "line_id": payload.get("line_id"),
-            "station_id": payload.get("station_id"),
         }
 
     def update_rois(self, _session_id: str, *, part_ready_roi=None, sticker_roi=None):
@@ -701,7 +697,6 @@ class UiSmokeTest(unittest.TestCase):
             screen.preset_line_var.set("LINE-A")
             screen.preset_station_var.set("ST-01")
             screen.preset_model_path_var.set("data/models/sticker.pt")
-            screen.preset_expected_code_var.set("K0W-HB0")
             screen.preset_expected_class_var.set("K0W-HB0")
 
             screen.save_and_deploy_preset()
@@ -790,7 +785,6 @@ class UiSmokeTest(unittest.TestCase):
             screen.preset_station_var.set("ST-01")
             screen.preset_model_path_var.set("data/models/sticker.pt")
             screen.preset_conf_threshold_var.set("0.42")
-            screen.preset_expected_code_var.set("K0W-HB0")
             screen.preset_expected_class_var.set("K0W-HB0")
 
             screen.save_and_deploy_preset()
@@ -890,10 +884,19 @@ class UiSmokeTest(unittest.TestCase):
             side_effect=bind_user_rfid,
         ):
             screen = AdminScreen(self.root, self.api, self.state)
-            screen.operator_username_var.set("operator-a")
-            screen.operator_rfid_var.set("RFID-1234")
 
-            screen.create_operator_from_rfid()
+            # Step 1: create user (RFID binding is now separate)
+            screen.operator_username_var.set("operator-a")
+            with mock.patch.object(screen, "refresh_operators"):
+                screen._on_save_user()
+
+            # After save, bind target is auto-set to the new user
+            self.assertEqual(screen.bind_target_user_id, 77)
+
+            # Step 2: scan RFID and bind via unified bind section
+            screen.unified_rfid_var.set("RFID-1234")
+            with mock.patch.object(screen, "refresh_operators"):
+                screen._on_bind_rfid()
 
             self.assertEqual(created_payloads[-1]["username"], "operator-a")
             self.assertEqual(created_payloads[-1]["role"], "operator")

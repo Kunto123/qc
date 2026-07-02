@@ -48,7 +48,8 @@ class PlcWorkerFeedbackTest(unittest.TestCase):
         status = worker.status()
         self.assertEqual(status["state"], "CLAMPED")
         self.assertTrue(status["clamp_engaged"])
-        self.assertEqual(adapter.writes[:3], [(0, True), (1, False), (2, False)])
+        # Default relay map: clamp=3, ok_light_buzzer=2, enji_buzzer=1 (lihat config.py CH1/CH2/CH3)
+        self.assertEqual(adapter.writes[:3], [(3, True), (2, False), (1, False)])
 
     def test_decision_is_allowed_after_clamped_feedback(self) -> None:
         adapter = _FakeAdapter([False, False, True, False, False, False, False, False])

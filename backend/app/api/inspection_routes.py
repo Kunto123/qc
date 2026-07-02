@@ -93,6 +93,17 @@ def stop_session(session_id: str):
     return jsonify(result)
 
 
+@inspection_blueprint.post("/inspection/sessions/<session_id>/release")
+@require_roles(UserRole.ADMIN, UserRole.OPERATOR)
+def manual_release(session_id: str):
+    """Operator NEUTRAL release: unclamp + reset cycle without committing a result."""
+    try:
+        result = inspection_session_service.manual_release(session_id, reason="manual_operator")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    return jsonify(result)
+
+
 @inspection_blueprint.get("/inspection/reject-logs")
 @require_roles(UserRole.ADMIN)
 def list_reject_logs():
@@ -115,11 +126,18 @@ def latest_preview():
 @inspection_blueprint.get("/inspections")
 @require_auth
 def list_inspections():
+    try:
+        template_version_id = (
+            int(request.args["template_version_id"])
+            if request.args.get("template_version_id") else None
+        )
+    except (ValueError, TypeError):
+        return jsonify({"error": "template_version_id must be an integer"}), 400
     items = inspection_results_repo.list_results(
         line_id=request.args.get("line_id") or None,
         station_id=request.args.get("station_id") or None,
         part_name=request.args.get("part_name") or None,
-        template_version_id=int(request.args["template_version_id"]) if request.args.get("template_version_id") else None,
+        template_version_id=template_version_id,
         decision_code=request.args.get("decision_code") or None,
         push_status=request.args.get("push_status") or None,
         limit=min(int(request.args.get("limit") or 100), 1000),
@@ -350,11 +368,18 @@ def push_worker_status():
 @inspection_blueprint.get("/inspections/export")
 @require_auth
 def export_inspections():
+    try:
+        template_version_id = (
+            int(request.args["template_version_id"])
+            if request.args.get("template_version_id") else None
+        )
+    except (ValueError, TypeError):
+        return jsonify({"error": "template_version_id must be an integer"}), 400
     items = inspection_results_repo.list_results(
         line_id=request.args.get("line_id") or None,
         station_id=request.args.get("station_id") or None,
         part_name=request.args.get("part_name") or None,
-        template_version_id=int(request.args["template_version_id"]) if request.args.get("template_version_id") else None,
+        template_version_id=template_version_id,
         decision_code=request.args.get("decision_code") or None,
         limit=10000,
         offset=0,
@@ -380,7 +405,7 @@ def export_inspections():
 
 
 @inspection_blueprint.get("/inspection/plc/status")
-@require_roles(UserRole.OPERATOR, UserRole.ADMIN)
+@require_roles(UserRole.ADMIN, UserRole.OPERATOR)
 def plc_status():
     """Return the current PLC worker status (running, queue size, last command)."""
     if plc_worker is None:

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
+import os as _os
 import platform
 import threading
+from time import monotonic, time
 import tkinter as tk
 import uuid
 from tkinter import messagebox, ttk
@@ -61,6 +64,9 @@ class OperatorScreen(ctk.CTkFrame):
         self.capture = CameraCaptureService()
         self.uploader = FrameUploadService()  # Local frame pump via API client bridge.
         self._latest_payload: dict | None = None
+        self._last_detections: list = []
+        self._last_detections_ts: float = 0.0
+        self._detection_holdover_s: float = 1.5
         self._latest_error: str | None = None
         self._lock = threading.Lock()
         self._after_id: str | None = None
@@ -95,8 +101,6 @@ class OperatorScreen(ctk.CTkFrame):
         self._inference_running = False
         self._inference_thread: threading.Thread | None = None
 
-        self.line_value = tk.StringVar()
-        self.station_value = tk.StringVar()
         self.camera_value = tk.StringVar(value="0")
         self.camera_rotation_value = tk.StringVar(value="0")
         self.template_version_value = tk.StringVar()
@@ -113,17 +117,17 @@ class OperatorScreen(ctk.CTkFrame):
         self.template_choice = tk.StringVar()
         self.display_source = tk.StringVar(value="Right View: Live Camera + ROIs")
 
+        # Component ROI vars — list of dicts {"x": StringVar, "y": StringVar, "w": StringVar, "h": StringVar, "name": StringVar}
+        self._comp_roi_vars: list[dict[str, tk.StringVar]] = []
+
         self.operator_context = tk.StringVar(value=f"Operator: {self.state.user.get('username') if self.state.user else '-'}")
-        self.line_context = tk.StringVar(value="Line: -")
-        self.station_context = tk.StringVar(value="Station: -")
         self.template_context = tk.StringVar(value="Template: -")
         self.info_var = tk.StringVar(value="Idle. Pilih template atau deployment, lalu start camera.")
 
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(3, weight=1)
+        self.rowconfigure(2, weight=1)
 
         self._build_top_bar()
-        self._build_context_bar()
         self._build_status_strip()
         self._build_content()
         self._load_template_choices()
@@ -159,29 +163,21 @@ class OperatorScreen(ctk.CTkFrame):
 
         self._layout_top_bar(compact=False)
 
-    def _build_context_bar(self) -> None:
-        self.context_bar = ctk.CTkFrame(self, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
-        self.context_bar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        self.context_labels = {
-            "operator": ctk.CTkLabel(self.context_bar, textvariable=self.operator_context, font=("Segoe UI", 13, "bold"), text_color=TEXT_PRIMARY),
-            "line": ctk.CTkLabel(self.context_bar, textvariable=self.line_context, font=("Segoe UI", 11), text_color=TEXT_SECONDARY),
-            "station": ctk.CTkLabel(self.context_bar, textvariable=self.station_context, font=("Segoe UI", 11), text_color=TEXT_SECONDARY),
-            "template": ctk.CTkLabel(self.context_bar, textvariable=self.template_context, font=("Segoe UI", 11), text_color=TEXT_SECONDARY),
-        }
-        self._layout_context_bar(compact=False)
-
     def _build_status_strip(self) -> None:
         self.status_frame = ctk.CTkFrame(self, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
-        self.status_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        ctk.CTkLabel(self.status_frame, text="System Status", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).pack(
-            anchor="w",
-            padx=10,
-            pady=(10, 6),
-        )
+        self.status_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        # Header row with title + operator/template info
+        header_frame = ctk.CTkFrame(self.status_frame, fg_color="transparent")
+        header_frame.pack(fill="x", padx=10, pady=(10, 4))
+        ctk.CTkLabel(header_frame, text="System Status", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).pack(side="left")
+        ctk.CTkLabel(header_frame, textvariable=self.operator_context, font=("Segoe UI", 10, "bold"), text_color=TEXT_SECONDARY).pack(side="right")
+        ctk.CTkLabel(header_frame, textvariable=self.template_context, font=("Segoe UI", 10), text_color=TEXT_SECONDARY).pack(side="right", padx=(0, 12))
+
         self.status_badges_container = ctk.CTkFrame(self.status_frame, fg_color="transparent")
         self.status_badges_container.pack(fill="x", padx=10, pady=(0, 10))
         self.badges: dict[str, ctk.CTkLabel] = {}
-        for key in ("SERVER", "CAMERA", "SESSION", "DB", "EVENT", "PLC"):
+        for key in ("EVENT", "PLC"):
             label = ctk.CTkLabel(
                 self.status_badges_container,
                 text=f"{key}: -",
@@ -197,7 +193,7 @@ class OperatorScreen(ctk.CTkFrame):
 
     def _build_content(self) -> None:
         self.content_scroller = ScrollableFrame(self)
-        self.content_scroller.grid(row=3, column=0, sticky="nsew")
+        self.content_scroller.grid(row=2, column=0, sticky="nsew")
         self.content = self.content_scroller.body
         self.content.columnconfigure(0, weight=1)
         self.content.rowconfigure(0, weight=1)
@@ -341,7 +337,6 @@ class OperatorScreen(ctk.CTkFrame):
             width = max(self.winfo_width(), self.winfo_toplevel().winfo_width())
             compact = width < RESPONSIVE_BREAKPOINT
             self._layout_top_bar(compact=compact)
-            self._layout_context_bar(compact=compact)
             self._layout_status_strip(compact=compact)
         except tk.TclError:
             return
@@ -418,32 +413,13 @@ class OperatorScreen(ctk.CTkFrame):
             for index, button in enumerate(self.action_buttons):
                 button.grid(row=0, column=index, sticky="w", padx=(0 if index == 0 else 6, 0))
 
-    def _layout_context_bar(self, *, compact: bool) -> None:
-        for widget in self.context_bar.grid_slaves():
-            widget.grid_forget()
-
-        if compact:
-            self.context_bar.columnconfigure(0, weight=1)
-            self.context_bar.columnconfigure(1, weight=1)
-            self.context_labels["operator"].grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
-            self.context_labels["line"].grid(row=1, column=0, sticky="w", padx=(0, 8))
-            self.context_labels["station"].grid(row=1, column=1, sticky="w")
-            self.context_labels["template"].grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        else:
-            for index in range(4):
-                self.context_bar.columnconfigure(index, weight=1)
-            self.context_labels["operator"].grid(row=0, column=0, sticky="w")
-            self.context_labels["line"].grid(row=0, column=1, sticky="w", padx=8)
-            self.context_labels["station"].grid(row=0, column=2, sticky="w", padx=8)
-            self.context_labels["template"].grid(row=0, column=3, sticky="w", padx=8)
-
     def _layout_status_strip(self, *, compact: bool) -> None:
         for widget in self.status_badges_container.grid_slaves():
             widget.grid_forget()
 
-        keys = ["SERVER", "CAMERA", "SESSION", "DB", "EVENT", "PLC"]
-        columns = 3 if compact else 6
-        rows = 2 if compact else 1
+        keys = ["EVENT", "PLC"]
+        columns = 2 if compact else 2
+        rows = 1
         for column in range(columns):
             self.status_badges_container.columnconfigure(column, weight=1)
         for row in range(rows):
@@ -483,8 +459,6 @@ class OperatorScreen(ctk.CTkFrame):
         general.grid(row=0, column=0, columnspan=2, sticky="ew")
         general.columnconfigure(1, weight=1)
         general.columnconfigure(3, weight=1)
-        self._settings_entry(general, 0, 0, "Line", self.line_value)
-        self._settings_entry(general, 0, 2, "Station", self.station_value)
         self._settings_entry(general, 1, 0, "Camera", self.camera_value)
         # Rotation field inline sebelah Camera Index
         ttk.Label(general, text="Rotation°").grid(row=1, column=2, sticky="w", padx=(12, 4), pady=5)
@@ -493,8 +467,16 @@ class OperatorScreen(ctk.CTkFrame):
         ttk.Label(general, text="0/90/180/270", foreground="gray").grid(row=2, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(0, 4))
         self._settings_entry(general, 3, 0, "Template Ver", self.template_version_value)
 
+        # Detect validator_mode from active template detail
+        template_detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
+        validator_mode = str((template_detail or {}).get("sticker", {}).get("validator_mode", "") or "").strip().lower()
+        is_component_counter = validator_mode == "component_count"
+
+        # Part Ready ROI — only shown in sticker mode
         part_ready_roi = ttk.LabelFrame(body, text="Part Ready ROI", padding=10)
         part_ready_roi.grid(row=1, column=0, sticky="nsew", pady=(12, 0), padx=(0, 6))
+        if is_component_counter:
+            part_ready_roi.grid_remove()
         for index in range(8):
             part_ready_roi.columnconfigure(index, weight=1)
         ttk.Label(
@@ -509,8 +491,11 @@ class OperatorScreen(ctk.CTkFrame):
         self._settings_roi_entry(part_ready_roi, 1, 4, "w (width)", self.part_ready_roi_w_value)
         self._settings_roi_entry(part_ready_roi, 1, 6, "h (height)", self.part_ready_roi_h_value)
 
+        # Sticker ROI — only shown in sticker mode
         sticker_roi = ttk.LabelFrame(body, text="Sticker ROI", padding=10)
         sticker_roi.grid(row=1, column=1, sticky="nsew", pady=(12, 0), padx=(6, 0))
+        if is_component_counter:
+            sticker_roi.grid_remove()
         for index in range(8):
             sticker_roi.columnconfigure(index, weight=1)
         ttk.Label(
@@ -525,9 +510,23 @@ class OperatorScreen(ctk.CTkFrame):
         self._settings_roi_entry(sticker_roi, 1, 4, "w (width)", self.sticker_roi_w_value)
         self._settings_roi_entry(sticker_roi, 1, 6, "h (height)", self.sticker_roi_h_value)
 
+        # Component ROI editor — only shown in component_count mode
+        self._comp_roi_settings_frame = ttk.LabelFrame(body, text="Component ROIs", padding=10)
+        self._comp_roi_settings_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
+        if not is_component_counter:
+            self._comp_roi_settings_frame.grid_remove()
+        self._comp_roi_settings_frame.columnconfigure(0, weight=1)
+        self._build_comp_roi_settings(self._comp_roi_settings_frame, template_detail)
+
+        # Help text
+        help_text = (
+            "ROI disimpan dalam format rasio 0-1 terhadap frame kamera. "
+            + ("Gunakan Component ROIs untuk mendeteksi dan menghitung komponen." if is_component_counter
+               else "Gunakan part-ready ROI untuk gate warna, dan sticker ROI untuk inferensi model. Right view akan menampilkan frame penuh dengan ROI sticker atau overlay hasil machine learning.")
+        )
         ttk.Label(
             body,
-            text="ROI disimpan dalam format rasio 0-1 terhadap frame kamera. Gunakan part-ready ROI untuk gate warna, dan sticker ROI untuk inferensi model. Right view akan menampilkan frame penuh dengan ROI sticker atau overlay hasil machine learning.",
+            text=help_text,
             foreground="#475569",
             wraplength=620,
             justify="left",
@@ -539,6 +538,44 @@ class OperatorScreen(ctk.CTkFrame):
         ttk.Button(footer, text="Use Template ROI", command=self._sync_selected_template_detail).pack(side="left", padx=8)
         ttk.Button(footer, text="Apply ROI", command=self._apply_roi).pack(side="left")
         ttk.Button(footer, text="Close", command=self._close_settings).pack(side="right")
+
+    def _build_comp_roi_settings(self, parent: ttk.LabelFrame, template_detail: dict | None) -> None:
+        """Build component ROI entry fields inside the given parent frame."""
+        # Clear existing slaves
+        for child in parent.winfo_children():
+            child.destroy()
+        self._comp_roi_vars.clear()
+
+        component_rois = (template_detail or {}).get("component_rois") or []
+        if not component_rois:
+            ttk.Label(parent, text="No component ROIs defined. Use Admin → Templates to add.",
+                      foreground="#475569").grid(row=0, column=0, sticky="w", pady=4)
+            return
+
+        for idx, cr in enumerate(component_rois):
+            roi = cr.get("roi") or {}
+            name = cr.get("name", f"ROI {idx}")
+            row_frame = ttk.Frame(parent)
+            row_frame.grid(row=idx, column=0, sticky="ew", pady=(4 if idx == 0 else 8, 0))
+            row_frame.columnconfigure(1, weight=1)
+            row_frame.columnconfigure(3, weight=1)
+            row_frame.columnconfigure(5, weight=1)
+            row_frame.columnconfigure(7, weight=1)
+
+            ttk.Label(row_frame, text=f"{name}:", font=("Segoe UI", 9, "bold")).grid(
+                row=0, column=0, columnspan=8, sticky="w", pady=(0, 4)
+            )
+            x_var = tk.StringVar(value=str(roi.get("x", 0.1)))
+            y_var = tk.StringVar(value=str(roi.get("y", 0.1)))
+            w_var = tk.StringVar(value=str(roi.get("w", 0.3)))
+            h_var = tk.StringVar(value=str(roi.get("h", 0.3)))
+            name_var = tk.StringVar(value=name)
+            self._comp_roi_vars.append({"x": x_var, "y": y_var, "w": w_var, "h": h_var, "name": name_var})
+
+            self._settings_roi_entry(row_frame, 1, 0, "x", x_var)
+            self._settings_roi_entry(row_frame, 1, 2, "y", y_var)
+            self._settings_roi_entry(row_frame, 1, 4, "w", w_var)
+            self._settings_roi_entry(row_frame, 1, 6, "h", h_var)
 
     def _close_settings(self) -> None:
         if self._settings_window and self._settings_window.winfo_exists():
@@ -943,6 +980,12 @@ class OperatorScreen(ctk.CTkFrame):
         sticker_roi = payload.get("sticker_roi_meta") or {}
         part_ready_roi = payload.get("part_ready_roi_meta") or {}
         detections = payload.get("detections") or []
+        _stale_detections = False
+        if not detections and self._last_detections:
+            _age = monotonic() - self._last_detections_ts
+            if _age < self._detection_holdover_s:
+                detections = self._last_detections
+                _stale_detections = True
         event_state = payload.get("event_state") or "idle"
 
         # Backend computes roi_meta pixel coords from the (possibly downscaled) frame
@@ -1008,7 +1051,8 @@ class OperatorScreen(ctk.CTkFrame):
             y1 = int(sy + float(pos.get("y1", 0)) * scale_y)
             x2 = int(sx + float(pos.get("x2", 0)) * scale_x)
             y2 = int(sy + float(pos.get("y2", 0)) * scale_y)
-            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 255), 2)
+            _bbox_color = (100, 180, 255) if _stale_detections else (0, 255, 255)  # biru-muda vs cyan
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), _bbox_color, 2)
             lbl = str(det.get("label") or "")
             conf = float(det.get("confidence") or 0.0)
             cv2.putText(overlay, f"{lbl} {conf:.2f}", (x1, max(20, y1 - 8)),
@@ -1242,12 +1286,10 @@ class OperatorScreen(ctk.CTkFrame):
         _rot = camera_config.get("rotation_degrees")
         self.camera_rotation_value.set(str(_rot if _rot is not None else "0"))
         sticker_config = detail.get("sticker") or {}
-        if not keep_line_station:
-            if sticker_config.get("line"):
-                self.line_value.set(str(sticker_config["line"]))
-            if sticker_config.get("station"):
-                self.station_value.set(str(sticker_config["station"]))
         self.state.cache["selected_template_detail"] = detail
+        # Update result panel mode (show/hide sections)
+        validator_mode = str(sticker_config.get("validator_mode", "") or "").strip().lower()
+        self.result_panel.set_mode(validator_mode)
         self._refresh_context_summary()
 
     def _sync_selected_template_detail(self) -> None:
@@ -1320,6 +1362,8 @@ class OperatorScreen(ctk.CTkFrame):
         return str(selected.get("name") or "").strip() or None
 
     def _set_badge(self, key: str, value: str, tone: str = "neutral") -> None:
+        if not hasattr(self, "badges") or key not in self.badges:
+            return
         bg, fg = BADGE_COLORS.get(tone, BADGE_COLORS["neutral"])
         self.badges[key].configure(text=f"{key}: {value}", fg_color=bg, text_color=fg)
 
@@ -1372,8 +1416,6 @@ class OperatorScreen(ctk.CTkFrame):
     def _refresh_context_summary(self) -> None:
         username = self.state.user.get("username") if self.state.user else "-"
         self.operator_context.set(f"Operator: {username}")
-        line = self.line_value.get().strip() or (self.state.active_session or {}).get("line_id") or "-"
-        station = self.station_value.get().strip() or (self.state.active_session or {}).get("station_id") or "-"
         selected_detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
         template_name = (
             (self.state.active_session or {}).get("template_name")
@@ -1383,30 +1425,12 @@ class OperatorScreen(ctk.CTkFrame):
             or "-"
         )
         template_version = self.template_version_value.get().strip() or (self.state.active_session or {}).get("template_version_id") or "-"
-        self.line_context.set(f"Line: {line}")
-        self.station_context.set(f"Station: {station}")
         self.template_context.set(f"Template: {template_name} v{template_version}")
         self._sync_template_selector()
 
     def _update_status_badges(self, payload: dict | None = None) -> None:
         token = getattr(self.state, "token", None)
         latest_error = getattr(self.state, "latest_error", None)
-        server_tone = "success" if token and not latest_error else "danger" if latest_error else "info"
-        self._set_badge("SERVER", "ONLINE" if token and not latest_error else "ISSUE", server_tone)
-
-        camera_ready = self.capture.get_latest_frame() is not None
-        self._set_badge("CAMERA", "READY" if camera_ready else "STOPPED", "success" if camera_ready else "neutral")
-
-        session_running = self.state.active_session is not None
-        self._set_badge("SESSION", "RUNNING" if session_running else "IDLE", "info" if session_running else "neutral")
-
-        db_write = ((payload or {}).get("last_committed_result") or {}).get("db_write") or (payload or {}).get("db_write") or {}
-        if db_write.get("written"):
-            self._set_badge("DB", "WRITTEN", "success")
-        elif db_write.get("reason") in {"disabled", "not_committed"}:
-            self._set_badge("DB", "WAITING", "neutral")
-        else:
-            self._set_badge("DB", str(db_write.get("reason") or "ISSUE").upper(), "warning")
 
         event_state = str((payload or {}).get("event_state") or "idle").upper()
         event_tone = "success" if event_state == "DECISION_COMMITTED" else "info" if event_state not in {"IDLE", "COOLDOWN"} else "neutral"
@@ -1443,12 +1467,11 @@ class OperatorScreen(ctk.CTkFrame):
             self.recent_list.insert("end", f"{timestamp} | {decision} | {part_name} | {reason}")
 
     def _load_deployment(self) -> None:
-        line_id = self.line_value.get().strip()
-        station_id = self.station_value.get().strip()
-        if not line_id or not station_id:
-            messagebox.showerror("Deployment", "Line dan Station wajib diisi.")
+        try:
+            response = self.api.get_active_deployment()
+        except Exception as exc:
+            messagebox.showerror("Deployment", f"Failed to load deployment: {exc}")
             return
-        response = self.api.get_active_deployment(line_id, station_id)
         deployment = response.get("deployment") if isinstance(response, dict) else None
         if not deployment:
             messagebox.showwarning("Deployment", "Tidak ada deployment aktif.")
@@ -1461,8 +1484,7 @@ class OperatorScreen(ctk.CTkFrame):
         if session_was_running:
             self._stop_session()
         self.state.active_deployment = deployment
-        self.line_value.set(str(deployment.get("line_id") or self.line_value.get().strip()))
-        self.station_value.set(str(deployment.get("station_id") or self.station_value.get().strip()))
+
         deployment_version_id = int(deployment.get("template_version_id") or 0)
         self.template_version_value.set(str(deployment_version_id or ""))
         detail = None
@@ -1526,25 +1548,8 @@ class OperatorScreen(ctk.CTkFrame):
         self.display_source.set("Right View: Live Camera + ROIs")
         self._update_status_badges()
 
-    def _start_production(self) -> None:
-        if not self.template_version_value.get().strip():
-            self._auto_start_first_template()
-        if self.capture.get_latest_frame() is None and not self._start_camera():
-            return
-        if self.state.active_session:
-            self.info_var.set("Production inspection is already running.")
-            return
-        self._start_session()
-
-    def _stop_production(self) -> None:
-        if self.state.active_session:
-            self._stop_session()
-        self._stop_camera()
-
     def _start_session(self) -> None:
-        if self.capture.get_latest_frame() is None:
-            messagebox.showwarning("Session", "Start camera dan tunggu frame pertama dulu.")
-            return
+        """Start a new inspection session (assumes camera is ready and template is selected)."""
         template_version_id = int(self.template_version_value.get() or 0)
         if not template_version_id:
             messagebox.showerror("Session", "Template version wajib diisi.")
@@ -1555,7 +1560,6 @@ class OperatorScreen(ctk.CTkFrame):
         except ValueError as exc:
             messagebox.showerror("Session", str(exc))
             return
-        # Use camera_rotation_value which is synced from template detail
         _rot = float(self.camera_rotation_value.get() or 0)
         payload = self.api.create_session(
             {
@@ -1563,8 +1567,6 @@ class OperatorScreen(ctk.CTkFrame):
                 "camera_index": int(self.camera_value.get() or 0),
                 "camera_rotation_degrees": _rot,
                 "template_version_id": template_version_id,
-                "line_id": self.line_value.get().strip(),
-                "station_id": self.station_value.get().strip(),
             }
         )
         self.state.active_session = payload
@@ -1579,7 +1581,6 @@ class OperatorScreen(ctk.CTkFrame):
         self.state.cache["sticker_detection"] = None
         self.state.cache["last_committed_result"] = None
         self._auth_error_notified = False
-        # Set camera status callback for auto-reconnect display
         self.capture.set_status_callback(self._on_camera_status)
         with self._lock:
             self._latest_payload = None
@@ -1592,15 +1593,11 @@ class OperatorScreen(ctk.CTkFrame):
         for _lbl in self.breakdown_labels.values():
             _lbl.configure(text="0")
         self.recent_list.delete(0, "end")
-        # Live view: langsung tampilkan frame dari camera (tanpa upload)
-        # Inference: jalan di background thread setiap 200ms
         _current_frame = self.capture.get_latest_frame()
         if _current_frame is not None:
             self._show_cached_overlay_or_frame(_current_frame)
         else:
             self.main_view.reset()
-
-        # Start inference thread (setiap 200ms)
         self._inference_running = True
         self._inference_thread = threading.Thread(
             target=self._inference_loop,
@@ -1609,7 +1606,6 @@ class OperatorScreen(ctk.CTkFrame):
             daemon=True,
         )
         self._inference_thread.start()
-
         upload_interval_ms = self._resolve_upload_interval_ms()
         infer_fps_actual = round(1000.0 / upload_interval_ms, 1)
         preview_fps_actual = round(1000.0 / self._preview_interval_ms, 1)
@@ -1617,6 +1613,20 @@ class OperatorScreen(ctk.CTkFrame):
             f"Session running: {payload['session_id']} "
             f"(inference @ {upload_interval_ms}ms / {infer_fps_actual} fps | preview @ {preview_fps_actual} fps)"
         )
+        self._refresh_context_summary()
+        self._update_status_badges()
+
+    def _start_production(self) -> None:
+        if not self.template_version_value.get().strip():
+            self._auto_start_first_template()
+        if self.capture.get_latest_frame() is None and not self._start_camera():
+            return
+        if self.state.active_session:
+            self.info_var.set("Production inspection is already running.")
+            return
+        self._start_session()
+
+    def _stop_production(self) -> None:
         self._refresh_context_summary()
         self._update_status_badges()
 
@@ -1647,25 +1657,44 @@ class OperatorScreen(ctk.CTkFrame):
                     _time.sleep(0.05)
                     continue
 
-                # Encode frame ke JPEG
-                t0 = _time.perf_counter()
-                ok, buffer = _cv2.imencode(".jpg", frame, [_cv2.IMWRITE_JPEG_QUALITY, 75])
-                encode_ms = (_time.perf_counter() - t0) * 1000.0
-                if not ok:
-                    raise RuntimeError("Failed to encode frame.")
-                t0 = _time.perf_counter()
-                image_b64 = _base64.b64encode(buffer).decode("ascii")
-                b64_ms = (_time.perf_counter() - t0) * 1000.0
-
                 # Upload ke backend
                 active_session = self.state.active_session
                 if active_session and active_session.get("session_id") == session_id:
+                    _username = self.state.user.get("username") if self.state.user else None
+                    _user_id = self.state.user.get("id") if self.state.user else None
                     t0 = _time.perf_counter()
-                    result = self.api.push_frame(
-                        session_id,
-                        image_b64,
-                        response_mode="stream",
-                    )
+                    if self.api._local_mode:
+                        # Fast path: skip encode/base64/HTTP entirely for in-process backend
+                        result = self.api.push_frame_local(
+                            session_id,
+                            frame,
+                            username=_username,
+                            user_id=_user_id,
+                            response_mode="stream",
+                        )
+                        encode_ms = 0.0
+                        b64_ms = 0.0
+                        buffer = None
+                    else:
+                        # Remote path: encode → base64 → HTTP POST
+                        _jpeg_quality = int(_os.getenv("QC_SUITE_JPEG_QUALITY", "85"))
+                        _use_jpeg = int(_os.getenv("QC_SUITE_USE_JPEG", "1"))
+                        t_enc = _time.perf_counter()
+                        if _use_jpeg:
+                            ok, buffer = _cv2.imencode(".jpg", frame, [_cv2.IMWRITE_JPEG_QUALITY, _jpeg_quality])
+                        else:
+                            ok, buffer = _cv2.imencode(".png", frame)
+                        encode_ms = (_time.perf_counter() - t_enc) * 1000.0
+                        if not ok:
+                            raise RuntimeError("Failed to encode frame.")
+                        t_b64 = _time.perf_counter()
+                        image_b64 = _base64.b64encode(buffer).decode("ascii")
+                        b64_ms = (_time.perf_counter() - t_b64) * 1000.0
+                        result = self.api.push_frame(
+                            session_id,
+                            image_b64,
+                            response_mode="stream",
+                        )
                     request_ms = (_time.perf_counter() - t0) * 1000.0
                     if isinstance(result, dict):
                         result.setdefault(
@@ -1677,8 +1706,8 @@ class OperatorScreen(ctk.CTkFrame):
                                 "request_ms": round(request_ms, 2),
                                 "frame_width": frame.shape[1],
                                 "frame_height": frame.shape[0],
-                                "jpeg_quality": 75,
-                                "payload_bytes": int(len(buffer)),
+                                "jpeg_quality": 0 if self.api._local_mode else int(_os.getenv("QC_SUITE_JPEG_QUALITY", "85")),
+                                "payload_bytes": int(len(buffer)) if buffer is not None else 0,
                             },
                         )
                     if result and self._inference_running and (self.state.active_session or {}).get("session_id") == session_id:
@@ -1734,22 +1763,64 @@ class OperatorScreen(ctk.CTkFrame):
         self._update_status_badges()
 
     def _apply_roi(self) -> None:
-        try:
-            part_ready_roi = self._validated_roi_payload("part_ready")
-            sticker_roi = self._validated_roi_payload("sticker")
-        except ValueError as exc:
-            messagebox.showerror("ROI", str(exc))
-            return
-        if not self.state.active_session:
-            self.info_var.set("Dua ROI disimpan lokal. Akan diterapkan saat session aktif.")
-            self._refresh_context_summary()
-            return
-        self.api.update_rois(
-            self.state.active_session["session_id"],
-            part_ready_roi=part_ready_roi,
-            sticker_roi=sticker_roi,
-        )
-        self.info_var.set("Part-ready ROI dan sticker ROI updated.")
+        # Detect mode from active template detail
+        template_detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
+        validator_mode = str((template_detail or {}).get("sticker", {}).get("validator_mode", "") or "").strip().lower()
+        is_component_counter = validator_mode == "component_count"
+
+        if is_component_counter:
+            # Component counter mode: collect component ROI values
+            comp_rois = []
+            for cv in self._comp_roi_vars:
+                try:
+                    x = float(cv["x"].get().strip())
+                    y = float(cv["y"].get().strip())
+                    w = float(cv["w"].get().strip())
+                    h = float(cv["h"].get().strip())
+                    name = cv["name"].get().strip() or "ROI"
+                except (ValueError, TypeError) as exc:
+                    messagebox.showerror("ROI", f"Component ROI field harus numerik: {exc}")
+                    return
+                if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0):
+                    messagebox.showerror("ROI", "Component ROI values must be in 0-1 range (w,h > 0).")
+                    return
+                comp_rois.append({"name": name, "roi": {"x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4)}})
+            if not comp_rois:
+                messagebox.showerror("ROI", "No component ROIs to apply.")
+                return
+            # Update via template API — save component_rois to template detail
+            try:
+                tid = int((template_detail or {}).get("id") or 0)
+                if not tid:
+                    self.info_var.set("Component ROI disimpan lokal. Aktifkan template dulu.")
+                    return
+                # Get full template detail and patch component_rois
+                full = self.api.get_template_version(int(template_detail.get("version_id") or template_detail.get("current_version_id") or 0))
+                if full:
+                    full["component_rois"] = comp_rois
+                    self.api.update_template(tid, full)
+                self.info_var.set(f"Component ROI updated ({len(comp_rois)} ROIs).")
+            except Exception as exc:
+                messagebox.showerror("ROI", f"Gagal update component ROI: {exc}")
+                return
+        else:
+            # Sticker mode: original part_ready + sticker ROI
+            try:
+                part_ready_roi = self._validated_roi_payload("part_ready")
+                sticker_roi = self._validated_roi_payload("sticker")
+            except ValueError as exc:
+                messagebox.showerror("ROI", str(exc))
+                return
+            if not self.state.active_session:
+                self.info_var.set("Dua ROI disimpan lokal. Akan diterapkan saat session aktif.")
+                self._refresh_context_summary()
+                return
+            self.api.update_rois(
+                self.state.active_session["session_id"],
+                part_ready_roi=part_ready_roi,
+                sticker_roi=sticker_roi,
+            )
+            self.info_var.set("Part-ready ROI dan sticker ROI updated.")
 
     def _update_result_info(self, payload: dict) -> None:
         timings = payload.get("timings") or {}
@@ -1809,9 +1880,10 @@ class OperatorScreen(ctk.CTkFrame):
         """Handle inference result from backend. Update UI directly."""
         with self._lock:
             self._latest_payload = payload
-            self._latest_error = None
-        self._auth_error_notified = False
-        self._last_payload_seq += 1
+        new_dets = payload.get("detections") or []
+        if new_dets:
+            self._last_detections = new_dets
+            self._last_detections_ts = monotonic()
 
         # Update all UI elements directly (no separate poll needed)
         try:
@@ -1848,6 +1920,7 @@ class OperatorScreen(ctk.CTkFrame):
             self._refresh_context_summary()
             self._update_status_badges(payload)
             self._update_result_info(payload)
+            self._render_overlay_direct(payload)
 
         except tk.TclError:
             pass
@@ -1928,15 +2001,10 @@ class OperatorScreen(ctk.CTkFrame):
             self._schedule_heartbeat()
             return
 
-        line_id = self.line_value.get().strip() or None
-        station_id = self.station_value.get().strip() or None
-
         def _load():
             return self.api.heartbeat(
                 self._machine_id,
                 client_version="client_tk",
-                line_id=line_id,
-                station_id=station_id,
             )
 
         run_async(self, _load, callback=lambda _result, _error: None)
@@ -2041,7 +2109,7 @@ class OperatorScreen(ctk.CTkFrame):
         clamp_engaged = status.get("clamp_engaged", False)
         plc_state = str(status.get("state") or "").strip().upper()
         if not connected:
-            self._set_badge("PLC", "DISCONN", "warning")
+            self._set_badge("PLC", "DISCONN", "danger")
         elif clamp_engaged or plc_state == "CLAMPED":
             self._set_badge("PLC", "ENGAGED", "warning")
         elif plc_state == "CLAMPING":

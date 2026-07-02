@@ -22,6 +22,12 @@ from client_tk.app.components.annotation_canvas import AnnotationCanvas
 from client_tk.app.components.roi_picker_canvas import RoiPickerCanvas
 from client_tk.app.components.scrollable_frame import AutoHideScrollbar, ScrollableFrame
 from client_tk.app.components.template_forms import JsonEditor, LabeledValuePanel
+from client_tk.app.screens.admin.tabs.templates_tab import TemplatesTab
+from client_tk.app.screens.admin.tabs.operators_tab import OperatorsTab
+from client_tk.app.screens.admin.tabs.models_tab import ModelsTab
+from client_tk.app.screens.admin.tabs.calibration_tab import CalibrationTab
+from client_tk.app.screens.admin.tabs.results_tab import ResultsTab
+from client_tk.app.screens.admin.tabs.machine_settings_tab import MachineSettingsTab
 from client_tk.app.theme import (
     ACCENT,
     ACCENT_HOVER,
@@ -37,6 +43,8 @@ from client_tk.app.theme import (
     TEXT_SECONDARY,
 )
 from shared.contracts.augment import TRANSFORM_CATALOG as _TRANSFORM_CATALOG
+
+
 
 
 RESPONSIVE_BREAKPOINT = 1180
@@ -159,19 +167,22 @@ class AdminScreen(ctk.CTkFrame):
 
         self.status_var = tk.StringVar(value="Admin ready.")
         self.refresh_time_var = tk.StringVar(value="")
-
+        self.validator_mode_var = tk.StringVar(value="sticker")  # "sticker" or "component_count"
+        self.preset_validator_mode_var = tk.StringVar(value="sticker")
+        self.preset_component_rois: list = []
+        self._calib_empty_mean: float = 0.0
+        self._calib_part_mean: float = 0.0
+        self._calib_part_std: float = 0.0
+        self._calib_sticker_std: float = 0.0
+        self.preset_model_classes_var = tk.StringVar()
         self.preset_name_var = tk.StringVar()
         self.preset_description_var = tk.StringVar()
-        self.preset_line_var = tk.StringVar()
-        self.preset_station_var = tk.StringVar()
         self.preset_model_choice_var = tk.StringVar()
         self.preset_model_path_var = tk.StringVar()
         self.preset_model_meta_path_var = tk.StringVar()
+        self.preset_runtime_var = tk.StringVar(value="auto")
         self.preset_conf_threshold_var = tk.StringVar(value="0.25")
-        self.preset_expected_code_var = tk.StringVar()
         self.preset_expected_class_var = tk.StringVar()
-        self.preset_use_ocr_var = tk.BooleanVar(value=False)
-        self.preset_ocr_flip_fallback_var = tk.BooleanVar(value=True)
         self.preset_max_tilt_var = tk.StringVar(value="")
         self.preset_tilt_gate_var = tk.BooleanVar(value=False)
         self.preset_gap_threshold_var = tk.StringVar(value="0.85")
@@ -189,11 +200,14 @@ class AdminScreen(ctk.CTkFrame):
         self.sticker_roi_h_var = tk.StringVar(value="0.6")
 
         self.operator_username_var = tk.StringVar()
-        self.operator_rfid_var = tk.StringVar()
         self.operator_role_var = tk.StringVar(value="operator")
         self.operator_edit_id: int | None = None
         self.operator_edit_username_var = tk.StringVar()
         self.operator_edit_role_var = tk.StringVar(value="operator")
+
+        # Unified RFID bind state
+        self.bind_target_user_id: int | None = None
+        self.unified_rfid_var = tk.StringVar()
 
         self.training_dataset_var = tk.StringVar()
         self.training_base_model_var = tk.StringVar()
@@ -203,8 +217,6 @@ class AdminScreen(ctk.CTkFrame):
         self.augment_dataset_var = tk.StringVar()
         self.model_import_path_var = tk.StringVar()
 
-        self.monitor_line_var = tk.StringVar()
-        self.monitor_station_var = tk.StringVar()
         self.monitor_context_var = tk.StringVar(value="Recent production activity.")
 
         self.columnconfigure(0, weight=1)
@@ -265,7 +277,7 @@ class AdminScreen(ctk.CTkFrame):
     def _build_tabs(self) -> None:
         notebook = ctk.CTkTabview(self, fg_color=APP_BG, corner_radius=0)
         notebook.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
-        for tab_name in ("Templates", "Data", "Training", "Models", "Calibration", "Operators", "Monitor"):
+        for tab_name in ("Templates", "Data", "Training", "Models", "Calibration", "Operators", "Monitor", "Machine Settings"):
             notebook.add(tab_name)
 
         original_tab = notebook.tab
@@ -296,6 +308,7 @@ class AdminScreen(ctk.CTkFrame):
         self.calibration_tab = notebook.tab("Calibration")
         self.operators_tab = notebook.tab("Operators")
         self.monitor_tab = notebook.tab("Monitor")
+        self.plc_settings_tab = notebook.tab("Machine Settings")
 
         self._build_presets_tab()
         self._build_data_tab()
@@ -304,6 +317,7 @@ class AdminScreen(ctk.CTkFrame):
         self._build_calibration_tab()
         self._build_operators_tab()
         self._build_monitor_tab()
+        self._build_plc_settings_tab()
 
     def _build_status_bar(self) -> None:
         status_bar = ctk.CTkFrame(self, fg_color=APP_BG, corner_radius=0)
@@ -321,347 +335,16 @@ class AdminScreen(ctk.CTkFrame):
         return scroller.body
 
     def _build_presets_tab(self) -> None:
-        self.presets_tab.columnconfigure(0, weight=3)
-        self.presets_tab.columnconfigure(1, weight=2)
-        self.presets_tab.rowconfigure(0, weight=1)
-
-        body = self._make_scrollable_body(self.presets_tab, "Templates")
-
-        self.presets_left = ttk.Frame(body, padding=8)
-        self.presets_right = ttk.Frame(body, padding=8)
-        self.presets_left.grid(row=0, column=0, sticky="nsew")
-        self.presets_right.grid(row=0, column=1, sticky="nsew")
-
-        listing = ctk.CTkFrame(self.presets_left, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        listing.pack(fill="both", expand=True)
-        listing.columnconfigure(0, weight=1)
-        listing.rowconfigure(2, weight=1)
-        ctk.CTkLabel(listing, text="Preset Library", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
-        ctk.CTkLabel(listing, text="Shows templates and active deployments together; ACTIVE marks deployed records.", text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
-        self.preset_table = self._build_table(
-            listing,
-            [
-                ("id", "ID", 55, "center"),
-                ("line", "Line", 110, "w"),
-                ("station", "Station", 100, "w"),
-                ("preset", "Preset", 220, "w"),
-                ("version", "Version", 80, "center"),
-                ("status", "Status", 90, "center"),
-            ],
-            row=2,
-            height=18,
-        )
-        self.preset_table.bind("<<TreeviewSelect>>", self._on_preset_selected)
-        footer = self._build_action_row(
-            listing,
-            [
-                ("Refresh", self.refresh_presets, "neutral", "left"),
-                ("New Preset", self.reset_preset_wizard, "neutral", "right"),
-                ("Delete/Deactivate Selected", self.deactivate_selected_preset, "neutral", "right"),
-            ],
-        )
-        footer.grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 10))
-
-        wizard = ctk.CTkFrame(self.presets_right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        wizard.pack(fill="both", expand=True)
-        wizard.columnconfigure(1, weight=1)
-        wizard.columnconfigure(3, weight=1)
-        ctk.CTkLabel(wizard, text="Preset Wizard", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=4, sticky="w", padx=12, pady=(10, 0))
-        ctk.CTkLabel(wizard, text="Fill only production-critical values. Technical defaults are applied automatically.", text_color=TEXT_SECONDARY, wraplength=520, justify="left").grid(row=1, column=0, columnspan=4, sticky="w", padx=12, pady=(2, 10))
-
-        self._entry(wizard, 2, 0, "Preset Name", self.preset_name_var, columnspan=3)
-        self._entry(wizard, 3, 0, "Description", self.preset_description_var, columnspan=3)
-        self._entry(wizard, 4, 0, "Line", self.preset_line_var)
-        self._entry(wizard, 4, 2, "Station", self.preset_station_var)
-
-        ttk.Label(wizard, text="Model").grid(row=5, column=0, sticky="w", padx=(12, 8), pady=5)
-        self.preset_model_selector = ttk.Combobox(wizard, textvariable=self.preset_model_choice_var, state="readonly")
-        self.preset_model_selector.grid(row=5, column=1, columnspan=3, sticky="ew", padx=(0, 12), pady=5)
-        self.preset_model_selector.bind("<<ComboboxSelected>>", self._on_preset_model_selected)
-        self._entry(wizard, 6, 0, "Confidence Threshold", self.preset_conf_threshold_var, columnspan=3)
-        self._entry(wizard, 7, 0, "Expected Class", self.preset_expected_class_var, columnspan=3)
-        self._entry(wizard, 8, 0, "Sticker Code", self.preset_expected_code_var, columnspan=3)
-        ttk.Checkbutton(wizard, text="Use OCR verification", variable=self.preset_use_ocr_var).grid(row=9, column=1, sticky="w", padx=(0, 12), pady=5)
-        ttk.Checkbutton(wizard, text="Try 180 flip fallback", variable=self.preset_ocr_flip_fallback_var).grid(row=9, column=2, columnspan=2, sticky="w", padx=(0, 12), pady=5)
-        self._entry(wizard, 10, 0, "Max Tilt Degrees", self.preset_max_tilt_var, columnspan=2)
-        ttk.Checkbutton(wizard, text="Aktifkan cek miring", variable=self.preset_tilt_gate_var).grid(row=10, column=2, sticky="w", padx=(0, 12), pady=5)
-        self._entry(wizard, 11, 0, "Gap Threshold (0-1)", self.preset_gap_threshold_var, columnspan=2)
-        # Reference patch buttons
-        ref_btn_row = ttk.Frame(wizard)
-        ref_btn_row.grid(row=12, column=0, columnspan=4, sticky="ew", padx=12, pady=(0, 4))
-        ttk.Button(ref_btn_row, text="Capture Reference", command=self._capture_part_ready_ref).pack(side="left", padx=(0, 6))
-        ttk.Button(ref_btn_row, text="Upload Reference", command=self._upload_part_ready_ref).pack(side="left")
-        self.gap_ref_status_label = ttk.Label(wizard, text="Referensi: belum dikonfigurasi", foreground="gray")
-        self.gap_ref_status_label.grid(row=13, column=0, columnspan=4, sticky="w", padx=12, pady=(0, 6))
-        self._entry(wizard, 14, 0, "Camera Index", self.preset_camera_index_var, columnspan=1)
-        # Rotation field + hint inline
-        ttk.Label(wizard, text="Rotation°\n(0/90/180/270)", foreground="gray").grid(row=11, column=2, sticky="w", padx=(12, 4), pady=5)
-        rot_entry = ttk.Entry(wizard, textvariable=self.preset_camera_rotation_var, width=8)
-        rot_entry.grid(row=11, column=3, sticky="w", padx=(0, 12), pady=5)
-
-        # Visual ROI picker. Values are kept in StringVars for payload compatibility,
-        # but production users edit them through the image overlay only.
-        roi_panel = ctk.CTkFrame(wizard, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        roi_panel.grid(row=15, column=0, columnspan=4, sticky="ew", padx=12, pady=(12, 2))
-        roi_panel.columnconfigure(0, weight=1)
-        ctk.CTkLabel(roi_panel, text="Visual ROI Picker", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).grid(
-            row=0, column=0, sticky="w", padx=10, pady=(10, 4)
-        )
-        roi_toolbar = ctk.CTkFrame(roi_panel, fg_color="transparent")
-        roi_toolbar.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
-        roi_toolbar.columnconfigure(1, weight=1)
-        ttk.Label(roi_toolbar, text="ROI").grid(row=0, column=0, sticky="w", padx=(0, 6))
-        self.preset_roi_selector = ttk.Combobox(
-            roi_toolbar,
-            textvariable=self.preset_roi_choice_var,
-            values=["Part Ready ROI", "Sticker ROI"],
-            state="readonly",
-            width=18,
-        )
-        self.preset_roi_selector.grid(row=0, column=1, sticky="w", padx=(0, 8))
-        self.preset_roi_selector.bind("<<ComboboxSelected>>", self._on_preset_roi_selected)
-        ttk.Button(roi_toolbar, text="Pick Image", command=self._pick_preset_roi_image).grid(row=0, column=2, padx=(0, 4))
-        ttk.Button(roi_toolbar, text="Capture from Camera", command=self._capture_preset_roi_from_camera).grid(row=0, column=3, padx=(0, 4))
-        ttk.Button(roi_toolbar, text="Reset", command=self._reset_preset_roi).grid(row=0, column=4)
-
-        self.preset_roi_picker = RoiPickerCanvas(roi_panel, "Drag/resize selected ROI on the image", size=(520, 292))
-        self.preset_roi_picker.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 10))
-        self.preset_roi_picker.on_roi_changed = self._on_preset_roi_changed
-        self._on_preset_roi_selected()
-        for var in (
-            self.part_ready_roi_x_var,
-            self.part_ready_roi_y_var,
-            self.part_ready_roi_w_var,
-            self.part_ready_roi_h_var,
-            self.sticker_roi_x_var,
-            self.sticker_roi_y_var,
-            self.sticker_roi_w_var,
-            self.sticker_roi_h_var,
-        ):
-            var.trace_add("write", lambda *_: self._sync_preset_roi_picker())
-
-        # Action buttons
-        btn_row = ttk.Frame(wizard)
-        btn_row.grid(row=18, column=0, columnspan=4, sticky="ew", padx=12, pady=(16, 6))
-        btn_row.columnconfigure(0, weight=1)
-        btn_row.columnconfigure(0, weight=1)
-
-        # Dynamic action button: "Update" when editing, "Save & Deploy" when new
-        self._preset_action_btn = ctk.CTkButton(
-            btn_row,
-            text="Save & Deploy Preset",
-            command=self.save_and_deploy_preset,
-            fg_color=ACCENT,
-            hover_color=ACCENT_HOVER,
-            text_color=TEXT_ON_ACCENT,
-            height=34,
-            corner_radius=6,
-        )
-        self._preset_action_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ctk.CTkButton(
-            btn_row,
-            text="Export template.json",
-            command=self.export_runtime_template,
-            fg_color=PANEL_ALT_BG,
-            hover_color=BORDER,
-            text_color=TEXT_PRIMARY,
-            height=34,
-            corner_radius=6,
-        ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
-
-    # NOTE: _build_models_training_tab removed - functionality moved to separate Data/Training/Models/Calibration tabs
+        TemplatesTab(self, self.presets_tab)
 
     def _build_operators_tab(self) -> None:
-        self.operators_tab.columnconfigure(0, weight=3)
-        self.operators_tab.columnconfigure(1, weight=2)
-        self.operators_tab.rowconfigure(0, weight=1)
-
-        body = self._make_scrollable_body(self.operators_tab, "Operators")
-
-        self.operators_left = ttk.Frame(body, padding=8)
-        self.operators_right = ttk.Frame(body, padding=8)
-        self.operators_left.grid(row=0, column=0, sticky="nsew")
-        self.operators_right.grid(row=0, column=1, sticky="nsew")
-
-        # ---- Left: user list ----
-        listing = ctk.CTkFrame(self.operators_left, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        listing.pack(fill="both", expand=True)
-        listing.columnconfigure(0, weight=1)
-        listing.rowconfigure(2, weight=1)
-        ctk.CTkLabel(listing, text="Users", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
-        ctk.CTkLabel(listing, text="Manage operators and admins. Edit role or delete users.", text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
-        self.users_table = self._build_table(
-            listing,
-            [
-                ("id", "ID", 50, "center"),
-                ("username", "Username", 140, "w"),
-                ("role", "Role", 80, "center"),
-                ("status", "Status", 80, "center"),
-                ("rfid", "RFID", 80, "center"),
-            ],
-            row=2,
-            height=18,
-        )
-        # Bind double-click to edit
-        self.users_table.bind("<Double-1>", self._on_user_double_click)
-        footer = self._build_action_row(listing, [("Refresh", self.refresh_operators, "neutral", "left")])
-        footer.grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 10))
-
-        # ---- Right: create/edit form ----
-        form = ctk.CTkFrame(self.operators_right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        form.pack(fill="x")
-        form.columnconfigure(1, weight=1)
-
-        self.operator_form_title = ctk.CTkLabel(form, text="Add User", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY)
-        self.operator_form_title.grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 0))
-
-        self.operator_form_hint = ctk.CTkLabel(form, text="Create a new user and bind RFID card.", text_color=TEXT_SECONDARY, wraplength=420, justify="left")
-        self.operator_form_hint.grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 10))
-
-        self._entry(form, 2, 0, "Username", self.operator_username_var, columns=2)
-        self._entry(form, 3, 0, "RFID UID", self.operator_rfid_var, columns=2)
-
-        # Role dropdown
-        ttk.Label(form, text="Role").grid(row=4, column=0, sticky="w", padx=(12, 8), pady=5)
-        role_combo = ttk.Combobox(form, textvariable=self.operator_role_var, values=("operator", "admin"), state="readonly", width=18)
-        role_combo.grid(row=4, column=1, sticky="ew", padx=(0, 12), pady=5)
-
-        # Action buttons row
-        btn_row = ctk.CTkFrame(form, fg_color="transparent")
-        btn_row.grid(row=5, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 10))
-
-        self.operator_save_btn = ctk.CTkButton(
-            btn_row,
-            text="Create User",
-            command=self._on_save_user,
-            fg_color=ACCENT,
-            hover_color=ACCENT_HOVER,
-            text_color=TEXT_ON_ACCENT,
-            height=32,
-            corner_radius=6,
-        )
-        self.operator_save_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
-
-        self.operator_cancel_btn = ctk.CTkButton(
-            btn_row,
-            text="Cancel Edit",
-            command=self._on_cancel_edit,
-            fg_color="#475569",
-            hover_color="#64748b",
-            text_color="#f8fafc",
-            height=32,
-            corner_radius=6,
-        )
-        self.operator_cancel_btn.pack(side="left", fill="x", expand=True, padx=(6, 0))
-
-        # Delete button (separate row, danger color)
-        self.operator_delete_btn = ctk.CTkButton(
-            form,
-            text="Delete User",
-            command=self._on_delete_user,
-            fg_color="#991b1b",
-            hover_color="#7f1d1d",
-            text_color="#fef2f2",
-            height=32,
-            corner_radius=6,
-        )
-        self.operator_delete_btn.grid(row=6, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 10))
+        OperatorsTab(self, self.operators_tab)
 
     def _build_monitor_tab(self) -> None:
-        self.monitor_tab.columnconfigure(0, weight=1)
-        self.monitor_tab.rowconfigure(2, weight=1)
+        ResultsTab(self, self.monitor_tab)
 
-        body = self._make_scrollable_body(self.monitor_tab, "Monitor")
-
-        filters = ctk.CTkFrame(body, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        filters.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
-        for index in range(6):
-            filters.columnconfigure(index, weight=1 if index % 2 else 0)
-        ctk.CTkLabel(filters, text="Production Monitor", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, columnspan=6, sticky="w", padx=10, pady=(10, 0))
-        self._entry(filters, 1, 0, "Line", self.monitor_line_var)
-        self._entry(filters, 1, 2, "Station", self.monitor_station_var)
-        ctk.CTkButton(filters, text="Refresh", command=self.refresh_monitor, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).grid(row=1, column=4, sticky="e", padx=(8, 4), pady=(4, 10))
-        ctk.CTkButton(filters, text="Export CSV", command=self.export_monitor_csv, fg_color=SUCCESS_HOVER, hover_color=SUCCESS, text_color=TEXT_ON_ACCENT, height=28, corner_radius=6).grid(row=1, column=5, sticky="e", padx=(4, 10), pady=(4, 10))
-
-        self.monitor_cards_frame = ttk.Frame(body, padding=(8, 0, 8, 6))
-        self.monitor_cards_frame.grid(row=1, column=0, sticky="ew")
-        for index in range(6):
-            self.monitor_cards_frame.columnconfigure(index, weight=1)
-        self.monitor_cards = {
-            "total": CompactStatCard(self.monitor_cards_frame, "Total", background="#0f172a", foreground="#f8fafc"),
-            "accept": CompactStatCard(self.monitor_cards_frame, "Accept", background="#166534", foreground="#f0fdf4"),
-            "reject": CompactStatCard(self.monitor_cards_frame, "Reject", background="#991b1b", foreground="#fef2f2"),
-            "reject_rate": CompactStatCard(self.monitor_cards_frame, "Reject Rate", background="#7c2d12", foreground="#fff7ed"),
-            "pending": CompactStatCard(self.monitor_cards_frame, "Push Pending", background="#a16207", foreground="#fffbeb"),
-            "failed": CompactStatCard(self.monitor_cards_frame, "Push Failed", background="#334155", foreground="#f8fafc"),
-        }
-        self._layout_monitor_cards(compact=False)
-
-        content = ttk.Frame(body, padding=8)
-        content.grid(row=2, column=0, sticky="nsew")
-        content.columnconfigure(0, weight=3)
-        content.columnconfigure(1, weight=2)
-        content.rowconfigure(0, weight=1)
-        self.monitor_left = ttk.Frame(content)
-        self.monitor_right = ttk.Frame(content)
-        self.monitor_left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        self.monitor_right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-
-        recent = ctk.CTkFrame(self.monitor_left, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        recent.pack(fill="both", expand=True)
-        recent.columnconfigure(0, weight=1)
-        recent.rowconfigure(2, weight=1)
-        ctk.CTkLabel(recent, text="Recent Inspections", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 0))
-        ctk.CTkLabel(recent, textvariable=self.monitor_context_var, text_color=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
-        self.results_table = self._build_table(
-            recent,
-            [
-                ("id", "ID", 60, "center"),
-                ("time", "Time", 145, "w"),
-                ("decision", "Decision", 90, "center"),
-                ("part", "Part", 150, "w"),
-                ("line", "Line", 90, "w"),
-                ("station", "Station", 90, "w"),
-                ("push", "Push", 90, "center"),
-                ("reason", "Reason", 130, "w"),
-            ],
-            row=2,
-            height=16,
-        )
-        actions = self._build_action_row(recent, [("Retry Failed Visible", self.retry_visible_failed_pushes, "neutral", "left")])
-        actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(8, 10))
-
-        side = ctk.CTkFrame(self.monitor_right, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
-        side.pack(fill="both", expand=True)
-        side.columnconfigure(0, weight=1)
-        side.rowconfigure(1, weight=1)
-        ctk.CTkLabel(side, text="Recent Rejects", font=("Segoe UI", 12, "bold"), text_color=TEXT_PRIMARY).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 8))
-        self.reject_table = self._build_table(
-            side,
-            [
-                ("id", "ID", 60, "center"),
-                ("part", "Part", 130, "w"),
-                ("reason", "Reason", 150, "w"),
-                ("time", "Time", 140, "w"),
-            ],
-            row=1,
-            height=12,
-        )
-        self.monitor_summary = LabeledValuePanel(
-            side,
-            "Selected Summary",
-            [
-                ("decision", "Decision"),
-                ("reason", "Reason"),
-                ("push_status", "Push"),
-                ("line_id", "Line"),
-                ("station_id", "Station"),
-            ],
-            columns=1,
-        )
-        self.monitor_summary.grid(row=2, column=0, sticky="ew", padx=12, pady=(8, 10))
-        self.results_table.bind("<<TreeviewSelect>>", self.open_monitor_result)
-
+    def _build_plc_settings_tab(self) -> None:
+        MachineSettingsTab(self, self.plc_settings_tab)
     # ------------------------------------------------------------------
     # Refresh and render
     def refresh_all(self) -> None:
@@ -882,19 +565,33 @@ class AdminScreen(ctk.CTkFrame):
             if int(item.get("template_id") or 0) > 0
         }
         if not active_items and not self._templates_cache:
-            self.preset_table.insert("", "end", iid="__empty__", values=("-", "No presets.", "", "", "", ""))
+            self.preset_table.insert("", "end", iid="__empty__", values=("-", "No presets.", "", "", ""))
             return
         for item in active_items:
+            # Get latest template name from cache (falls back to deployment snapshot)
+            template_id = int(item.get("template_id") or 0)
+            latest_name = item.get("template_name") or ""
+            if template_id > 0:
+                tpl = next(
+                    (t for t in self._templates_cache if int(t.get("id") or 0) == template_id),
+                    None,
+                )
+                if tpl:
+                    latest_name = tpl.get("name") or latest_name
+            # Get validator mode from template
+            _vm = "sticker"
+            if template_id > 0 and tpl:
+                _vm = str(tpl.get("sticker", {}).get("validator_mode") or "ml_detection")
+            _mode_label = "Component Counter" if _vm == "component_count" else "QC Sticker"
             self.preset_table.insert(
                 "",
                 "end",
                 iid=f"dep:{item.get('id')}",
                 values=(
                     f"D{item.get('id')}",
-                    _safe_text(item.get("line_id")),
-                    _safe_text(item.get("station_id")),
-                    _safe_text(item.get("template_name")),
+                    _safe_text(latest_name),
                     _safe_text(item.get("template_version_id")),
+                    _mode_label,
                     "ACTIVE",
                 ),
             )
@@ -902,16 +599,17 @@ class AdminScreen(ctk.CTkFrame):
             template_id = int(item.get("id") or 0)
             if template_id in active_template_ids:
                 continue
+            _vm = str(item.get("sticker", {}).get("validator_mode") or "ml_detection")
+            _mode_label = "Component Counter" if _vm == "component_count" else "QC Sticker"
             self.preset_table.insert(
                 "",
                 "end",
                 iid=f"tpl:{template_id}",
                 values=(
                     f"T{template_id}",
-                    "-",
-                    "-",
                     _safe_text(item.get("name")),
                     _safe_text(item.get("version_id") or item.get("current_version_id")),
+                    _mode_label,
                     _safe_text(item.get("lifecycle_status") or _format_status(item.get("is_active", True))),
                 ),
             )
@@ -968,13 +666,65 @@ class AdminScreen(ctk.CTkFrame):
         """Reset the form back to create mode."""
         self.operator_edit_id = None
         self.operator_username_var.set("")
-        self.operator_rfid_var.set("")
         self.operator_role_var.set("operator")
         self.operator_form_title.configure(text="Add User")
-        self.operator_form_hint.configure(text="Create a new user and bind RFID card.")
+        self.operator_form_hint.configure(text="Create a new user, then bind RFID below.")
         self.operator_save_btn.configure(text="Create User")
         self.operator_cancel_btn.configure(state="disabled")
         self.operator_delete_btn.configure(state="disabled")
+        # Reset unified bind state
+        self.bind_target_user_id = None
+        self.bind_target_label.configure(text="Select a user from the list")
+        self.unified_rfid_var.set("")
+        self.bind_rfid_status.configure(text="")
+
+    def _on_user_selected(self, event=None) -> None:
+        """Single-click on table: set bind target user."""
+        sel = self.users_table.selection()
+        if not sel:
+            return
+        user_id = int(sel[0])
+        users = {int(u.get("id")): u for u in self._users_cache}
+        user = users.get(user_id)
+        if user is None:
+            return
+        self.bind_target_user_id = user_id
+        name = _safe_text(user.get("username"))
+        role = _safe_text(user.get("role"))
+        self.bind_target_label.configure(text=f"Target: {name} ({role}) #{user_id}")
+        self.after_idle(self.unified_rfid_entry.focus_set)
+
+    def _on_bind_rfid(self) -> None:
+        """Bind scanned RFID to the selected user."""
+        if self.bind_target_user_id is None:
+            self.bind_rfid_status.configure(text="Select a user first.", text_color="orange")
+            return
+        rfid_uid = self.unified_rfid_var.get().strip()
+        if not rfid_uid:
+            self.bind_rfid_status.configure(text="Scan RFID card first.", text_color="orange")
+            return
+        try:
+            self.api.bind_user_rfid(self.bind_target_user_id, rfid_uid)
+        except Exception as exc:
+            self.bind_rfid_status.configure(text=str(exc), text_color="red")
+            return
+        self.unified_rfid_var.set("")
+        self.bind_rfid_status.configure(text="RFID bound successfully!", text_color="green")
+        self.refresh_operators()
+
+    def _on_clear_rfid(self) -> None:
+        """Clear RFID binding from the selected user."""
+        if self.bind_target_user_id is None:
+            return
+        if not messagebox.askyesno("Clear RFID", "Remove RFID binding from this user?"):
+            return
+        try:
+            self.api.clear_user_rfid(self.bind_target_user_id)
+        except Exception as exc:
+            self.bind_rfid_status.configure(text=str(exc), text_color="red")
+            return
+        self.bind_rfid_status.configure(text="RFID cleared.", text_color=TEXT_SECONDARY)
+        self.refresh_operators()
 
     def _on_save_user(self) -> None:
         """Create new user or update existing user's role."""
@@ -996,12 +746,8 @@ class AdminScreen(ctk.CTkFrame):
             self.refresh_operators()
             self._set_status(f"User #{user_id} role changed to {new_role}.")
         else:
-            # Create mode
-            rfid_uid = self.operator_rfid_var.get().strip()
+            # Create mode — no RFID here, user will bind below
             role = self.operator_role_var.get().strip()
-            if not rfid_uid:
-                messagebox.showerror("Users", "Scan RFID card first.")
-                return
             try:
                 created = self.api.create_user({
                     "username": username,
@@ -1011,15 +757,19 @@ class AdminScreen(ctk.CTkFrame):
                 user_id = int(created.get("id") or 0)
                 if user_id <= 0:
                     raise ValueError("API did not return a valid user id.")
-                self.api.bind_user_rfid(user_id, rfid_uid)
             except Exception as exc:
                 messagebox.showerror("Users", str(exc))
                 return
             self.operator_username_var.set("")
-            self.operator_rfid_var.set("")
             self.operator_role_var.set("operator")
             self.refresh_operators()
-            self._set_status(f"User {username} ({role}) created and RFID bound.")
+            # Auto-select the newly created user in the table and focus RFID entry
+            self.bind_target_user_id = user_id
+            created_user = {int(u.get("id")): u for u in self._users_cache}.get(user_id, {})
+            name = _safe_text(created_user.get("username") or username)
+            self.bind_target_label.configure(text=f"Target: {name} ({role}) #{user_id}")
+            self.after_idle(self.unified_rfid_entry.focus_set)
+            self._set_status(f"User {username} created. Now scan RFID to bind.")
 
     def _on_delete_user(self) -> None:
         """Delete the selected user after confirmation."""
@@ -1109,12 +859,8 @@ class AdminScreen(ctk.CTkFrame):
             self.preset_table.focus("")
         self.preset_name_var.set("")
         self.preset_description_var.set("")
-        self.preset_line_var.set("")
-        self.preset_station_var.set("")
+        self.preset_expected_class_var.set("")
         self.preset_conf_threshold_var.set("0.25")
-        self.preset_expected_code_var.set("")
-        self.preset_use_ocr_var.set(False)
-        self.preset_ocr_flip_fallback_var.set(True)
         self.preset_max_tilt_var.set("")
         self.preset_tilt_gate_var.set(False)
         self.preset_gap_threshold_var.set("0.85")
@@ -1153,8 +899,6 @@ class AdminScreen(ctk.CTkFrame):
         if not deployment:
             return
         self._editing_deployment_id = selected_id
-        self.preset_line_var.set(str(deployment.get("line_id") or ""))
-        self.preset_station_var.set(str(deployment.get("station_id") or ""))
 
         version_id = int(deployment.get("template_version_id") or 0)
         template_id = int(deployment.get("template_id") or 0)
@@ -1182,19 +926,17 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_description_var.set(str(detail.get("description") or ""))
         sticker = detail.get("sticker") or {}
         part_ready = detail.get("part_ready") or {}
-        if deployment:
-            self.preset_line_var.set(str(deployment.get("line_id") or ""))
-            self.preset_station_var.set(str(deployment.get("station_id") or ""))
-        else:
-            self.preset_line_var.set(str(sticker.get("line") or ""))
-            self.preset_station_var.set(str(sticker.get("station") or ""))
-        self.preset_expected_code_var.set(str(sticker.get("ocr_expected_code") or sticker.get("ocr_expected_text") or ""))
+        # Restore validator mode — fires _refresh_comp_roi_editor trace
+        _vm = str(sticker.get("validator_mode") or "")
+        self.preset_validator_mode_var.set("component_count" if _vm == "component_count" else "sticker")
         self.preset_expected_class_var.set(str(sticker.get("expected_class") or ""))
-        self.preset_use_ocr_var.set(bool(sticker.get("use_ocr", False)))
-        self.preset_ocr_flip_fallback_var.set(bool(sticker.get("ocr_flip_fallback", True)))
         self.preset_max_tilt_var.set("" if sticker.get("max_tilt_degrees") is None else str(sticker.get("max_tilt_degrees")))
         self.preset_tilt_gate_var.set(bool(sticker.get("tilt_gate_enabled", False)))
         self.preset_gap_threshold_var.set(str(part_ready.get("gap_match_threshold", 0.85)))
+        # Part ready method and mean-std thresholds
+        self.preset_part_ready_method_var.set(str(part_ready.get("method", "gap_template_match")))
+        self.preset_mean_max_var.set(str(part_ready.get("mean_max", 105.0)))
+        self.preset_std_max_var.set(str(part_ready.get("std_max", 35.0)))
         # Update gap ref status label
         _gap_ref_path = detail.get("gap_ref_path") or part_ready.get("gap_ref_path")
         _gap_ref_type = part_ready.get("gap_ref_type", "raw")
@@ -1236,6 +978,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_model_path_var.set(model_path)
         self.preset_model_meta_path_var.set(str(vision.get("model_meta_path") or ""))
         self.preset_conf_threshold_var.set(str(vision.get("conf_threshold", 0.25)))
+        self.preset_runtime_var.set(str(vision.get("runtime") or "auto"))
         self._select_model_label_for_path(model_path)
 
     def _on_preset_model_selected(self, _event=None) -> None:
@@ -1244,6 +987,7 @@ class AdminScreen(ctk.CTkFrame):
             return
         self.preset_model_path_var.set(str(item.get("path") or ""))
         self.preset_model_meta_path_var.set(str(item.get("meta_path") or ""))
+        self.preset_runtime_var.set(str(item.get("runtime") or "auto"))
 
     def _select_model_label_for_path(self, model_path: str) -> None:
         normalized = str(model_path or "").strip().lower()
@@ -1258,8 +1002,27 @@ class AdminScreen(ctk.CTkFrame):
 
     # Visual preset ROI picker
 
-    def _preset_roi_kind(self) -> str:
-        return "part_ready" if self.preset_roi_choice_var.get().strip() == "Part Ready ROI" else "sticker"
+    def _preset_roi_kind(self) -> str | None:
+        choice = self.preset_roi_choice_var.get().strip()
+        if choice == "Part Ready ROI":
+            return "part_ready"
+        if choice == "Sticker ROI":
+            return "sticker"
+        if choice.startswith("Component:"):
+            # Extract index from the dropdown position, not from name match
+            # This avoids name mismatch issues
+            try:
+                values = self.preset_roi_selector.cget("values")
+                for i, val in enumerate(values):
+                    if val == choice:
+                        # val format is "Component: {name}", index is i-0 (0-based in component list)
+                        # But we need to figure out which component index this corresponds to
+                        # Since dropdown lists components in order, index = position in dropdown
+                        if i < len(self.preset_component_rois):
+                            return f"component:{i}"
+            except Exception:
+                pass
+        return None
 
     def _roi_payload_from_vars(
         self,
@@ -1281,6 +1044,11 @@ class AdminScreen(ctk.CTkFrame):
                                 part_ready_rotation: float | None = None,
                                 sticker_rotation: float | None = None) -> None:
         if not hasattr(self, "preset_roi_picker"):
+            return
+        mode = self.preset_validator_mode_var.get()
+        if mode == "component_count":
+            # In component mode, only sync active ROI kind, don't touch positions
+            self.preset_roi_picker.set_active_roi(self._preset_roi_kind())
             return
         _pr_rot = (part_ready_rotation if part_ready_rotation is not None
                    else self.preset_roi_picker.get_roi("part_ready").get("rotation", 0.0))
@@ -1311,9 +1079,17 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_roi_picker.set_active_roi(self._preset_roi_kind())
 
     def _on_preset_roi_selected(self, _event=None) -> None:
-        self._sync_preset_roi_picker()
+        kind = self._preset_roi_kind()
+        if kind is not None and kind.startswith("component:"):
+            # Component mode: just set active ROI, don't overwrite positions
+            self.preset_roi_picker.set_active_roi(kind)
+        else:
+            self._sync_preset_roi_picker()
 
     def _on_preset_roi_changed(self, kind: str, roi: dict) -> None:
+        # Ignore component ROIs — they are handled by _on_comp_roi_picker_changed
+        if kind is not None and kind.startswith("component:"):
+            return
         target = (
             (self.part_ready_roi_x_var, self.part_ready_roi_y_var, self.part_ready_roi_w_var, self.part_ready_roi_h_var)
             if kind == "part_ready"
@@ -1386,6 +1162,25 @@ class AdminScreen(ctk.CTkFrame):
             except Exception:
                 pass
 
+    def _toggle_live_camera(self) -> None:
+        """Toggle live camera feed on the ROI picker canvas."""
+        picker = getattr(self, "preset_roi_picker", None)
+        if picker is None:
+            messagebox.showwarning("Camera", "ROI picker not initialized.")
+            return
+        if getattr(picker, "_cam_running", False):
+            picker.stop_live_camera()
+            self._live_cam_btn.configure(text="Start Live Camera")
+            self._set_status("Live camera stopped.")
+        else:
+            cam_idx = int(_float_or_default(self.preset_camera_index_var.get(), 0))
+            try:
+                picker.start_live_camera(cam_idx)
+                self._live_cam_btn.configure(text="Stop Live Camera")
+                self._set_status(f"Live camera {cam_idx} started. Drag ROIs on the live feed.")
+            except Exception as exc:
+                messagebox.showerror("Camera", f"Failed to start camera {cam_idx}: {exc}")
+
     def _reset_preset_roi(self) -> None:
         kind = self._preset_roi_kind()
         if kind == "part_ready":
@@ -1437,6 +1232,18 @@ class AdminScreen(ctk.CTkFrame):
             version_id = int(saved.get("version_id") or saved.get("current_version_id") or 0)
             self.current_template_id = template_id
             self.current_template_version_id = version_id
+            # Update template_name in existing active deployment records
+            new_name = payload.get("name", "").strip()
+            if new_name and hasattr(self, "_deployments_cache"):
+                for dep in self._deployments_cache:
+                    if int(dep.get("template_id") or 0) == template_id and dep.get("is_active"):
+                        try:
+                            self.api.update_deployment(
+                                int(dep.get("id") or 0),
+                                {"template_name": new_name},
+                            )
+                        except Exception:
+                            pass
             # Reload exact version detail to wizard form so values reflect the update
             try:
                 if version_id:
@@ -1458,13 +1265,21 @@ class AdminScreen(ctk.CTkFrame):
             messagebox.showerror("Preset", str(exc))
     def save_and_deploy_preset(self) -> None:
         """Save current template as new version and deploy."""
+        # Stop live camera if running to prevent thread leak
+        _picker = getattr(self, "preset_roi_picker", None)
+        if _picker is not None and getattr(_picker, "_cam_running", False):
+            try:
+                _picker.stop_live_camera()
+            except Exception:
+                pass
         try:
             payload = self._preset_payload()
         except ValueError as exc:
             messagebox.showerror("Preset", str(exc))
             return
         try:
-            if self.current_template_id:
+            is_update = bool(self.current_template_id)
+            if is_update:
                 saved = self.api.update_template(self.current_template_id, payload)
             else:
                 saved = self.api.create_template(payload)
@@ -1482,10 +1297,22 @@ class AdminScreen(ctk.CTkFrame):
                 {
                     "template_id": template_id,
                     "template_version_id": version_id,
-                    "line_id": self.preset_line_var.get().strip(),
-                    "station_id": self.preset_station_var.get().strip(),
                 }
             )
+            # Update template_name in existing active deployment records
+            # This keeps the name in sync when renaming a deployed template
+            if is_update:
+                new_name = payload.get("name", "").strip()
+                if new_name and hasattr(self, "_deployments_cache"):
+                    for dep in self._deployments_cache:
+                        if int(dep.get("template_id") or 0) == template_id and dep.get("is_active"):
+                            try:
+                                self.api.update_deployment(
+                                    int(dep.get("id") or 0),
+                                    {"template_name": new_name},
+                                )
+                            except Exception:
+                                pass
         except Exception as exc:
             messagebox.showerror("Preset", str(exc))
             return
@@ -1493,7 +1320,7 @@ class AdminScreen(ctk.CTkFrame):
         self.current_template_version_id = version_id
         self._editing_deployment_id = int(deployment.get("id") or 0) or self._editing_deployment_id
         self.refresh_presets()
-        self._set_status(f"Preset deployed to {self.preset_line_var.get().strip()}/{self.preset_station_var.get().strip()}.")
+        self._set_status("Preset deployed.")
         messagebox.showinfo("Preset", "Preset saved and deployed.")
 
 
@@ -1551,7 +1378,7 @@ class AdminScreen(ctk.CTkFrame):
             }
             _pr_roi = self.preset_roi_picker.get_roi("part_ready")
             roi["rotation"] = float(_pr_roi.get("rotation", 0.0))
-            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            _, buf = cv2.imencode(".png", frame)
             frame_b64 = base64.b64encode(buf).decode("ascii")
             result = self.api.capture_part_ready_ref(self.current_template_id, frame_b64, roi)
             if result.get("saved"):
@@ -1631,21 +1458,18 @@ class AdminScreen(ctk.CTkFrame):
 
     def _preset_payload(self) -> dict:
         name = self.preset_name_var.get().strip()
-        line = self.preset_line_var.get().strip()
-        station = self.preset_station_var.get().strip()
-        expected_code = self.preset_expected_code_var.get().strip()
         expected_class = self.preset_expected_class_var.get().strip()
         model_path = self.preset_model_path_var.get().strip()
         if not name:
             raise ValueError("Preset name is required.")
-        if not line or not station:
-            raise ValueError("Line and station are required.")
         if not model_path:
             raise ValueError("Model is required.")
-        if not expected_code:
-            raise ValueError("Sticker code is required.")
-        if not expected_class:
-            raise ValueError("Expected class is required.")
+        mode = self.preset_validator_mode_var.get()
+        if mode == "component_count":
+            expected_class = expected_class or ""
+        else:
+            if not expected_class:
+                raise ValueError("Expected class is required.")
         max_tilt = None
         if self.preset_max_tilt_var.get().strip():
             max_tilt = _float_or_default(self.preset_max_tilt_var.get(), 5.0)
@@ -1679,19 +1503,15 @@ class AdminScreen(ctk.CTkFrame):
             "vision": {
                 "model_path": model_path,
                 "model_meta_path": self.preset_model_meta_path_var.get().strip() or None,
-                "runtime": "ultralytics",
+                "runtime": self.preset_runtime_var.get().strip() or "auto",
                 "conf_threshold": _float_or_default(self.preset_conf_threshold_var.get(), 0.15),
                 "stream_fps": 10.0,
                 "inference_fps": 4.0,
                 "imgsz": 640,
-                "classes": [expected_class],
+                "classes": [c.strip() for c in self.preset_model_classes_var.get().split(",") if c.strip()] or [expected_class],
                 "enable_ergonomic_check": False,
                 "ergonomic_pose_model_path": None,
                 "ergonomic_min_keypoint_conf": 0.35,
-                "ocr_engine": "default",
-                "ocr_language": "eng",
-                "ocr_psm": 13,
-                "ocr_allowlist": "",
                 "text_anchor_class": "text_anchor",
                 "center_dot_class": "center_dot",
                 "anchor_crop_padding_ratio": 0.08,
@@ -1699,19 +1519,20 @@ class AdminScreen(ctk.CTkFrame):
             },
             "part_ready": {
                 "enabled": True,
-                "method": "gap_template_match",
-                "gap_match_threshold": _float_or_default(self.preset_gap_threshold_var.get(), 0.85),
-                "gap_ref_path": self._get_existing_gap_ref_path(),
+                "method": "" if mode == "component_count" else self.preset_part_ready_method_var.get(),
+                "gap_match_threshold": _float_or_default(self.preset_gap_threshold_var.get(), 0.85) if mode != "component_count" else 0.85,
+                "gap_ref_path": self._get_existing_gap_ref_path() if mode != "component_count" else None,
                 "stable_ms": 500,
                 "release_ms": 300,
+                "mean_max": _float_or_default(self.preset_mean_max_var.get(), 105.0) if mode != "component_count" else 105.0,
+                "std_max": _float_or_default(self.preset_std_max_var.get(), 35.0) if mode != "component_count" else 35.0,
+                "min_match_ratio": _float_or_default(self.preset_min_match_ratio_var.get(), 0.5) if mode != "component_count" else 0.5,
             },
             "sticker": {
-                "part_name": expected_code,
+                "part_name": expected_class,
                 "expected_class": expected_class,
-                "line": line,
-                "station": station,
                 "enabled": True,
-                "validator_mode": "sticker_only" if self.preset_use_ocr_var.get() else "ml_detection",
+                "validator_mode": mode if mode == "component_count" else "ml_detection",
                 "min_roi_confidence": 0.0,
                 "min_class_confidence": None,
                 "max_offset_x": 80,
@@ -1720,20 +1541,6 @@ class AdminScreen(ctk.CTkFrame):
                 "expected_center_y": None,
                 "expected_tilt_degrees": 0.0,
                 "max_tilt_degrees": max_tilt,
-                "use_ocr": bool(self.preset_use_ocr_var.get()),
-                "ocr_expected_code": expected_code,
-                "ocr_flip_fallback": bool(self.preset_ocr_flip_fallback_var.get()),
-                "ocr_mode": None,
-                "ocr_expected_text": expected_code,
-                "ocr_min_confidence": None,
-                "ocr_regex": None,
-                "ocr_canonical_map": {},
-                "anchor_min_confidence": None,
-                "dot_min_confidence": None,
-                "expected_dot_x": None,
-                "expected_dot_y": None,
-                "max_anchor_offset_x": None,
-                "max_anchor_offset_y": None,
                 "tilt_gate_enabled": bool(self.preset_tilt_gate_var.get()),
                 "commit_stable_frames": 1,
                 "part_ready_settle_ms": None,
@@ -1872,6 +1679,7 @@ class AdminScreen(ctk.CTkFrame):
             return
         self.preset_model_path_var.set(str(item.get("path") or ""))
         self.preset_model_meta_path_var.set(str(item.get("meta_path") or ""))
+        self.preset_runtime_var.set(str(item.get("runtime") or "auto"))
         self._select_model_label_for_path(str(item.get("path") or ""))
         self._notebook.set("Templates")
         self._set_status("Selected model copied into the template wizard.")
@@ -1893,44 +1701,9 @@ class AdminScreen(ctk.CTkFrame):
         self._set_status("Model archive imported.")
 
     # ------------------------------------------------------------------
-    # Operator behavior
-    def create_operator_from_rfid(self) -> None:
-        username = self.operator_username_var.get().strip()
-        rfid_uid = self.operator_rfid_var.get().strip()
-        if not username:
-            messagebox.showerror("Operators", "Username is required.")
-            return
-        if not rfid_uid:
-            messagebox.showerror("Operators", "Scan RFID first.")
-            return
-        try:
-            created = self.api.create_user(
-                {
-                    "username": username,
-                    "password": _random_password(),
-                    "role": "operator",
-                }
-            )
-            user_id = int(created.get("id") or 0)
-            if user_id <= 0:
-                raise ValueError("User API did not return a valid id.")
-            self.api.bind_user_rfid(user_id, rfid_uid)
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Operators", str(exc))
-            return
-        self.operator_username_var.set("")
-        self.operator_rfid_var.set("")
-        self.refresh_operators()
-        self._set_status(f"Operator {username} created and RFID bound.")
-
-    # ------------------------------------------------------------------
     # Monitor behavior
     def _monitor_filters(self) -> dict[str, object]:
         params: dict[str, object] = {"limit": 100}
-        if self.monitor_line_var.get().strip():
-            params["line_id"] = self.monitor_line_var.get().strip()
-        if self.monitor_station_var.get().strip():
-            params["station_id"] = self.monitor_station_var.get().strip()
         return params
 
     def export_monitor_csv(self) -> None:
@@ -1983,8 +1756,6 @@ class AdminScreen(ctk.CTkFrame):
                 "decision": decision,
                 "reason": item.get("reject_reason_code") or ("OK" if decision == "ACCEPT" else "-"),
                 "push_status": item.get("push_status"),
-                "line_id": item.get("line_id"),
-                "station_id": item.get("station_id"),
             }
         )
 
@@ -2940,55 +2711,7 @@ class AdminScreen(ctk.CTkFrame):
     # Models Tab - Model registry + export/import
     # ==================================================================
     def _build_models_tab(self) -> None:
-        self.models_tab.columnconfigure(0, weight=1)
-        self.models_tab.rowconfigure(0, weight=1)
-
-        body = self._make_scrollable_body(self.models_tab, "Models")
-
-        shell = ttk.Frame(body)
-        shell.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-        shell.columnconfigure(0, weight=2)
-        shell.columnconfigure(1, weight=3)
-        shell.rowconfigure(0, weight=1)
-
-        left = ttk.LabelFrame(shell, text="Model Registry", padding=8)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        left.columnconfigure(0, weight=1)
-        left.rowconfigure(0, weight=1)
-
-        self._admin_model_list = tk.Listbox(left, height=16)
-        self._admin_model_list.grid(row=0, column=0, sticky="nsew")
-        self._admin_model_list.bind("<<ListboxSelect>>", self._on_admin_model_selected)
-
-        btn_bar = ttk.Frame(left)
-        btn_bar.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        ttk.Button(btn_bar, text="Refresh", command=self.refresh_model_options).pack(side="left")
-        ttk.Button(btn_bar, text="Export", command=self._admin_export_model).pack(side="left", padx=4)
-        ttk.Button(btn_bar, text="Delete", command=self._admin_delete_model).pack(side="left")
-
-        right = ttk.LabelFrame(shell, text="Import / Detail", padding=8)
-        right.grid(row=0, column=1, sticky="nsew")
-
-        import_frame = ttk.LabelFrame(right, text="Upload Model (.pt / .tflite)", padding=6)
-        import_frame.pack(fill="x")
-        self._admin_import_path_var = tk.StringVar(value="No file selected")
-        self._admin_import_name_var = tk.StringVar()
-        self._admin_import_format_var = tk.StringVar(value="auto")
-        ttk.Label(import_frame, text="Model Name:").pack(anchor="w")
-        ttk.Entry(import_frame, textvariable=self._admin_import_name_var).pack(fill="x", pady=(2, 4))
-        fmt_row = ttk.Frame(import_frame)
-        fmt_row.pack(fill="x", pady=(0, 4))
-        ttk.Label(fmt_row, text="Format:").pack(side="left")
-        ttk.Radiobutton(fmt_row, text="Auto-detect", variable=self._admin_import_format_var, value="auto").pack(side="left", padx=(4, 0))
-        ttk.Radiobutton(fmt_row, text="PyTorch (.pt)", variable=self._admin_import_format_var, value="pt").pack(side="left", padx=(4, 0))
-        ttk.Radiobutton(fmt_row, text="TFLite (.tflite)", variable=self._admin_import_format_var, value="tflite").pack(side="left", padx=(4, 0))
-        ttk.Button(import_frame, text="Choose File", command=self._admin_choose_import_file).pack(anchor="w")
-        ttk.Label(import_frame, textvariable=self._admin_import_path_var, wraplength=300).pack(anchor="w", pady=(2, 0))
-        ttk.Button(import_frame, text="Upload", command=self._admin_import_model).pack(anchor="w", pady=(4, 0))
-        self._admin_import_path: str = ""
-
-        self._admin_model_detail_var = tk.StringVar(value="Select a model to view details.")
-        ttk.Label(right, textvariable=self._admin_model_detail_var, foreground="#475569", wraplength=400, justify="left").pack(anchor="w", pady=(10, 0))
+        ModelsTab(self, self.models_tab)
 
     def _on_admin_model_selected(self, _event=None) -> None:
         sel = self._admin_model_list.curselection()
@@ -3003,9 +2726,11 @@ class AdminScreen(ctk.CTkFrame):
     def _admin_choose_import_file(self) -> None:
         path = filedialog.askopenfilename(
             filetypes=[
-                ("All Model Files", "*.pt *.tflite"),
+                ("All Model Files", "*.pt *.tflite *.onnx *.xml"),
                 ("PyTorch Model", "*.pt"),
                 ("TFLite Model", "*.tflite"),
+                ("ONNX Model", "*.onnx"),
+                ("OpenVINO IR Model", "*.xml"),
             ]
         )
         if path:
@@ -3015,6 +2740,10 @@ class AdminScreen(ctk.CTkFrame):
             ext = Path(path).suffix.lower()
             if ext == ".tflite":
                 self._admin_import_format_var.set("tflite")
+            elif ext == ".onnx":
+                self._admin_import_format_var.set("onnx")
+            elif ext == ".xml":
+                self._admin_import_format_var.set("openvino")
             elif ext == ".pt":
                 self._admin_import_format_var.set("pt")
             # Auto-fill model name if empty
@@ -3037,21 +2766,44 @@ class AdminScreen(ctk.CTkFrame):
                 runtime = "tflite"
             elif ext == ".onnx":
                 runtime = "onnx"
+            elif ext == ".xml":
+                runtime = "openvino"
             else:
                 runtime = "ultralytics"
         elif fmt == "tflite":
             runtime = "tflite"
+        elif fmt == "onnx":
+            runtime = "onnx"
+        elif fmt == "openvino":
+            runtime = "openvino"
         else:
             runtime = "ultralytics"
+        # OpenVINO: upload .bin companion file alongside .xml
+        companion_b64: str | None = None
+        companion_file_name: str | None = None
+        if runtime == "openvino":
+            bin_path = Path(self._admin_import_path).with_suffix(".bin")
+            if bin_path.exists():
+                companion_file_name = bin_path.name
+                companion_b64 = base64.b64encode(bin_path.read_bytes()).decode("ascii")
+            else:
+                messagebox.showwarning(
+                    "OpenVINO Upload",
+                    f"File .bin companion tidak ditemukan di:\n{bin_path}\n\n"
+                    "Model .xml tetap diupload, tapi inference akan gagal tanpa .bin. "
+                    "Pastikan file .bin ada di folder models.",
+                )
         try:
-            self.api.upload_model_file(
-                {
-                    "name": name,
-                    "file_name": Path(self._admin_import_path).name,
-                    "content_b64": base64.b64encode(Path(self._admin_import_path).read_bytes()).decode("ascii"),
-                    "runtime": runtime,
-                }
-            )
+            payload = {
+                "name": name,
+                "file_name": Path(self._admin_import_path).name,
+                "content_b64": base64.b64encode(Path(self._admin_import_path).read_bytes()).decode("ascii"),
+                "runtime": runtime,
+            }
+            if companion_b64:
+                payload["companion_file_name"] = companion_file_name
+                payload["companion_b64"] = companion_b64
+            self.api.upload_model_file(payload)
         except Exception as exc:
             messagebox.showerror("Upload", str(exc))
             return
@@ -3059,7 +2811,7 @@ class AdminScreen(ctk.CTkFrame):
         self._admin_import_path_var.set("No file selected")
         self._admin_import_name_var.set("")
         self.refresh_model_options()
-        messagebox.info("Upload", f"Model '{name}' uploaded ({runtime}).")
+        messagebox.showinfo("Upload", f"Model '{name}' uploaded ({runtime}).")
 
     def _admin_export_model(self) -> None:
         sel = self._admin_model_list.curselection()
@@ -3101,49 +2853,7 @@ class AdminScreen(ctk.CTkFrame):
     # Calibration Tab - Color calibration profiles
     # ==================================================================
     def _build_calibration_tab(self) -> None:
-        self.calibration_tab.columnconfigure(0, weight=1)
-        self.calibration_tab.rowconfigure(0, weight=1)
-
-        body = self._make_scrollable_body(self.calibration_tab, "Calibration")
-
-        shell = ttk.Frame(body)
-        shell.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-        shell.columnconfigure(0, weight=1)
-        shell.rowconfigure(0, weight=1)
-
-        left = ttk.LabelFrame(shell, text="Calibration Profiles", padding=8)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        left.columnconfigure(0, weight=1)
-        left.rowconfigure(0, weight=1)
-
-        self._admin_cal_list = tk.Listbox(left, height=12)
-        self._admin_cal_list.grid(row=0, column=0, sticky="nsew")
-
-        btn_bar = ttk.Frame(left)
-        btn_bar.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        ttk.Button(btn_bar, text="Refresh", command=self._admin_refresh_calibration).pack(side="left")
-        ttk.Button(btn_bar, text="Delete", command=self._admin_delete_calibration).pack(side="left", padx=4)
-
-        right = ttk.LabelFrame(shell, text="Create Profile", padding=8)
-        right.grid(row=0, column=1, sticky="nsew")
-
-        form = ttk.Frame(right)
-        form.pack(fill="x")
-        form.columnconfigure(1, weight=1)
-        self._admin_cal_name_var = tk.StringVar()
-        self._admin_cal_desc_var = tk.StringVar()
-        ttk.Label(form, text="Name").grid(row=0, column=0, sticky="w")
-        ttk.Entry(form, textvariable=self._admin_cal_name_var).grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        ttk.Label(form, text="Description").grid(row=1, column=0, sticky="w")
-        ttk.Entry(form, textvariable=self._admin_cal_desc_var).grid(row=1, column=1, sticky="ew", padx=(4, 0))
-
-        ttk.Label(right, text="Upload a calibration image:", foreground="#475569").pack(anchor="w", pady=(10, 2))
-        self._admin_cal_image_var = tk.StringVar(value="No image selected")
-        ttk.Button(right, text="Choose Image", command=self._admin_choose_cal_image).pack(anchor="w")
-        ttk.Label(right, textvariable=self._admin_cal_image_var, wraplength=300).pack(anchor="w", pady=(2, 0))
-        self._admin_cal_image_path: str = ""
-
-        ttk.Button(right, text="Create Profile", command=self._admin_create_calibration).pack(anchor="w", pady=(10, 0))
+        CalibrationTab(self, self.calibration_tab)
 
     def _admin_refresh_calibration(self) -> None:
         def _load():

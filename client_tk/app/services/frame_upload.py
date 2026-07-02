@@ -42,6 +42,7 @@ class FrameUploadService:
         jpeg_quality: int = 75,
         resize_width: int | None = None,
         adaptive: bool = True,
+        use_png: bool = False,       # ← tambah
     ) -> None:
         self.stop()
         self._running = True
@@ -85,9 +86,12 @@ class FrameUploadService:
                         frame = cv2.resize(frame, (effective_resize, new_h), interpolation=cv2.INTER_LINEAR)
                         resize_ms = (time.perf_counter() - t0) * 1000.0
 
-                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, current_quality]
                     t0 = time.perf_counter()
-                    ok, encoded = cv2.imencode(".jpg", frame, encode_params)
+                    if use_png:
+                        ok, encoded = cv2.imencode(".png", frame)
+                    else:
+                        encode_params = [cv2.IMWRITE_JPEG_QUALITY, current_quality]
+                        ok, encoded = cv2.imencode(".jpg", frame, encode_params)
                     encode_ms = (time.perf_counter() - t0) * 1000.0
 
                     if not ok:
@@ -102,7 +106,7 @@ class FrameUploadService:
                     request_ms = (time.perf_counter() - t0) * 1000.0
 
                     # Adaptive quality adjustment.
-                    if adaptive:
+                    if adaptive and not use_png:
                         request_ms_history.append(request_ms)
                         if len(request_ms_history) > _ADAPTIVE_WINDOW:
                             del request_ms_history[0]

@@ -20,6 +20,6 @@ class TemplateRuntimeService:
             raise ValueError("Template version not found.")
         return template
 
-    def get_active_deployment(self, line_id: str, station_id: str) -> dict | None:
-        return self._deployments_repo.get_active(line_id, station_id)
+    def get_active_deployment(self) -> dict | None:
+        return self._deployments_repo.get_active()
 

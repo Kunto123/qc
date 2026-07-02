@@ -208,6 +208,7 @@ class DatasetVersionRepository(JsonRepository):
                     dataset_id=dataset_id,
                     augment_jobs=augment_jobs,
                     version_root=version_root,
+                    source_labels_dir=source_labels_dir,
                     geometric_augment_enabled=geo_aug_enabled,
                 )
             )
@@ -240,6 +241,23 @@ class DatasetVersionRepository(JsonRepository):
             source_labels_dir=source_labels_dir,
         )
 
+        # Count augmented labels and annotated images
+        augmented_label_count = sum(
+            len(ann.get("labels", [])) for ann in augmented_annotations.values()
+            if isinstance(ann, dict) and ann.get("labels")
+        )
+        augmented_annotated_count = sum(
+            1 for ann in augmented_annotations.values()
+            if isinstance(ann, dict) and ann.get("labels")
+        )
+        total_image_count = snapshot_stats["image_count"] + augmented_image_count
+        total_label_count = snapshot_stats["label_count"] + augmented_label_count
+        total_annotated_count = snapshot_stats["annotated_image_count"] + augmented_annotated_count
+        total_annotation_coverage = (
+            round(total_annotated_count / total_image_count, 4)
+            if total_image_count > 0 else 0.0
+        )
+
         now = datetime.now(UTC).isoformat()
         record = {
             "id": version_id,
@@ -251,11 +269,11 @@ class DatasetVersionRepository(JsonRepository):
             "status": "ready" if export_stats["class_names"] else "draft",
             "ready_for_training": bool(export_stats["class_names"]),
             "split_ratios": split_ratios,
-            "image_count": snapshot_stats["image_count"] + augmented_image_count,
+            "image_count": total_image_count,
             "source_image_count": snapshot_stats["image_count"],
-            "label_count": snapshot_stats["label_count"],
-            "annotated_image_count": snapshot_stats["annotated_image_count"],
-            "annotation_coverage": snapshot_stats["annotation_coverage"],
+            "label_count": total_label_count,
+            "annotated_image_count": total_annotated_count,
+            "annotation_coverage": total_annotation_coverage,
             "class_names": export_stats["class_names"],
             "skipped_label_count": export_stats["skipped_label_count"],
             "split_counts": export_stats["split_counts"],
@@ -461,6 +479,7 @@ class DatasetVersionRepository(JsonRepository):
         dataset_id: str,
         augment_jobs: list[dict],
         version_root: Path,
+        source_labels_dir: Path,
         geometric_augment_enabled: bool = False,
     ) -> tuple[list[Path], dict[str, dict], int]:
         """Collect augmented images WITHOUT merging them into the source snapshot.
@@ -515,13 +534,22 @@ class DatasetVersionRepository(JsonRepository):
                         except (json.JSONDecodeError, OSError):
                             trace = {}
                         if geometric_augment_enabled and trace.get("transforms"):
-                            annotation = transform_labels(annotation, trace["transforms"])
+                            img_w = int(trace.get("image_width") or 0)
+                            img_h = int(trace.get("image_height") or 0)
+                            if img_w > 0 and img_h > 0:
+                                try:
+                                    annotation["labels"] = transform_labels(
+                                        list(annotation.get("labels") or []),
+                                        trace["transforms"], img_w, img_h
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    pass  # fall back to verbatim copy
                         elif not geometric_augment_enabled:
                             # Photometric only: copy annotation verbatim
                             pass
                     # Write augmented annotation alongside the image
                     if annotation:
-                        aug_ann_dest = version_root / "augmented" / "labels" / f"{aug_file.stem}.json"
+                        aug_ann_dest = source_labels_dir / f"{aug_file.stem}.json"
                         aug_ann_dest.parent.mkdir(parents=True, exist_ok=True)
                         aug_ann_dest.write_text(
                             json.dumps(annotation, ensure_ascii=True, indent=2),

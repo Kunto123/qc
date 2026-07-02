@@ -22,7 +22,7 @@ from backend.app.repositories.inspection_results_repository import InspectionRes
 from backend.app.repositories.profiles_repository import ProfilesRepository
 from backend.app.repositories.reject_log_repository import RejectLogRepository
 from backend.app.services.operator_state_machine import OperatorInspectionStateMachine
-from backend.app.services.part_ready_detector import evaluate_color_profile_match, evaluate_hsv_black_ratio
+from backend.app.services.part_ready_detector import evaluate_color_profile_match, evaluate_hsv_black_ratio, _hsv_bounds
 from backend.app.services.sticker_inference import StickerInferenceService
 from backend.app.services.template_runtime import TemplateRuntimeService
 from backend.app.services.text_tilt import estimate_white_text_tilt
@@ -34,18 +34,9 @@ logger = logging.getLogger(__name__)
 
 
 KNOWN_REJECT_CODES = (
-    RejectReasonCode.NOT_FOUND.value,
-    RejectReasonCode.WRONG_TYPE.value,
-    RejectReasonCode.WRONG_TEXT.value,
-    RejectReasonCode.LOW_ROI_CONF.value,
-    RejectReasonCode.LOW_CLASS_CONF.value,
-    RejectReasonCode.LOW_OCR_CONF.value,
-    RejectReasonCode.OUT_OF_POSITION.value,
     RejectReasonCode.OUT_OF_ANGLE.value,
-    RejectReasonCode.ANCHOR_NOT_FOUND.value,
-    RejectReasonCode.ANCHOR_MISMATCH.value,
-    RejectReasonCode.PART_NOT_READY.value,
-    RejectReasonCode.ERROR.value,
+    RejectReasonCode.WRONG_TYPE.value,
+    RejectReasonCode.COMMIT_TIMEOUT.value,
 )
 MAX_RECENT_EVENTS = 8
 COMMIT_STABLE_FRAMES = 1
@@ -125,7 +116,6 @@ def _estimate_tilt_from_roi(roi_frame, expected_tilt_degrees: float, config: Any
     Always delegates to estimate_sticker_rotation (alias: estimate_white_text_tilt).
     """
     return estimate_white_text_tilt(roi_frame, expected_tilt_degrees, config)
-    candidates: list[dict[str, Any]] = []
 
 
 class InspectionSessionService:
@@ -145,26 +135,26 @@ class InspectionSessionService:
         self._sticker_inference = sticker_inference
         self._sessions: dict[str, SessionState] = {}
         self._lock = threading.RLock()
+        self._accept_holdover_ms: int = (
+            max(0, int(app_config.accept_holdover_ms))
+            if app_config is not None
+            else 2000
+        )
         # System-wide settle default: used when a template's part_ready_settle_ms is None.
         self._default_settle_ms: int = (
             max(0, int(app_config.part_ready_settle_ms_default))
             if app_config is not None
             else 0
         )
-        self._default_ocr_mode = (
-            str(getattr(app_config, "sticker_ocr_mode", "legacy") or "legacy").strip().lower()
-            if app_config is not None
-            else "legacy"
-        )
-        self._default_ocr_min_confidence = (
-            max(0.0, min(1.0, float(getattr(app_config, "default_ocr_min_confidence", 0.70))))
-            if app_config is not None
-            else 0.70
-        )
         self._plc_clamp_feedback_enabled = (
             bool(getattr(app_config, "plc_clamp_feedback_enabled", False))
             if app_config is not None
             else False
+        )
+        self._inference_cache_grace_ms: int = (
+            max(0, int(app_config.inference_cache_grace_ms))
+            if app_config is not None
+            else 300
         )
         self._plc_clamp_feedback_timeout_ms = (
             max(0, int(getattr(app_config, "plc_clamp_feedback_timeout_ms", 1500)))
@@ -204,12 +194,16 @@ class InspectionSessionService:
             if app_config is not None
             else 300
         )
-        # Inspection policy settings
+# Inspection policy settings
         self._hard_reject_reasons: set[str] = set(
             r.strip().upper()
             for r in app_config.inspect_hard_reject_reasons.split(",")
             if r.strip()
-        ) if app_config is not None and app_config.inspect_hard_reject_reasons else {"OUT_OF_ANGLE"}
+        ) if app_config is not None and app_config.inspect_hard_reject_reasons else set()
+        self._reject_timeout_ms: int = (
+            max(0, int(app_config.reject_timeout_ms))
+            if app_config is not None else 15000
+        )
         self._commit_grace_ms: int = (
             max(0, int(app_config.commit_grace_ms))
             if app_config is not None else 1500
@@ -234,9 +228,28 @@ class InspectionSessionService:
             float(app_config.camera_default_rotation_degrees)
             if app_config is not None else 0.0
         )
+        # Inference cache TTL (ms) — how long cached inference is considered fresh
+        self._inference_cache_ttl_ms: int = (
+            max(100, int(app_config.inference_cache_ttl_ms))
+            if app_config is not None else 10000
+        )
+        self._inference_timeout_s: float = (
+            max(1.0, float(getattr(app_config, "inference_timeout_s", 5.0)))
+            if app_config is not None else 5.0
+        )
+        # NG JSONL logger (daily rolling, no images)
+        from backend.app.services.ng_cache_logger import NgCacheLogger
+        _ng_log_dir = getattr(app_config, "ng_log_dir", None) if app_config is not None else None
+        self._ng_logger = NgCacheLogger(_ng_log_dir, retention_days=30) if _ng_log_dir else None
         # Register PLC state change callback
         if self._plc_worker is not None:
             self._plc_worker.set_on_state_change_callback(self._on_plc_state_change)
+            # Item 1: register actuation result callback for ACK/NACK reconciliation
+            self._plc_worker.set_on_actuation_result_callback(self._on_actuation_result)
+
+        # Item 1: pending actuation results awaiting ACK/NACK
+        # Maps event_id -> {decision, result_id, status}
+        self._pending_actuations: dict[str, dict] = {}
 
     def _on_plc_state_change(self, old_state: str, new_state: str) -> None:
         """Callback dari PLC worker saat state berubah.
@@ -259,8 +272,6 @@ class InspectionSessionService:
                     state.part_ready_unsettled_at = None
                     state.consecutive_part_ready_frames = 0          # ← reset untuk part berikutnya
                     state.part_ready_settle_started_at = None
-                    if self._plc_worker is not None:
-                        self._plc_worker.unlock_cycle(reason="part_removed_stable")
                     state.last_inference_ms = 0
                     # Unlock PLC cycle
                     if self._plc_worker is not None:
@@ -272,10 +283,56 @@ class InspectionSessionService:
                     state.plc_clamp_event_id = None
                     state.operator_sticker_delay_started_at = 0.0
                     state.operator_sticker_ready_at = 0.0
+                    state.part_ready_settled_at = None  # reset timeout tracker for new cycle
+                    # Reset accept-cycle counters — mencegah commit instan dari akumulasi selama hold
+                    state.accept_cycle_started_at = None
+                    state.policy_stable_frames = 0
+                    state.policy_stable_started_at = None
+                    state.policy_holdover_expires_at = None
+                    state.inference_accept_count = 0
+                    state.inference_last_counted_generation = -1
+                    state.inference_accept_first_ts = 0.0
             logger.info(
                 "[inspection] PLC returned IDLE - next-part delay %dms started",
                 self._phase_next_part_delay_ms,
             )
+
+        # Saat PLC mulai clamp baru (IDLE → CLAMPING): ini adalah siklus fisik baru.
+        # Clear inference cache only
+        if new_state == "CLAMPING" and old_state == "IDLE":
+            with self._lock:
+                for state in self._sessions.values():
+                    state.inference_result_cache = None  # flush stale cache
+                    state.inference_result_ts = 0.0       # paksa re-infer
+            logger.info("[inspection] PLC CLAMPING — inference cache cleared for new cycle")
+
+    def _on_actuation_result(self, event_id: str | None, decision: str, ok: bool, reason: str = "") -> None:
+        """Item 1: handle actuation ACK/NACK from PLC worker.
+
+        On ACK (ok=True): mark pending result as "actuated".
+        On NACK (ok=False): mark pending result as "actuation_failed".
+        """
+        if not event_id:
+            return
+        pending = self._pending_actuations.pop(event_id, None)
+        if pending is None:
+            return
+        result_id = pending.get("result_id")
+        if result_id is None:
+            return
+        _new_status = "actuated" if ok else "actuation_failed"
+        try:
+            if self._results_repo is not None and hasattr(self._results_repo, "update_result"):
+                self._results_repo.update_result(result_id, {
+                    "actuation_status": _new_status,
+                    "actuation_error": None if ok else reason,
+                })
+        except Exception as exc:
+            logger.warning("[inspection] failed to update actuation status for result %s: %s", result_id, exc)
+        logger.info(
+            "[inspection] actuation %s for event %s result %s (decision=%s)",
+            _new_status, event_id[:8] if event_id else "?", result_id, decision,
+        )
 
     def _reset_clamp_gate(self, state: SessionState) -> None:
         state.plc_part_ready_triggered = False
@@ -357,6 +414,20 @@ class InspectionSessionService:
 
         delay_ms = float(self._plc_clamp_feedback_fallback_delay_ms)
         if requested_at <= 0 or elapsed_ms < delay_ms:
+            return False, {
+                "enabled": True,
+                "feedback_enabled": False,
+                "status": "clamping",
+                "ready": False,
+                "elapsed_ms": round(elapsed_ms, 1),
+                "fallback_delay_ms": self._plc_clamp_feedback_fallback_delay_ms,
+            }
+        if not feedback_ready:
+            # PLC masih IDLE — enqueue_part_ready diblock (reclamp interval / cycle lock).
+            # Reset agar session retry di frame berikutnya.
+            state.plc_part_ready_triggered = False
+            state.plc_clamp_requested_at = 0.0
+            state.plc_clamp_ready_at = 0.0
             return False, {
                 "enabled": True,
                 "feedback_enabled": False,
@@ -464,6 +535,7 @@ class InspectionSessionService:
             station_id=station_id,
             session_reject_breakdown=_empty_reject_breakdown(),
             inference_interval_ms=0,
+            inference_cache_ttl_ms=self._inference_cache_ttl_ms,
         )
         with self._lock:
             self._sessions[session_id] = state
@@ -501,6 +573,9 @@ class InspectionSessionService:
         )
         if after_part_ready_signature != before_part_ready_signature:
             state.part_ready_ratio_history.clear()
+            state.part_ready_ema_ratio = 0.0
+            state.hsv_adaptive_lower = None
+            state.hsv_adaptive_upper = None
         return self._session_payload(state)
 
     def get_latest_preview(self) -> dict[str, Any] | None:
@@ -529,6 +604,52 @@ class InspectionSessionService:
         """Return True if a session with this id is currently active."""
         with self._lock:
             return session_id in self._sessions
+
+    def manual_release(self, session_id: str, *, reason: str = "manual_operator") -> dict[str, Any]:
+        """Operator-triggered NEUTRAL release.
+
+        Unclamps the current part and resets the clamping/inspection cycle WITHOUT
+        committing any result. No accept/reject is logged and counters are unchanged.
+        Used when a part is still being inspected (no ACCEPT yet) but the operator
+        wants to remove it (e.g. obviously wrong part, mis-loaded part).
+        """
+        state = self._require_session(session_id)
+        # Reset the cycle under lock — PLC callback thread also accesses session state.
+        with self._lock:
+            state.part_ready_latched = False
+            state.part_ready_latched_at = None
+            state.part_ready_unsettled_at = None
+            state.part_ready_settled_at = None
+            state.consecutive_part_ready_frames = 0
+            state.plc_part_ready_triggered = False
+            state.current_event_committed = False
+            state.current_event_id = None
+            state.current_event_key = None
+            state.current_presence = False
+            state.current_event_started_at = None
+            state.current_event_stable_frames = 0
+            state.cooldown_until = None
+            state.policy_stable_frames = 0
+            state.last_policy_key = ""
+            state.policy_stable_started_at = None
+            state.policy_holdover_expires_at = None
+            state.accept_cycle_started_at = None
+            state.inference_accept_count = 0
+            state.inference_last_counted_generation = -1
+            state.inference_accept_first_ts = 0.0
+            # Blackout to prevent immediate re-clamp of the same still-present part.
+            if self._phase_next_part_delay_ms > 0:
+                state.manual_release_cooldown_until = max(
+                    float(getattr(state, "manual_release_cooldown_until", 0.0) or 0.0),
+                    time.time() + (self._phase_next_part_delay_ms / 1000.0),
+                )
+        # Unclamp via PLC — neutral, no decision recorded.
+        if self._plc_worker is not None:
+            try:
+                self._plc_worker.force_release(reason=reason)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[inspection] manual_release force_release failed: %s", exc)
+        return self._session_payload(state)
 
     def process_frame(
         self,
@@ -585,13 +706,29 @@ class InspectionSessionService:
             frame = _apply_rotation(frame, _rotation)
 
         part_ready_started = time.perf_counter()
-        part_ready_frame, part_ready_roi_meta = self._crop_stage_roi(
-            frame,
-            state.template.part_ready_roi,
-            state.part_ready_roi_override,
-        )
-        part_ready = self._evaluate_part_ready(part_ready_frame, state)
-        presence = self._detect_part_presence(part_ready_frame)
+        validator_mode = str(getattr(state.template.sticker, "validator_mode", "") or "").strip().lower()
+        is_component_counter = validator_mode == "component_count"
+
+        if is_component_counter:
+            # Component Counter mode: part readiness from Modbus sensor input only,
+            # ignore camera-based part ready ROI completely
+            part_ready_frame = None
+            part_ready_roi_meta = {}
+            part_ready = {"part_ready": True, "status": "sensor_input", "match_ratio": 1.0}
+            presence = {"present": True, "area_ratio": 1.0, "mean": 255.0, "std": 0.0}
+        else:
+            part_ready_frame, part_ready_roi_meta = self._crop_stage_roi(
+                frame,
+                state.template.part_ready_roi,
+                state.part_ready_roi_override,
+            )
+        # Skip part_ready evaluation when latch is active (sticker mode only)
+        if not is_component_counter:
+            if state.part_ready_latched:
+                part_ready = {"part_ready": True, "status": "latched", "match_ratio": 1.0}
+            else:
+                part_ready = self._evaluate_part_ready(part_ready_frame, state)
+            presence = self._detect_part_presence(part_ready_frame)
         timings["part_ready_eval_ms"] = _elapsed_ms(part_ready_started)
 
         roi_crop_started = time.perf_counter()
@@ -601,20 +738,99 @@ class InspectionSessionService:
             state.sticker_roi_override,
         )
         timings["sticker_roi_crop_ms"] = _elapsed_ms(roi_crop_started)
-
-        # ------------------------------------------------------------------
+        # Blackout gate: after commit, force "part not found" for phase_next_part_delay_ms
+        # to give operator time to swap part. Re-arms automatically when timer expires.
+        _now_s = time.time()
+        _blackout_until = float(getattr(state, "manual_release_cooldown_until", 0.0) or 0.0)
+        _in_blackout = _now_s < _blackout_until
+        if _in_blackout:
+            # Force all cycle state to idle
+            state.part_ready_latched = False
+            state.consecutive_part_ready_frames = 0
+            state.plc_part_ready_triggered = False
+            # Build and return minimal "part not found" response — skip all processing
+            phase_remaining_ms = round((_blackout_until - _now_s) * 1000.0, 1)
+            return {
+                "session": self._session_payload(state),
+                "presence": presence,
+                "part_ready": {
+                    **part_ready,
+                    "status": "part_not_ready",
+                    "part_ready": False,
+                    "reject_reason_code": None,
+                    "effective_part_ready": False,
+                    "part_ready_latched": False,
+                    "latch_status": "inactive",
+                },
+                "event_state": InspectionEventState.IDLE.value,
+                "operator_state": "blackout_reset",
+                "clamp": {
+                    "enabled": True,
+                    "feedback_enabled": False,
+                    "status": "idle",
+                    "ready": True,
+                },
+                "phase": {
+                    "status": "post_commit_reset",
+                    "remaining_ms": phase_remaining_ms,
+                    "ready": False,
+                },
+                "inference_gate": {
+                    "raw_part_ready": False,
+                    "raw_status": "part_not_ready",
+                    "raw_match_ratio": 0.0,
+                    "part_ready_latched": False,
+                    "effective_part_ready": False,
+                    "clamp_ready": True,
+                    "phase_ready": False,
+                    "can_infer": False,
+                    "block_reason": "blackout_reset",
+                },
+                "sticker_detection": {},
+                # Blackout = idle reset window, no inspection ran → neutral decision
+                # (None renders as "WAITING" on the client, not a spurious reject).
+                "validation": {"decision": None, "reject_reason_code": None},
+                "inspection_policy": {"action": "pending", "commit_allowed": False},
+                "count_committed": False,
+                "count_source": None,
+                "counters": self._counter_payload(state),
+                "last_committed_result": state.last_committed_result,
+                "recent_events": list(state.recent_events),
+                "timings": {**timings, "event_state_ms": 0.0, "total_ms": _elapsed_ms(total_started)},
+            }
+# ------------------------------------------------------------------
         # Settle — frame-count based
         # Tunggu N frame berturut-turut di atas threshold sebelum clamp engage.
         # Jika sudah latched, abaikan raw state — tetap settled.
         # ------------------------------------------------------------------
-        _settle_frames = int(
-            getattr(state.template.sticker, "part_ready_settle_frames", 5) or 5
-        )
+        # Prefer ms-based settle if configured; fall back to system default (part_ready_settle_ms_default)
+        # settle_ms == 0 means immediate settle (no wait)
+        _settle_ms = getattr(state.template.sticker, "part_ready_settle_ms", None)
+        if _settle_ms is not None:
+            if _settle_ms == 0:
+                _settle_frames = 0  # immediate settle
+            else:
+                _settle_frames = max(1, int(_settle_ms / 100.0))
+        else:
+            # Use system default settle_ms (from config), convert to frames
+            _settle_ms = self._default_settle_ms
+            if _settle_ms == 0:
+                _settle_frames = 0
+            else:
+                _settle_frames = max(1, int(_settle_ms / 100.0))
         _settle_now = datetime.now(UTC)
         _raw_part_ready = part_ready.get("part_ready", False)
 
-        if state.part_ready_latched:
+        if is_component_counter:
+            # No settle wait for component_count: part is always "ready" from frame 1.
+            part_ready_settled = True
+            settle_remaining_ms = 0.0
+        elif state.part_ready_latched:
             # Sudah engaged — tetap settled tanpa melihat raw part_ready
+            part_ready_settled = True
+            settle_remaining_ms = 0.0
+        elif _settle_frames == 0:
+            # settle_ms == 0: immediate settle, no frame counting needed
             part_ready_settled = True
             settle_remaining_ms = 0.0
         elif _raw_part_ready and presence.get("present", False):
@@ -630,17 +846,44 @@ class InspectionSessionService:
             settle_remaining_ms = 0.0
             self._reset_clamp_gate(state)
 
+        # ── Add settle metadata to part_ready payload for UI ──
+        # Report the original ms value from template (or derived from frames)
+        _report_settle_ms = _settle_ms if _settle_ms is not None else _settle_frames * 100.0
+        part_ready["part_ready_settled"] = part_ready_settled
+        part_ready["part_ready_settle_ms"] = _report_settle_ms
+        part_ready["part_ready_settle_remaining_ms"] = round(settle_remaining_ms, 1)
+
+        # ── Timeout tracker: record when part first becomes settled ──
+        if part_ready_settled and state.part_ready_settled_at is None:
+            state.part_ready_settled_at = _settle_now
+
         # ------------------------------------------------------------------
         # Part-Ready Latch Logic
-        # Sekali latched, TIDAK pernah release karena part_ready drop atau
-        # presence hilang. Latch hanya direset oleh _on_plc_state_change
-        # ketika PLC kembali ke IDLE (ACCEPT otomatis atau IN1 manual).
+        # Latch protects inference gate from brief part_ready drops during
+        # inspection.  It MUST release when presence is truly gone for
+        # _part_ready_release_ms so that the next cycle can start clean.
         # ------------------------------------------------------------------
         _now_dt = _settle_now
 
         if part_ready_settled and not state.part_ready_latched:
             state.part_ready_latched = True
             state.part_ready_latched_at = _now_dt
+            state.part_ready_unsettled_at = None
+
+        # Release latch when presence is gone long enough
+        if state.part_ready_latched and not presence.get("present", False):
+            if state.part_ready_unsettled_at is None:
+                state.part_ready_unsettled_at = _now_dt
+            _unsettled_ms = (
+                (_now_dt - state.part_ready_unsettled_at).total_seconds() * 1000.0
+            )
+            if _unsettled_ms >= self._part_ready_release_ms:
+                state.part_ready_latched = False
+                state.part_ready_latched_at = None
+                state.part_ready_unsettled_at = None
+                self._reset_clamp_gate(state)
+        elif state.part_ready_latched and presence.get("present", False):
+            # Presence back — reset unsettled timer
             state.part_ready_unsettled_at = None
 
         # Trigger PLC clamp hold on the first frame where part is settled.
@@ -741,9 +984,9 @@ class InspectionSessionService:
             else "inactive"
         )
 
-        _effective_present = (
-            bool(presence.get("present", False)) or state.part_ready_latched
-        )
+        # Effective presence for operator state machine: use raw presence.
+        # Latch only protects the inference gate, not removal detection.
+        _effective_present = bool(presence.get("present", False))
         operator_state_decision = self._operator_state_machine.update(
             state,
             part_ready=bool(effective_part_ready_val),
@@ -793,12 +1036,27 @@ class InspectionSessionService:
         # Use cached result if fresh (<500ms), otherwise compose without bbox.
         if _effective_pr_ready:
             state.inference_frame_counter += 1
+            # Inference timeout guard: reset stuck busy flag
+            if (
+                state.inference_thread_busy
+                and state.inference_submit_at > 0
+                and (monotonic() - state.inference_submit_at) > self._inference_timeout_s
+            ):
+                logger.warning(
+                    "[inference] timeout after %.0fs — resetting busy flag + clearing stale cache for session %s",
+                    self._inference_timeout_s, state.session_id[:8],
+                )
+                state.inference_result_cache = None
+                state.inference_result_ts = 0.0
+                state.inference_thread_busy = False
+                state.inference_submit_at = 0.0
             _should_submit = (
-                state.inference_frame_counter % 3 == 0
+                state.inference_frame_counter % 1 == 0
                 and not state.inference_thread_busy
             )
             if _should_submit:
                 state.inference_thread_busy = True
+                state.inference_submit_at = monotonic()
                 # Lazy-init executor per session
                 if state._inference_executor is None:
                     state._inference_executor = concurrent.futures.ThreadPoolExecutor(
@@ -806,9 +1064,12 @@ class InspectionSessionService:
                         thread_name_prefix=f"qc-inference-{state.session_id[:8]}",
                     )
                 try:
+                    # Component counter: run inference on FULL frame so detections
+                    # carry absolute pixel coords for assign-by-coordinate.
+                    _inf_frame = frame.copy() if is_component_counter else sticker_frame.copy()
                     _future = state._inference_executor.submit(
                         self._run_sticker_inference_sync,
-                        sticker_frame.copy(),
+                        _inf_frame,
                         state,
                     )
                     _future.add_done_callback(
@@ -819,8 +1080,9 @@ class InspectionSessionService:
                     state.inference_thread_busy = False
 
             # Use cached result if fresh enough
+            _cache_ttl_s = state.inference_cache_ttl_ms / 1000.0
             _age = monotonic() - state.inference_result_ts
-            if state.inference_result_cache is not None and _age <= 0.5:
+            if state.inference_result_cache is not None and _age <= _cache_ttl_s:
                 _cached = state.inference_result_cache
                 detections = list(_cached.get("detections") or [])
                 inference_ms = float(_cached.get("inference_ms", 0.0))
@@ -876,8 +1138,45 @@ class InspectionSessionService:
                     "gpu_available": inference_payload.get("gpu_available"),
                 }
             )
+            # Cache valid inference result for hand-obstruction handling
+            _detected_cls = sticker_detection.get("detected_class")
+            if _detected_cls and not sticker_detection.get("skipped", False):
+                state.last_valid_inference = {
+                    "detected_class": _detected_cls,
+                    "confidence": sticker_detection.get("confidence"),
+                    "bbox": sticker_detection.get("bbox"),
+                    "inference_payload": inference_payload,
+                    "sticker_detection": sticker_detection,
+                }
+                state.last_valid_inference_ts = monotonic()
         else:
-            _skip_reason = (
+            # Part not ready — check if we have a fresh cached inference result
+            # (e.g., hand obstructing during commit wait). Use it if within grace window.
+            _cache_age_ms = (monotonic() - state.last_valid_inference_ts) * 1000.0 if state.last_valid_inference_ts > 0 else float("inf")
+            if state.last_valid_inference is not None and _cache_age_ms < self._inference_cache_grace_ms:
+                logger.debug(
+                    "[inference] using cached result (age=%.0fms, class=%s) due to part_ready drop",
+                    _cache_age_ms, state.last_valid_inference.get("detected_class"),
+                )
+                _cached_inf = state.last_valid_inference
+                sticker_detection = self._build_sticker_detection_payload(
+                    _cached_inf["inference_payload"].get("detections") or [],
+                    skipped=False,
+                    backend=str(_cached_inf["inference_payload"].get("backend") or "cached"),
+                    model_path=_cached_inf["inference_payload"].get("model_path"),
+                    meta_path=_cached_inf["inference_payload"].get("meta_path"),
+                    class_names=_cached_inf["inference_payload"].get("class_names") or [],
+                    fallback_reason=_cached_inf["inference_payload"].get("fallback_reason"),
+                    raw_detection_count=_cached_inf["inference_payload"].get("raw_detection_count"),
+                    allowed_labels_filter=_cached_inf["inference_payload"].get("allowed_labels_filter"),
+                    anchor=_cached_inf["inference_payload"].get("anchor"),
+                    ocr=_cached_inf["inference_payload"].get("ocr"),
+                    geometry=_cached_inf["inference_payload"].get("geometry"),
+                )
+                sticker_detection["from_cache"] = True
+                sticker_detection["cache_age_ms"] = round(_cache_age_ms, 1)
+            else:
+                _skip_reason = (
                 "part_ready_settling"
                 if _raw_part_ready and not part_ready_settled
                 else str(clamp_payload.get("status") or "clamping")
@@ -897,6 +1196,14 @@ class InspectionSessionService:
             )
         timings["inference_ms"] = round(inference_ms, 2)
 
+        # Component counter: assign detections to ROIs by coordinate
+        if is_component_counter and state.template.component_rois:
+            _fh = int(frame.shape[0]) if frame is not None else 0
+            _fw = int(frame.shape[1]) if frame is not None else 0
+            self._assign_detections_to_component_rois(
+                detections, state.template.component_rois, _fw, _fh
+            )
+
         validation_started = time.perf_counter()
         validation = self._validate_sticker(
             roi_frame=sticker_frame,
@@ -907,7 +1214,6 @@ class InspectionSessionService:
             username=username,
             user_id=user_id,
         )
-        validation = self._attach_ocr_observability(validation, sticker_detection, state)
         timings["validation_ms"] = _elapsed_ms(validation_started)
         validation_details = validation.get("validation_details") or {}
         if validation_details:
@@ -920,9 +1226,9 @@ class InspectionSessionService:
         # ── Inspection Policy Commit Gate ──
         # Determine whether this frame's validation result is allowed to commit.
         # - ACCEPT: commit only after stability threshold (consecutive frames + elapsed ms).
-        # - REJECT with hard reason (OUT_OF_ANGLE): commit only after stability threshold.
-        # - REJECT with non-hard reason (NOT_FOUND, WRONG_TYPE, etc.): never auto-commit.
-        #   These stay as pending/adjust, allowing operator to fix sticker.
+        # - REJECT with hard reason (OUT_OF_ANGLE, WRONG_TYPE): commit only after stability threshold.
+        # - REJECT with non-hard reason (NOT_FOUND, gap, low conf, etc.): never auto-commit.
+        #   These stay as pending so the system keeps inferring until ACCEPT (or COMMIT_TIMEOUT).
         _now_policy = datetime.now(UTC)
         _decision = str(validation.get("decision") or "").strip().upper()
         _reason = str(validation.get("reject_reason_code") or "").strip()
@@ -932,6 +1238,7 @@ class InspectionSessionService:
 
         _hard_reject_reasons = self._hard_reject_reasons  # set from config
         _is_accept = _decision == DecisionCode.ACCEPT.value
+        _is_accept_candidate = (_decision == "ACCEPT_CANDIDATE")
         _is_hard_reject = (
             _decision == DecisionCode.REJECT.value
             and _reason in _hard_reject_reasons
@@ -942,12 +1249,113 @@ class InspectionSessionService:
         )
 
         # Track stability
-        if _policy_key == state.last_policy_key:
+        _was_accept = state.last_policy_key.split("|")[0] == "ACCEPT"
+
+        # Start holdover window when transitioning ACCEPT → non-ACCEPT
+        if _was_accept and not _is_accept and self._accept_holdover_ms > 0:
+            if state.policy_holdover_expires_at is None:
+                state.policy_holdover_expires_at = _now_policy + timedelta(
+                    milliseconds=self._accept_holdover_ms
+                )
+
+        _in_holdover = (
+            state.policy_holdover_expires_at is not None
+            and _now_policy < state.policy_holdover_expires_at
+            and not _is_accept
+        )
+
+        # Hard reject must always cancel holdover — otherwise the holdover
+        # window would mask a genuine WRONG_TYPE/OUT_OF_ANGLE and let it
+        # credit accept counters (false-accept risk).
+        if _is_hard_reject and _in_holdover:
+            state.policy_holdover_expires_at = None
+            _in_holdover = False
+
+        _effective_is_accept = _is_accept or _in_holdover
+        _is_stabilizing = _is_accept_candidate  # all OK but not yet N-consecutive
+        if _is_accept:                           # real detection came back
+            state.policy_holdover_expires_at = None  # cancel holdover on re-detection
+
+        if _is_non_hard_reject:
+            # Non-hard reject is pure noise — do NOT touch any stability counters.
+            # We must not increment policy_stable_frames (would falsely accumulate
+            # toward hard_reject_stable_frames threshold) and must not reset
+            # last_policy_key (would break an existing accept streak).
+            pass
+        elif _is_stabilizing:
+            # Accept candidate (component counter: all OK but not yet N-consecutive).
+            # Increment stability counters but don't allow commit yet.
+            state.policy_stable_frames += 1
+        elif _policy_key == state.last_policy_key:
+            state.policy_stable_frames += 1
+        elif _in_holdover:
+            # During holdover: don't reset counters, treat gap as noise
             state.policy_stable_frames += 1
         else:
             state.last_policy_key = _policy_key
             state.policy_stable_frames = 1
             state.policy_stable_started_at = _now_policy
+            state.policy_holdover_expires_at = None
+
+        # ── Inference-generation-based accept gate ──
+        # Only count a frame as a "new accept reading" when the underlying
+        # inference result has actually changed (generation counter advanced).
+        # This prevents the same cached result from being counted as multiple
+        # stable frames on slow PCs where inference takes >500ms.
+        if _is_non_hard_reject:
+            # Non-hard reject is pure noise — do NOT touch any accept counters.
+            # The system must keep inferring; non-hard reject should not break an
+            # existing accept streak.
+            pass
+        elif _effective_is_accept or _is_stabilizing:
+            if state.inference_result_generation > state.inference_last_counted_generation:
+                # New inference result since last counted — record it
+                state.inference_last_counted_generation = state.inference_result_generation
+                _now_s = time.time()
+                # Check if accept_window has expired since first accept reading.
+                # Skip window check when accept_stable_ms=0 (no time threshold).
+                if state.inference_accept_first_ts > 0 and self._accept_stable_ms > 0:
+                    _accept_window_ms = (_now_s - state.inference_accept_first_ts) * 1000.0
+                    if _accept_window_ms > self._accept_stable_ms * 3:
+                        # Window expired — reset and start fresh
+                        state.inference_accept_count = 1
+                        state.inference_accept_first_ts = _now_s
+                    else:
+                        state.inference_accept_count += 1
+                elif state.inference_accept_first_ts > 0:
+                    # accept_stable_ms=0: count every generation, no time window gate
+                    state.inference_accept_count += 1
+                else:
+                    state.inference_accept_count = 1
+                    state.inference_accept_first_ts = _now_s
+            # else: same generation — don't double-count
+        else:
+            # Known hard-reject reason (not non-hard, not accept) — reset counters
+            # This breaks an existing accept streak (hard reject blocks commit).
+            state.inference_accept_count = 0
+            state.inference_accept_first_ts = 0.0
+            state.inference_last_counted_generation = -1
+
+        # ── Cycle-level grace timer ──
+        # Tracks the first moment ACCEPT was seen in this clamping cycle.
+        # Unlike policy_stable_started_at, this does NOT reset when holdover expires —
+        # it persists across all detection gaps until the cycle resets.
+        if _effective_is_accept:
+            if state.accept_cycle_started_at is None:
+                state.accept_cycle_started_at = _now_policy
+        elif _is_non_hard_reject:
+            # Non-hard reject is pure noise — do NOT reset cycle timer.
+            # The grace period must keep running from the last real ACCEPT.
+            pass
+        elif not _is_accept and not _in_holdover:
+            # True non-accept (holdover fully expired) — reset cycle timer
+            state.accept_cycle_started_at = None
+
+        _accept_cycle_elapsed_ms = 0.0
+        if state.accept_cycle_started_at is not None:
+            _accept_cycle_elapsed_ms = (
+                (_now_policy - state.accept_cycle_started_at).total_seconds() * 1000.0
+            )
 
         _stable_elapsed_ms = 0.0
         if state.policy_stable_started_at is not None:
@@ -956,56 +1364,42 @@ class InspectionSessionService:
             )
 
         # Determine commit_allowed with grace period + stability
+
         _commit_allowed = False
+        _plc_fault = False
         _policy_action = "pending"
         _pending_reason = ""
 
-        if state.awaiting_part_removal_after_commit:
-            # After ACCEPT, wait for part to leave before allowing next cycle
-            if not presence.get("present", False):
-                if state.part_absent_started_at is None:
-                    state.part_absent_started_at = _now_policy
-                _absent_elapsed_ms = (
-                    (_now_policy - state.part_absent_started_at).total_seconds() * 1000.0
-                )
-                if _absent_elapsed_ms >= self._part_ready_release_ms:
-                    # Part gone long enough — reset for next cycle
-                    state.awaiting_part_removal_after_commit = False
-                    state.part_absent_started_at = None
-                    self._reset_clamp_gate(state)
-                    state.part_ready_latched = False
-                    state.part_ready_latched_at = None
-                else:
-                    _pending_reason = "waiting_part_removed"
-            else:
-                # Part still present — reset absent timer
-                state.part_absent_started_at = None
-                _pending_reason = "waiting_part_removed"
-
-            _policy_action = "pending"
-            if not _pending_reason:
-                _pending_reason = "waiting_part_removed"
-
-        elif _is_accept:
+        if _effective_is_accept:
             # Accept: commit only after grace period + stability
-            _grace_ok = _stable_elapsed_ms >= self._commit_grace_ms
+            # Both policy_stable_frames AND inference_accept_count must meet thresholds.
+            # inference_accept_count only increments when a NEW inference result arrives,
+            # so repeated reads of the same cached result don't count as extra stable frames.
+            _grace_ok = _accept_cycle_elapsed_ms >= self._commit_grace_ms
             _frames_ok = state.policy_stable_frames >= self._accept_stable_frames
+            _inference_ok = state.inference_accept_count >= self._accept_stable_frames
             _ms_ok = _stable_elapsed_ms >= self._accept_stable_ms
-            if _grace_ok and _frames_ok and _ms_ok:
+            if _grace_ok and _frames_ok and _inference_ok and _ms_ok:
                 _commit_allowed = True
                 _policy_action = "accept_commit"
-                state.awaiting_part_removal_after_commit = True
-                state.part_absent_started_at = None
             else:
                 _policy_action = "pending"
                 _parts = []
                 if not _grace_ok:
-                    _parts.append(f"grace({_stable_elapsed_ms:.0f}/{self._commit_grace_ms}ms)")
+                    _parts.append(f"grace({_accept_cycle_elapsed_ms:.0f}/{self._commit_grace_ms}ms)")
                 if not _frames_ok:
                     _parts.append(f"stable_frames({state.policy_stable_frames}/{self._accept_stable_frames})")
+                if not _inference_ok:
+                    _parts.append(f"inference_count({state.inference_accept_count}/{self._accept_stable_frames})")
                 if not _ms_ok:
                     _parts.append(f"stable_ms({_stable_elapsed_ms:.0f}/{self._accept_stable_ms}ms)")
                 _pending_reason = f"accept_stabilizing({', '.join(_parts)})"
+
+        elif _is_accept_candidate:
+            # Component counter: all ROIs OK but not yet N-consecutive.
+            # Keep scanning — don't commit, don't reject.
+            _policy_action = "pending"
+            _pending_reason = "component_stabilizing"
 
         elif _is_hard_reject:
             # Hard reject (OUT_OF_ANGLE): commit only after grace + higher stability
@@ -1027,15 +1421,50 @@ class InspectionSessionService:
                 _pending_reason = f"hard_reject_stabilizing({', '.join(_parts)})"
 
         else:
-            # Non-hard reject (NOT_FOUND, WRONG_TYPE, etc.) — never auto-commit
+            # Non-hard reject (NOT_FOUND, gap, low conf, etc.) — never auto-commit.
+            # Keep inferring until ACCEPT (or COMMIT_TIMEOUT safety-net below).
             _policy_action = "pending"
             _pending_reason = f"non_hard_reject:{_reason}"
+
+        # ── Timeout reject ──
+        # Jika part sudah settled tapi tidak ada accept-commit dalam waktu reject_timeout_ms
+        if (
+            not _commit_allowed
+            and not _is_hard_reject
+            and state.part_ready_settled_at is not None
+            and self._reject_timeout_ms > 0
+        ):
+            _settled_elapsed_ms = (datetime.now(UTC) - state.part_ready_settled_at).total_seconds() * 1000.0
+            if _settled_elapsed_ms >= self._reject_timeout_ms:
+                _is_hard_reject = True
+                _reason = RejectReasonCode.COMMIT_TIMEOUT.value
+                _decision = DecisionCode.REJECT.value
+                _commit_allowed = True  # Allow commit untuk reject timeout
+                _policy_action = "timeout_reject"
+                # Sync back to validation dict for _maybe_persist
+                validation["decision"] = DecisionCode.REJECT.value
+                validation["reject_reason_code"] = RejectReasonCode.COMMIT_TIMEOUT.value
+
+        # ── Item 1: Pre-commit PLC health gate ──
+        # If PLC is enabled (not dry-run) and worker exists, require healthy link before commit.
+        # This prevents persisting ACCEPT/REJECT while no relay can fire.
+        if (
+            _commit_allowed
+            and self._plc_worker is not None
+            and not self._plc_worker._dry_run
+        ):
+            if not self._plc_worker.is_healthy():
+                _plc_fault = True
+                _commit_allowed = False
+                _policy_action = "plc_fault"
+                _pending_reason = "plc_unhealthy_commit_blocked"
 
         # Build inspection_policy response
         inspection_policy = {
             "action": _policy_action,
             "commit_allowed": _commit_allowed,
             "hard_reject": _is_hard_reject,
+            "plc_fault": _plc_fault,
             "pending_reason": _pending_reason,
             "stable_elapsed_ms": round(_stable_elapsed_ms, 1),
             "stable_frames": state.policy_stable_frames,
@@ -1046,20 +1475,22 @@ class InspectionSessionService:
             state.policy_stable_frames = 0
             state.last_policy_key = ""
             state.policy_stable_started_at = None
+            state.policy_holdover_expires_at = None
+            state.accept_cycle_started_at = None
 
-        # Event state advance — always use original validation for event tracking.
-        # Policy commit gate overrides count_committed afterwards.
+        # Event state advance — policy gate is the sole commit authority.
+        # Event machine provides dedup (anti-double-count) + event_id.
         event_state, event_id, count_committed = self._advance_event_state(
             state=state,
             validation=validation,
             part_ready_payload=effective_part_ready,
             presence=presence,
             now=_now_policy,
-            settle_ms=0,
+            commit_allowed=_commit_allowed,
         )
 
-        # Policy commit gate overrides count_committed
-        count_committed = _commit_allowed
+        # count_committed is already authoritative: only True when policy allows
+        # AND event is fresh (not already committed / COOLDOWN).
 
         timings["event_state_ms"] = _elapsed_ms(event_state_started)
 
@@ -1071,6 +1502,32 @@ class InspectionSessionService:
                     float(getattr(state, "manual_release_cooldown_until", 0.0) or 0.0),
                     time.time() + (self._phase_next_part_delay_ms / 1000.0),
                 )
+            # Full cycle reset — deterministic, does not depend on presence gap
+            state.part_ready_latched = False
+            state.part_ready_latched_at = None
+            state.part_ready_unsettled_at = None
+            state.part_ready_settled_at = None  # ← reset timeout timer for new cycle
+            state.consecutive_part_ready_frames = 0
+            state.plc_part_ready_triggered = False
+            state.current_event_committed = False
+            state.current_event_id = None
+            state.current_event_key = None
+            state.current_presence = False
+            state.current_event_started_at = None
+            state.current_event_stable_frames = 0
+            state.cooldown_until = None
+            state.policy_stable_frames = 0
+            state.policy_stable_started_at = None
+            state.accept_cycle_started_at = None
+            state.inference_accept_count = 0
+            state.inference_last_counted_generation = -1
+            state.inference_accept_first_ts = 0.0
+            # Reset ratio history — prevent stale ratios from contaminating next cycle
+            state.part_ready_ratio_history.clear()
+            state.part_ready_ema_ratio = 0.0
+            # Reset adaptive HSV thresholds — start fresh for next cycle
+            state.hsv_adaptive_lower = None
+            state.hsv_adaptive_upper = None
             # Notify PLC worker of inspection decision
             # Only commit to PLC for accept or hard reject (not non-hard reject)
             decision = validation.get("decision", "")
@@ -1083,15 +1540,68 @@ class InspectionSessionService:
                     self._plc_worker.notify_decision(decision, event_id=event_id)
                 except Exception as exc:  # noqa: BLE001
                     logger.error("[inspection] plc_worker.notify_decision failed: %s", exc)
-            db_write = self._maybe_persist(
-                validation,
-                state,
-                part_ready=part_ready,
-                part_ready_roi_meta=part_ready_roi_meta,
-                sticker_roi_meta=sticker_roi_meta,
+
+            # ── COMMIT_TIMEOUT: PLC fires, but NO DB write ──
+            # Timeout reject triggers NG buzzer + solenoid hold (via PLC),
+            # but no inspection row is written — cycle resets locally.
+            _is_timeout_reject = (
+                _reason == RejectReasonCode.COMMIT_TIMEOUT.value
+                and validation.get("decision") == DecisionCode.REJECT.value
+            )
+            if _is_timeout_reject:
+                db_write = {"written": False, "reason": "timeout_reject_no_db"}
+            else:
+                # ── PLC commit interlock ──────────────────────────────────────
+                # If PLC is enabled (not dry-run) and link is unhealthy, block
+                # DB persist to prevent ACCEPT/REJECT rows with no relay action.
+                if (
+                    self._plc_worker is not None
+                    and not self._plc_worker._dry_run
+                    and not getattr(self._plc_worker, "_stopped", False)
+                ):
+                    if not self._plc_worker.is_healthy():
+                        if _commit_allowed:
+                            logger.warning(
+                                "[inspection] PLC link unhealthy — blocking commit for session %s",
+                                state.session_id[:8],
+                            )
+                        _commit_allowed = False
+                        _plc_fault = True
+                        _policy_action = "pending"
+                        _pending_reason = "PLC_FAULT"
+
+                db_write = self._maybe_persist(
+                    validation,
+                    state,
+                    part_ready=part_ready,
+                    part_ready_roi_meta=part_ready_roi_meta,
+                    sticker_roi_meta=sticker_roi_meta,
                     sticker_detection=sticker_detection,
                     event_id=event_id,
-            )
+                )
+            # Item 1: register pending actuation for ACK/NACK reconciliation
+            if db_write.get("written") and event_id:
+                _result_id = db_write.get("result_id")
+                self._pending_actuations[event_id] = {
+                    "decision": validation.get("decision"),
+                    "result_id": _result_id,
+                    "status": "pending",
+                }
+            # Component-count REJECT → also log to daily JSONL
+            _val_details = validation.get("validation_details") or {}
+            if (
+                _val_details.get("mode") == "component_count"
+                and validation.get("decision") == "REJECT"
+                and self._ng_logger is not None
+            ):
+                self._ng_logger.log_ng(
+                    session_id=state.session_id,
+                    event_id=event_id,
+                    mode="component_count",
+                    part_type=state.template.sticker.part_name,
+                    reject_reason=validation.get("reject_reason_code"),
+                    per_roi=_val_details.get("component_rois", []),
+                )
             self._register_committed_result(
                 state=state,
                 validation=validation,
@@ -1197,6 +1707,13 @@ class InspectionSessionService:
                     session_id, time.time() - last, self._idle_timeout_s,
                 )
                 state.status = SessionStatus.STOPPED
+                # Shutdown background inference executor to prevent thread leak
+                if state._inference_executor is not None:
+                    try:
+                        state._inference_executor.shutdown(wait=False)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    state._inference_executor = None
                 with self._lock:
                     self._sessions.pop(session_id, None)
                 raise ValueError("Inspection session stopped: idle timeout reached.")
@@ -1209,7 +1726,7 @@ class InspectionSessionService:
             "w": base.w,
             "h": base.h,
             "width": base.width,
-            "height": base.height,
+            "height": None,
         }
         payload.update(override)
         return payload
@@ -1283,6 +1800,7 @@ class InspectionSessionService:
             result = future.result()
             state.inference_result_cache = result
             state.inference_result_ts = monotonic()
+            state.inference_result_generation += 1
         except Exception as exc:
             logger.warning("[inference-thread] callback error: %s", exc)
         finally:
@@ -1384,14 +1902,27 @@ class InspectionSessionService:
                 "gap_score": None,
             }
         method = str(getattr(config, "method", "gap_template_match") or "gap_template_match").strip().lower()
+        if method == "mean_std_threshold":
+            return self._evaluate_part_ready_mean_std(frame, state, config)
         if method == "gap_template_match":
             return self._evaluate_part_ready_gap(frame, state, config)
-        if method == "color_profile_match":
-            return self._evaluate_part_ready_color(frame, state, config)
-        if method == "hsv_black_ratio":
-            return self._evaluate_part_ready_hsv(frame, state, config)
-        # Default: gap template match
-        return self._evaluate_part_ready_gap(frame, state, config)
+        # Item 2: fail-closed on unsupported method — don't silently substitute gap
+        logger.error(
+            "[inspection] unsupported part_ready method '%s' for template %s — failing closed",
+            method, state.template.id,
+        )
+        return {
+            "enabled": True,
+            "part_ready": False,
+            "part_ready_confidence": 0.0,
+            "decision": DecisionCode.REJECT.value,
+            "reject_reason_code": RejectReasonCode.ERROR.value,
+            "status": f"UNSUPPORTED_PART_READY_METHOD:{method}",
+            "match_ratio": None,
+            "mean_distance": None,
+            "color_profile_id": None,
+            "gap_score": None,
+        }
 
     def _evaluate_part_ready_gap(self, frame, state: SessionState, config) -> dict[str, Any]:
         """Gap detection via template matching against reference patch."""
@@ -1478,12 +2009,16 @@ class InspectionSessionService:
             }
         evaluation = evaluate_color_profile_match(frame, config=config, profile=record["profile"])
         raw_ratio = float(evaluation["match_ratio"])
-        _PART_READY_WINDOW = 5
-        history = state.part_ready_ratio_history
-        history.append(raw_ratio)
-        if len(history) > _PART_READY_WINDOW:
-            del history[0]
-        smoothed_ratio = round(sum(history) / len(history), 6)
+        # EMA smoothing — more responsive to current conditions than simple average
+        _ema_alpha = max(0.0, min(1.0, float(getattr(config, "ema_alpha", 0.3) or 0.3)))
+        if state.part_ready_ema_ratio == 0.0:
+            # First reading in cycle — initialize EMA with raw value
+            state.part_ready_ema_ratio = raw_ratio
+        else:
+            state.part_ready_ema_ratio = round(
+                _ema_alpha * raw_ratio + (1.0 - _ema_alpha) * state.part_ready_ema_ratio, 6
+            )
+        smoothed_ratio = state.part_ready_ema_ratio
         resolved_min = float(evaluation["min_match_ratio"])
         ready = smoothed_ratio >= resolved_min
         return {
@@ -1500,20 +2035,125 @@ class InspectionSessionService:
         }
 
     def _evaluate_part_ready_hsv(self, frame, state: SessionState, config) -> dict[str, Any]:
-        """Legacy HSV black ratio."""
-        evaluation = evaluate_hsv_black_ratio(frame, config)
+        """Legacy HSV black ratio with optional adaptive threshold."""
+        # ── Adaptive HSV threshold ──
+        # When enabled, slowly adjust hsv_lower/hsv_upper toward the current
+        # frame's actual HSV distribution so the threshold tracks lighting drift.
+        _hsv_adaptive = bool(getattr(config, "hsv_adaptive", False))
+        _adaptive_alpha = max(0.0, min(1.0, float(getattr(config, "hsv_adaptive_alpha", 0.1) or 0.1)))
+        _adaptive_min_ratio = float(getattr(config, "hsv_adaptive_min_ratio", 0.85) or 0.85)
+        if _hsv_adaptive and frame is not None and getattr(frame, "size", 0) > 0:
+            try:
+                from backend.app.services.part_ready_detector import compute_hsv_reference_from_roi
+                _live_ref = compute_hsv_reference_from_roi(frame)
+                _live_lower = _live_ref["hsv_lower"]
+                _live_upper = _live_ref["hsv_upper"]
+                if state.hsv_adaptive_lower is None:
+                    # First frame — initialize from config defaults
+                    state.hsv_adaptive_lower = list(_hsv_bounds(getattr(config, "hsv_lower", None), (0, 0, 0)))
+                    state.hsv_adaptive_upper = list(_hsv_bounds(getattr(config, "hsv_upper", None), (180, 255, 80)))
+                else:
+                    # EMA update toward live reference
+                    state.hsv_adaptive_lower = [
+                        round((1.0 - _adaptive_alpha) * state.hsv_adaptive_lower[i] + _adaptive_alpha * _live_lower[i], 1)
+                        for i in range(3)
+                    ]
+                    state.hsv_adaptive_upper = [
+                        round((1.0 - _adaptive_alpha) * state.hsv_adaptive_upper[i] + _adaptive_alpha * _live_upper[i], 1)
+                        for i in range(3)
+                    ]
+                # Only apply adaptive thresholds when current ratio is above minimum
+                # (prevents adapting to a wrong/no-part frame)
+                _raw_for_check = evaluate_hsv_black_ratio(frame, config)
+                if float(_raw_for_check["match_ratio"]) >= _adaptive_min_ratio:
+                    # Use adaptive bounds directly for re-evaluation
+                    import cv2 as _cv2
+                    import numpy as _np
+                    _hsv = _cv2.cvtColor(frame, _cv2.COLOR_BGR2HSV)
+                    _lower = _np.array(state.hsv_adaptive_lower, dtype=_np.uint8)
+                    _upper = _np.array(state.hsv_adaptive_upper, dtype=_np.uint8)
+                    _mask = _cv2.inRange(_hsv, _lower, _upper)
+                    _adaptive_ratio = float(_np.count_nonzero(_mask) / max(1, _mask.size))
+                    evaluation = {
+                        "enabled": True,
+                        "method": "hsv_black_ratio",
+                        "part_ready": _adaptive_ratio >= _adaptive_min_ratio,
+                        "part_ready_confidence": round(_adaptive_ratio, 6),
+                        "decision": DecisionCode.ACCEPT.value if _adaptive_ratio >= _adaptive_min_ratio else DecisionCode.REJECT.value,
+                        "reject_reason_code": None if _adaptive_ratio >= _adaptive_min_ratio else RejectReasonCode.PART_NOT_READY.value,
+                        "status": "ready" if _adaptive_ratio >= _adaptive_min_ratio else "not_ready",
+                        "match_ratio": round(_adaptive_ratio, 6),
+                        "raw_match_ratio": round(_adaptive_ratio, 6),
+                        "mean_distance": None,
+                        "distance_threshold": None,
+                        "min_match_ratio": _adaptive_min_ratio,
+                        "color_profile_id": getattr(config, "color_profile_id", None),
+                        "colorspace": "HSV",
+                        "hsv_lower": list(state.hsv_adaptive_lower),
+                        "hsv_upper": list(state.hsv_adaptive_upper),
+                        "hsv_adaptive": True,
+                    }
+                else:
+                    evaluation = _raw_for_check
+                    evaluation["hsv_adaptive"] = True
+                    evaluation["hsv_lower"] = list(state.hsv_adaptive_lower)
+                    evaluation["hsv_upper"] = list(state.hsv_adaptive_upper)
+            except Exception:
+                # Fallback to static evaluation on any error
+                evaluation = evaluate_hsv_black_ratio(frame, config)
+                evaluation["hsv_adaptive"] = False
+        else:
+            evaluation = evaluate_hsv_black_ratio(frame, config)
+            evaluation["hsv_adaptive"] = False
+
         raw_ratio = float(evaluation["match_ratio"])
-        _PART_READY_WINDOW = 5
-        history = state.part_ready_ratio_history
-        history.append(raw_ratio)
-        if len(history) > _PART_READY_WINDOW:
-            del history[0]
-        smoothed_ratio = round(sum(history) / len(history), 6)
+        # EMA smoothing — more responsive to current conditions than simple average
+        _ema_alpha = max(0.0, min(1.0, float(getattr(config, "ema_alpha", 0.3) or 0.3)))
+        if state.part_ready_ema_ratio == 0.0:
+            state.part_ready_ema_ratio = raw_ratio
+        else:
+            state.part_ready_ema_ratio = round(
+                _ema_alpha * raw_ratio + (1.0 - _ema_alpha) * state.part_ready_ema_ratio, 6
+            )
+        smoothed_ratio = state.part_ready_ema_ratio
         resolved_min = float(evaluation["min_match_ratio"])
         ready = smoothed_ratio >= resolved_min
         evaluation.update({
             "part_ready": ready,
             "part_ready_confidence": smoothed_ratio,
+            "decision": DecisionCode.ACCEPT.value if ready else DecisionCode.REJECT.value,
+            "reject_reason_code": None if ready else RejectReasonCode.PART_NOT_READY.value,
+            "status": "ready" if ready else "not_ready",
+            "match_ratio": smoothed_ratio,
+            "raw_match_ratio": raw_ratio,
+        })
+        return evaluation
+
+    def _evaluate_part_ready_mean_std(self, frame, state: SessionState, config) -> dict[str, Any]:
+        """"Mean + Std threshold classification.
+
+        Classifies the ROI into empty / part_normal / sticker based on
+        grayscale mean and standard deviation, with EMA smoothing.
+        """
+        from backend.app.services.part_ready_detector import evaluate_mean_std_threshold
+
+        evaluation = evaluate_mean_std_threshold(frame, config)
+
+        # EMA smoothing on the classification confidence (std_value)
+        _ema_alpha = max(0.0, min(1.0, float(getattr(config, "ema_alpha", 0.3) or 0.3)))
+        raw_ratio = float(evaluation["match_ratio"])
+        if state.part_ready_ema_ratio == 0.0:
+            state.part_ready_ema_ratio = raw_ratio
+        else:
+            state.part_ready_ema_ratio = round(
+                _ema_alpha * raw_ratio + (1.0 - _ema_alpha) * state.part_ready_ema_ratio, 6
+            )
+        smoothed_ratio = state.part_ready_ema_ratio
+
+        ready = bool(evaluation["part_ready"])
+        evaluation.update({
+            "part_ready": ready,
+            "part_ready_confidence": round(float(evaluation.get("std_value", 0.0)), 2) if ready else round(255.0 - float(evaluation.get("mean_value", 0.0)), 2),
             "decision": DecisionCode.ACCEPT.value if ready else DecisionCode.REJECT.value,
             "reject_reason_code": None if ready else RejectReasonCode.PART_NOT_READY.value,
             "status": "ready" if ready else "not_ready",
@@ -1542,70 +2182,18 @@ class InspectionSessionService:
     def _normalize_code(value: Any) -> str:
         return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum())
 
-    def _resolve_ocr_mode(self, state: SessionState) -> str:
-        sticker = state.template.sticker
-        explicit = str(getattr(sticker, "ocr_mode", "") or "").strip().lower()
-        validator_mode = str(getattr(sticker, "validator_mode", "") or "").strip().lower()
-        raw_mode = explicit or self._default_ocr_mode
-        if bool(getattr(sticker, "use_ocr", False)) and not explicit:
-            raw_mode = "primary"
-        if not explicit and validator_mode in {"ocr", "ocr_anchor", "anchor_ocr", "ocr_primary"}:
-            raw_mode = "primary"
-        if raw_mode in {"primary", "ocr", "ocr_primary", "anchor_ocr"}:
-            return "primary"
-        if raw_mode in {"shadow", "ocr_shadow"}:
-            return "shadow"
-        return "legacy"
-
     @staticmethod
     def _ocr_validation_fields(detection_payload: dict[str, Any]) -> dict[str, Any]:
+        return {}
         anchor = detection_payload.get("anchor") or {}
-        ocr = detection_payload.get("ocr") or {}
         geometry = detection_payload.get("geometry") or {}
         return {
-            "ocr_text": ocr.get("canonical_text") or ocr.get("text") or None,
-            "ocr_confidence": ocr.get("confidence"),
-            "ocr_engine": ocr.get("engine"),
-            "ocr_status": ocr.get("status"),
             "text_bbox": anchor.get("text_bbox"),
             "dot_bbox": anchor.get("dot_bbox"),
             "dot_position": geometry.get("dot_position") or anchor.get("dot_position"),
             "anchor_offset": geometry.get("anchor_offset"),
             "pose_angle": geometry.get("pose_angle"),
         }
-
-    def _attach_ocr_observability(
-        self,
-        validation: dict[str, Any],
-        detection_payload: dict[str, Any],
-        state: SessionState,
-    ) -> dict[str, Any]:
-        result = dict(validation)
-        for key, value in self._ocr_validation_fields(detection_payload).items():
-            if result.get(key) is None:
-                result[key] = value
-        details = result.get("validation_details")
-        if isinstance(details, dict):
-            ocr_mode = self._resolve_ocr_mode(state)
-            ocr_payload = dict(detection_payload.get("ocr") or {})
-            anchor_payload = dict(detection_payload.get("anchor") or {})
-            geometry_payload = dict(detection_payload.get("geometry") or {})
-            details.setdefault("ocr_mode", ocr_mode)
-            details.setdefault("ocr", ocr_payload)
-            details.setdefault("anchor", anchor_payload)
-            details.setdefault("geometry", geometry_payload)
-            if ocr_mode == "shadow":
-                details["ocr_shadow"] = {
-                    "anchor_status": anchor_payload.get("status"),
-                    "ocr_status": ocr_payload.get("status"),
-                    "geometry_status": geometry_payload.get("status"),
-                    "ocr_text": ocr_payload.get("canonical_text") or ocr_payload.get("text"),
-                    "ocr_confidence": ocr_payload.get("confidence"),
-                    "match_expected": bool(ocr_payload.get("match_expected")),
-                    "anchor_offset": geometry_payload.get("anchor_offset"),
-                    "pose_angle": geometry_payload.get("pose_angle"),
-                }
-        return result
 
     def _validate_ocr_anchor(
         self,
@@ -1822,19 +2410,6 @@ class InspectionSessionService:
 
         ocr_payload = detection_payload.get("ocr") or {}
         unique_code = str(detection_payload.get("unique_code") or "").strip()
-        expected_code = str(
-            getattr(sticker, "ocr_expected_code", "")
-            or getattr(sticker, "ocr_expected_text", "")
-            or sticker.expected_class
-            or ""
-        ).strip()
-        use_ocr = bool(getattr(sticker, "use_ocr", False))
-        ocr_min_confidence = (
-            self._default_ocr_min_confidence
-            if getattr(sticker, "ocr_min_confidence", None) is None
-            else float(getattr(sticker, "ocr_min_confidence") or 0.0)
-        )
-
         reject_reason = None
         if selected_candidate is None:
             reject_reason = RejectReasonCode.NOT_FOUND.value
@@ -1846,12 +2421,19 @@ class InspectionSessionService:
             reject_reason = RejectReasonCode.LOW_CLASS_CONF.value
         elif thresholds["tilt_gate_enabled"] and max_tilt_degrees_value is not None and normalized_deviation is not None and normalized_deviation > max_tilt_degrees_value:
             reject_reason = RejectReasonCode.OUT_OF_ANGLE.value
-        elif use_ocr and str(ocr_payload.get("status") or "") != "ok":
-            reject_reason = RejectReasonCode.LOW_OCR_CONF.value
-        elif use_ocr and ocr_payload.get("confidence") is not None and float(ocr_payload.get("confidence") or 0.0) < ocr_min_confidence:
-            reject_reason = RejectReasonCode.LOW_OCR_CONF.value
-        elif use_ocr and expected_code and self._normalize_code(unique_code) != self._normalize_code(expected_code):
-            reject_reason = RejectReasonCode.WRONG_TEXT.value
+        elif offset_limit_x is not None and abs(offset_x) > float(offset_limit_x):
+            reject_reason = RejectReasonCode.OUT_OF_POSITION.value
+        elif offset_limit_y is not None and abs(offset_y) > float(offset_limit_y):
+            reject_reason = RejectReasonCode.OUT_OF_POSITION.value
+
+        # Only allow hard reject reasons; suppress all others
+        _hard_rejects = {
+            RejectReasonCode.WRONG_TYPE.value,
+            RejectReasonCode.OUT_OF_ANGLE.value,
+            RejectReasonCode.COMMIT_TIMEOUT.value,
+        }
+        if reject_reason is not None and reject_reason not in _hard_rejects:
+            reject_reason = None
 
         decision = DecisionCode.ACCEPT.value if reject_reason is None else DecisionCode.REJECT.value
         status = "accepted" if reject_reason is None else reject_reason.lower()
@@ -1906,7 +2488,6 @@ class InspectionSessionService:
                 "tilt": tilt_info,
                 "thresholds": {
                     **thresholds,
-                    "ocr_min_confidence": ocr_min_confidence,
                     "max_anchor_offset_x": None if offset_limit_x is None else float(offset_limit_x),
                     "max_anchor_offset_y": None if offset_limit_y is None else float(offset_limit_y),
                 },
@@ -1997,14 +2578,25 @@ class InspectionSessionService:
     ) -> dict[str, Any]:
         sticker = state.template.sticker
         validator_mode = str(getattr(sticker, "validator_mode", "ml_detection") or "ml_detection").strip().lower()
+
+        # Dispatch to component_count validator if mode is active
+        if validator_mode == "component_count" and state.template.component_rois:
+            return self._validate_component_count(
+                state=state,
+                detections=detections,
+                detection_payload=detection_payload,
+                part_ready_payload=part_ready_payload,
+                username=username,
+                user_id=user_id,
+            )
+
         position_gate_enabled = validator_mode not in ROI_CLASS_VALIDATOR_MODES
-        line_id = state.line_id or sticker.line
+        line_id = state.line_id
         expected_tilt_degrees = float(getattr(sticker, "expected_tilt_degrees", 0.0) or 0.0)
         max_tilt_degrees = getattr(sticker, "max_tilt_degrees", None)
         max_tilt_degrees_value = None if max_tilt_degrees is None else float(max_tilt_degrees)
         tilt_gate_enabled = bool(getattr(sticker, "tilt_gate_enabled", False))
         tilt_info = _estimate_tilt_from_roi(roi_frame, expected_tilt_degrees, sticker)
-        ocr_mode = self._resolve_ocr_mode(state)
         thresholds = {
             "min_roi_confidence": float(sticker.min_roi_confidence or 0.0),
             "min_class_confidence": (
@@ -2017,7 +2609,6 @@ class InspectionSessionService:
             "tilt_gate_enabled": tilt_gate_enabled,
             "max_tilt_degrees": max_tilt_degrees_value,
             "expected_tilt_degrees": expected_tilt_degrees,
-            "ocr_mode": ocr_mode,
         }
         detection_context = {
             "backend": detection_payload.get("backend"),
@@ -2060,100 +2651,78 @@ class InspectionSessionService:
                     "thresholds": thresholds,
                 },
             }
-        if not part_ready_payload.get("part_ready", False):
-            return {
-                "decision": DecisionCode.REJECT.value,
-                "decision_code": DecisionCode.REJECT.value,
-                "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
-                "part_name": sticker.part_name,
-                "line_id": line_id,
-                "station_id": state.station_id,
-                # Contract: data1 = part_ready confidence, data2 = sticker confidence
-                "data1": part_ready_payload.get("part_ready_confidence"),
-                "data2": None,
-                "targets": [],
-                "operator_user_id": user_id,
-                "mp_check": username,
-                "detected_class": None,
-                "expected_class": sticker.expected_class,
-                "sticker_confidence": None,
-                "sticker_bbox": None,
-                "sticker_backend": detection_context["backend"],
-                "sticker_tilt_angle": tilt_info.get("angle_degrees"),
-                "sticker_tilt_expected": tilt_info.get("expected_tilt_degrees"),
-                "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
-                "sticker_tilt_threshold": max_tilt_degrees_value,
-                "validation_details": {
-                    "status": "part_not_ready",
-                    "candidate_source": "none",
-                    "selected_candidate": None,
-                    "candidate_count": len(detections),
-                    "matching_candidate_count": 0,
-                    "expected_center": None,
-                    "tilt": tilt_info,
-                    "thresholds": thresholds,
-                },
-            }
-        if bool(getattr(sticker, "use_ocr", False)) or validator_mode in {"sticker_only", "ocr_only", "ocr_sticker", "sticker_ocr"}:
-            return self._validate_sticker_ocr_only(
-                roi_frame=roi_frame,
-                state=state,
-                detections=detections,
-                detection_payload=detection_payload,
-                part_ready_payload=part_ready_payload,
-                username=username,
-                user_id=user_id,
-                line_id=line_id,
-                thresholds=thresholds,
-                detection_context=detection_context,
-                max_tilt_degrees_value=max_tilt_degrees_value,
-            )
-        if ocr_mode == "primary":
-            return self._validate_ocr_anchor(
-                state=state,
-                detection_payload=detection_payload,
-                part_ready_payload=part_ready_payload,
-                username=username,
-                user_id=user_id,
-                line_id=line_id,
-                thresholds=thresholds,
-                detection_context=detection_context,
-                max_tilt_degrees_value=max_tilt_degrees_value,
-            )
-        if not detections:
-            return {
-                "decision": DecisionCode.REJECT.value,
-                "decision_code": DecisionCode.REJECT.value,
-                "reject_reason_code": RejectReasonCode.NOT_FOUND.value,
-                "part_name": sticker.part_name,
-                "line_id": line_id,
-                "station_id": state.station_id,
-                # Contract: data1 = part_ready confidence, data2 = sticker confidence
-                "data1": part_ready_payload.get("part_ready_confidence"),
-                "data2": None,
-                "targets": [],
-                "operator_user_id": user_id,
-                "mp_check": username,
-                "detected_class": None,
-                "expected_class": sticker.expected_class,
-                "sticker_confidence": None,
-                "sticker_bbox": None,
-                "sticker_backend": detection_context["backend"],
-                "sticker_tilt_angle": tilt_info.get("angle_degrees"),
-                "sticker_tilt_expected": tilt_info.get("expected_tilt_degrees"),
-                "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
-                "sticker_tilt_threshold": max_tilt_degrees_value,
-                "validation_details": {
-                    "status": "not_found",
-                    "candidate_source": "none",
-                    "selected_candidate": None,
-                    "candidate_count": 0,
-                    "matching_candidate_count": 0,
-                    "expected_center": None,
-                    "tilt": tilt_info,
-                    "thresholds": thresholds,
-                },
-            }
+#         if not part_ready_payload.get("part_ready", False):
+#             return {
+#                 "decision": DecisionCode.REJECT.value,
+#                 "decision_code": DecisionCode.REJECT.value,
+#                 "reject_reason_code": RejectReasonCode.PART_NOT_READY.value,
+#                 "part_name": sticker.part_name,
+#                 "line_id": line_id,
+#                 "station_id": state.station_id,
+#                 # Contract: data1 = part_ready confidence, data2 = sticker confidence
+#                 "data1": part_ready_payload.get("part_ready_confidence"),
+#                 "data2": None,
+#                 "targets": [],
+#                 "operator_user_id": user_id,
+#                 "mp_check": username,
+#                 "detected_class": None,
+#                 "expected_class": sticker.expected_class,
+#                 "sticker_confidence": None,
+#                 "sticker_bbox": None,
+#                 "sticker_backend": detection_context["backend"],
+#                 "sticker_tilt_angle": tilt_info.get("angle_degrees"),
+#                 "sticker_tilt_expected": tilt_info.get("expected_tilt_degrees"),
+#                 "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
+#                 "sticker_tilt_threshold": max_tilt_degrees_value,
+#                 "validation_details": {
+#                     "status": "part_not_ready",
+#                     "candidate_source": "none",
+#                     "selected_candidate": None,
+#                     "candidate_count": len(detections),
+#                     "matching_candidate_count": 0,
+#                     "expected_center": None,
+#                     "tilt": tilt_info,
+#                     "thresholds": thresholds,
+#                 },
+#             }
+        # NOTE: Do NOT return early on no detections — let flow continue to
+        # _validate_sticker which handles selected_candidate=None as NOT_FOUND,
+        # and the commit gate will keep it as pending (never auto-commit).
+        # Returning here bypasses the commit gate and causes immediate REJECT.
+        #
+        # if not detections:
+        #     return {
+        #         "decision": DecisionCode.REJECT.value,
+        #         "decision_code": DecisionCode.REJECT.value,
+        #         "reject_reason_code": RejectReasonCode.NOT_FOUND.value,
+        #         "part_name": sticker.part_name,
+        #         "line_id": line_id,
+        #         "station_id": state.station_id,
+        #         "data1": part_ready_payload.get("part_ready_confidence"),
+        #         "data2": None,
+        #         "targets": [],
+        #         "operator_user_id": user_id,
+        #         "mp_check": username,
+        #         "detected_class": None,
+        #         "expected_class": sticker.expected_class,
+        #         "sticker_confidence": None,
+        #         "sticker_bbox": None,
+        #         "sticker_backend": detection_context["backend"],
+        #         "sticker_tilt_angle": tilt_info.get("angle_degrees"),
+        #         "sticker_tilt_expected": tilt_info.get("expected_tilt_degrees"),
+        #         "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
+        #         "sticker_tilt_threshold": max_tilt_degrees_value,
+        #         "validation_details": {
+        #             "status": "inferring",
+        #             "candidate_source": "none",
+        #             "selected_candidate": None,
+        #             "candidate_count": 0,
+        #             "matching_candidate_count": 0,
+        #             "expected_center": None,
+        #             "tilt": tilt_info,
+        #             "thresholds": thresholds,
+        #         },
+        #     }
 
         candidates, expected_center = self._build_validation_candidate_summaries(
             detections,
@@ -2165,6 +2734,8 @@ class InspectionSessionService:
         matching_candidate_count = sum(1 for item in candidates if item.get("match_expected"))
         if selected_candidate is None:
             return {
+                # Detections exist but none usable → not a final result.
+                # Keep inferring (non-hard reject → pending) instead of ACCEPT.
                 "decision": DecisionCode.REJECT.value,
                 "decision_code": DecisionCode.REJECT.value,
                 "reject_reason_code": RejectReasonCode.NOT_FOUND.value,
@@ -2187,7 +2758,7 @@ class InspectionSessionService:
                 "sticker_tilt_deviation": tilt_info.get("deviation_degrees"),
                 "sticker_tilt_threshold": max_tilt_degrees_value,
                 "validation_details": {
-                    "status": "not_found",
+                    "status": "inferring",
                     "candidate_source": "none",
                     "selected_candidate": None,
                     "candidate_count": len(candidates),
@@ -2279,35 +2850,40 @@ class InspectionSessionService:
         part_ready_payload: dict[str, Any],
         presence: dict[str, Any],
         now: datetime,
-        settle_ms: int = 0,
+        commit_allowed: bool = False,
     ) -> tuple[str, str | None, bool]:
         if not presence.get("present", False):
             state.current_presence = False
             state.current_event_id = None
             state.current_event_key = None
             state.current_event_started_at = None
+    def _advance_event_state(
+        self,
+        *,
+        state: SessionState,
+        validation: dict[str, Any],
+        part_ready_payload: dict[str, Any],
+        presence: dict[str, Any],
+        now: datetime,
+        commit_allowed: bool = False,
+    ) -> tuple[str, str | None, bool]:
+        if not presence.get("present", False):
+            state.current_presence = False
+            state.current_event_id = None
+            state.current_event_key = ""
+            state.current_event_started_at = None
             state.current_event_stable_frames = 0
             state.current_event_committed = False
-            state.cooldown_until = None
-            state.part_ready_ratio_history.clear()
             return InspectionEventState.IDLE.value, None, False
 
-        event_key = (
+        _event_key = (
             f"{part_ready_payload.get('part_ready')}::"
             f"{validation.get('decision')}::"
             f"{validation.get('reject_reason_code') or 'OK'}::"
             f"{validation.get('part_name') or '-'}"
         )
-        if not state.current_presence or state.current_event_id is None:
-            state.event_sequence += 1
-            state.current_presence = True
-            state.current_event_id = f"evt-{state.event_sequence:05d}"
-            state.current_event_key = event_key
-            state.current_event_started_at = now
-            state.current_event_stable_frames = 1
-            state.current_event_committed = False
-        elif state.current_event_key == event_key:
-            # Same outcome: honour cooldown to prevent double-counting.
+        if _event_key == state.current_event_key and state.current_event_id is not None:
+            # Same event continuing
             if state.current_event_committed:
                 return InspectionEventState.COOLDOWN.value, state.current_event_id, False
             state.current_event_stable_frames += 1
@@ -2315,7 +2891,7 @@ class InspectionSessionService:
             # Outcome changed (e.g. REJECT → ACCEPT after config fix) → new event.
             state.event_sequence += 1
             state.current_event_id = f"evt-{state.event_sequence:05d}"
-            state.current_event_key = event_key
+            state.current_event_key = _event_key
             state.current_event_started_at = now
             state.current_event_stable_frames = 1
             state.current_event_committed = False
@@ -2323,20 +2899,20 @@ class InspectionSessionService:
         if not part_ready_payload.get("part_ready", False):
             return InspectionEventState.PART_DETECTED.value, state.current_event_id, False
 
-        # Time-based commit driven by settle_ms (the same value that gates inference).
-        # settle_ms=0 → commit immediately on the first stable post-ready frame.
-        # settle_ms>0 → commit only after the current event has been continuously
-        # stable for at least settle_ms milliseconds since current_event_started_at.
-        if settle_ms > 0 and state.current_event_started_at is not None:
-            elapsed_event_ms = (now - state.current_event_started_at).total_seconds() * 1000.0
-            commit_ready = elapsed_event_ms >= settle_ms
-        else:
-            commit_ready = True
+        # Commit authority: policy gate is the sole timing authority.
+        # commit_allowed=True means grace + stable_frames + inference count all passed.
+        commit_ready = commit_allowed
 
         if commit_ready:
             # Check consecutive reject threshold
             decision = str(validation.get("decision") or "").strip().upper()
-            if decision == DecisionCode.REJECT.value and self._max_consecutive_rejects > 0:
+            reject_reason = str(validation.get("reject_reason_code") or "").strip().upper()
+            is_timeout_reject = reject_reason == RejectReasonCode.COMMIT_TIMEOUT.value
+            if (
+                decision == DecisionCode.REJECT.value
+                and self._max_consecutive_rejects > 0
+                and not is_timeout_reject
+            ):
                 # Increment consecutive reject counter
                 state.consecutive_reject_count = int(getattr(state, "consecutive_reject_count", 0)) + 1
                 if state.consecutive_reject_count < self._max_consecutive_rejects:
@@ -2349,8 +2925,9 @@ class InspectionSessionService:
                 else:
                     # Reached threshold — commit reject and reset counter
                     state.consecutive_reject_count = 0
-            elif decision == DecisionCode.ACCEPT.value:
-                # Accept always commits immediately, reset reject counter
+            elif decision == DecisionCode.ACCEPT.value or is_timeout_reject:
+                # Accept and COMMIT_TIMEOUT always commit immediately — no debounce needed.
+                # COMMIT_TIMEOUT is guaranteed valid (part settled for reject_timeout_ms without accept).
                 state.consecutive_reject_count = 0
 
             state.current_event_committed = True
@@ -2505,18 +3082,6 @@ class InspectionSessionService:
             1,
             cv2.LINE_AA,
         )
-        ocr_text = validation.get("ocr_text") or "-"
-        ocr_conf = validation.get("ocr_confidence")
-        cv2.putText(
-            overlay,
-            f"ocr={ocr_text} conf={ocr_conf if ocr_conf is not None else '-'}",
-            (12, 92),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
         anchor_offset = validation.get("anchor_offset") or {}
         if anchor_offset:
             cv2.putText(
@@ -2639,6 +3204,7 @@ class InspectionSessionService:
                 "decision_code": validation.get("decision_code"),
                 "reject_reason_code": validation.get("reject_reason_code"),
                 "push_status": "pending",
+                "actuation_status": "pending",  # Item 1: track PLC actuation ACK/NACK
                 "retry_count": 0,
                 "operator_user_id": validation.get("operator_user_id"),
                 "part_ready_status": part_ready.get("status"),
@@ -2649,10 +3215,6 @@ class InspectionSessionService:
                 "sticker_confidence": validation.get("sticker_confidence"),
                 "sticker_bbox": validation.get("sticker_bbox"),
                 "sticker_backend": validation.get("sticker_backend"),
-                "ocr_text": validation.get("ocr_text"),
-                "ocr_confidence": validation.get("ocr_confidence"),
-                "ocr_engine": validation.get("ocr_engine"),
-                "ocr_status": validation.get("ocr_status"),
                 "text_bbox": validation.get("text_bbox"),
                 "dot_bbox": validation.get("dot_bbox"),
                 "dot_position": validation.get("dot_position"),
@@ -2667,3 +3229,188 @@ class InspectionSessionService:
         state.last_persisted_at = datetime.now(UTC)
         state.last_persisted_key = persist_key
         return {"written": True, "result_id": record["id"]}
+
+
+    # ---------------------------------------------------------------------------
+    # Component Count Mode — helpers
+    # ---------------------------------------------------------------------------
+
+    def _point_in_which_roi(self, cx: float, cy: float, component_rois: list) -> int:
+        """Return index of ROI containing normalized point (cx, cy), or -1.
+
+        Supports axis-aligned ROIs only (rotation not yet supported in assign path).
+        Point is in normalized [0,1] coordinates relative to full frame.
+        """
+        for idx, roi_rule in enumerate(component_rois):
+            roi = roi_rule.roi
+            rx, ry = float(roi.x), float(roi.y)
+            rw, rh = float(roi.w), float(roi.h)
+            if rw <= 0 or rh <= 0:
+                continue
+            if rx <= cx <= rx + rw and ry <= cy <= ry + rh:
+                return idx
+        return -1
+
+    def _assign_detections_to_component_rois(
+        self, detections: list[dict], component_rois: list, fw: int, fh: int
+    ) -> None:
+        """Assign tile_index to each detection based on center point falling inside ROI.
+
+        Reads det["position"] = {x1, y1, x2, y2} (pixel coords from inference backend).
+        Modifies detections in-place. Detections outside all ROIs get tile_index=-1.
+        """
+        if fw <= 0 or fh <= 0 or not component_rois:
+            for det in detections:
+                det["tile_index"] = -1
+            return
+        for det in detections:
+            pos = det.get("position") or {}
+            x1 = float(pos.get("x1", 0))
+            y1 = float(pos.get("y1", 0))
+            x2 = float(pos.get("x2", 0))
+            y2 = float(pos.get("y2", 0))
+            cx = ((x1 + x2) / 2.0) / float(fw)
+            cy = ((y1 + y2) / 2.0) / float(fh)
+            det["tile_index"] = self._point_in_which_roi(cx, cy, component_rois)
+
+    def _validate_component_count(
+        self,
+        *,
+        state: SessionState,
+        detections: list[dict[str, Any]],
+        detection_payload: dict[str, Any],
+        part_ready_payload: dict[str, Any],
+        username: str | None = None,
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Validate component count mode — per-frame evaluation + N-frame consecutive acceptance.
+
+        Rules per ROI (evaluated on THIS frame only):
+        1. detected_count(class) == target for all registered classes
+        2. total detections in ROI == sum(targets)
+        3. (if strict_foreign_class) no foreign class detections in ROI
+
+        Stability: all ROIs must pass on N consecutive frames before ACCEPT.
+        """
+        from collections import Counter
+
+        component_rois = state.template.component_rois
+        if not component_rois:
+            return {
+                "decision": "REJECT",
+                "reject_reason_code": "NO_COMPONENT_ROIS",
+                "validation_details": {"mode": "component_count", "error": "No component ROIs defined"},
+            }
+
+        # Count detections per (ROI_index, class) — THIS FRAME only
+        roi_counts: list[Counter] = [Counter() for _ in component_rois]
+        for det in detections:
+            label = str(det.get("label") or det.get("class_name") or "").strip().lower()
+            tile_idx = det.get("tile_index", -1)
+            if 0 <= tile_idx < len(component_rois):
+                roi_counts[tile_idx][label] += 1
+
+        # Evaluate each ROI on this frame
+        all_ok = True
+        reject_reason = None
+        roi_results = []
+
+        for roi_idx, roi_rule in enumerate(component_rois):
+            roi_ok = True
+            class_results = {}
+            target_sum = 0
+            registered_classes = set()
+
+            for ct in roi_rule.classes:
+                cn = ct.class_name.strip().lower()
+                target = ct.count
+                target_sum += target
+                registered_classes.add(cn)
+                detected = roi_counts[roi_idx].get(cn, 0)
+                ok = detected == target
+                class_results[cn] = {
+                    "detected": detected,
+                    "target": target,
+                    "ok": ok,
+                }
+                if not ok:
+                    roi_ok = False
+
+            total_detected = sum(roi_counts[roi_idx].values())
+            total_ok = total_detected == target_sum
+
+            foreign_classes = []
+            if roi_rule.strict_foreign_class:
+                for cls_name in roi_counts[roi_idx]:
+                    if cls_name not in registered_classes:
+                        foreign_classes.append(cls_name)
+                        roi_ok = False
+
+            if not total_ok:
+                roi_ok = False
+
+            if not roi_ok:
+                all_ok = False
+                if not reject_reason:
+                    if not total_ok:
+                        reject_reason = "UNEXPECTED_COMPONENT"
+                    else:
+                        reject_reason = "COMPONENT_COUNT_MISMATCH"
+
+            roi_results.append({
+                "name": roi_rule.name,
+                "ok": roi_ok,
+                "classes": class_results,
+                "total_detected": total_detected,
+                "total_target": target_sum,
+                "foreign_classes": foreign_classes,
+            })
+
+        # Update consecutive-ok counter
+        if all_ok:
+            state.consecutive_component_ok = getattr(state, "consecutive_component_ok", 0) + 1
+        else:
+            state.consecutive_component_ok = 0
+
+        # Decision: ACCEPT only after N consecutive ok frames
+        _needed = max(1, int(self._accept_stable_frames))
+        if all_ok and state.consecutive_component_ok >= _needed:
+            decision = "ACCEPT"
+        elif all_ok:
+            decision = "ACCEPT_CANDIDATE"  # stabilizing, not yet committed
+        else:
+            decision = "REJECT"
+
+        result = {
+            "decision": decision,
+            "reject_reason_code": reject_reason if not all_ok else None,
+            "validation_details": {
+                "component_rois": roi_results,
+                "mode": "component_count",
+                "consecutive_ok": state.consecutive_component_ok,
+                "consecutive_needed": _needed,
+            },
+        }
+
+        # Update shared stability counters (used by commit gate)
+        if all_ok:
+            import time as _time
+            _now = _time.time()
+            if state.accept_cycle_started_at is None:
+                state.accept_cycle_started_at = datetime.now(UTC)
+            if state.policy_stable_started_at is None:
+                state.policy_stable_started_at = datetime.now(UTC)
+            state.policy_stable_frames += 1
+            if state.inference_accept_first_ts == 0.0:
+                state.inference_accept_first_ts = _now
+            state.inference_accept_count += 1
+        else:
+            state.policy_stable_frames = 0
+            state.policy_stable_started_at = None
+            state.accept_cycle_started_at = None
+            state.inference_accept_count = 0
+            state.inference_accept_first_ts = 0.0
+            state.inference_last_counted_generation = -1
+
+        return result
+

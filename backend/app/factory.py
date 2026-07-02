@@ -12,6 +12,7 @@ from backend.app.api.dashboard_routes import dashboard_blueprint
 from backend.app.api.deployment_routes import deployment_blueprint
 from backend.app.api.inspection_routes import inspection_blueprint
 from backend.app.api.template_routes import template_blueprint
+from backend.app.api.machine_settings_routes import machine_settings_blueprint
 from backend.app.api.workstation_routes import workstation_blueprint
 from backend.app.core.config import AppConfig, ensure_data_dirs
 from backend.app.core.logging_config import configure_logging
@@ -21,9 +22,21 @@ logger = logging.getLogger(__name__)
 
 def create_app() -> Flask:
     ensure_data_dirs()
-    app = Flask(__name__)
     config = AppConfig()
-    _enforce_startup_guards(config)
+    # P3-8: Refuse to start in production with default secret key
+    _default_secret = "qc-suite-dev-secret"
+    if config.secret_key == _default_secret:
+        if config.environment.lower() == "prod":
+            raise RuntimeError(
+                "Refusing to start in production with default secret_key. "
+                "Set QC_SUITE_SECRET_KEY env var."
+            )
+        else:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Using default secret_key — OK for dev, but set QC_SUITE_SECRET_KEY for production."
+            )
+    app = Flask(__name__)
     app.config["QC_SUITE"] = config
     configure_logging(app)
     app.register_blueprint(auth_blueprint)
@@ -33,6 +46,7 @@ def create_app() -> Flask:
     app.register_blueprint(dashboard_blueprint)
     app.register_blueprint(calibration_blueprint)
     app.register_blueprint(workstation_blueprint)
+    app.register_blueprint(machine_settings_blueprint)
 
     @app.get("/health")
     def health():
@@ -68,27 +82,12 @@ def create_app() -> Flask:
             "mode": app_config.sticker_inference_mode,
         }
 
-        ocr_mode = str(app_config.sticker_ocr_mode or "legacy").strip().lower()
-        ocr_engine = str(app_config.default_ocr_engine or "disabled").strip().lower()
-        ocr_ok = True
-        ocr_note = "not required"
-        if app_config.sticker_ocr_required or ocr_mode in {"primary", "shadow"}:
-            ocr_ok = ocr_engine not in {"", "disabled", "none", "off"}
-            ocr_note = "configured" if ocr_ok else "OCR engine disabled"
-            if ocr_ok and ocr_engine == "tesseract":
-                try:
-                    import pytesseract  # type: ignore
-
-                    pytesseract.get_tesseract_version()
-                except Exception as exc:  # noqa: BLE001
-                    ocr_ok = False
-                    ocr_note = str(exc)
         checks["ocr_runtime"] = {
-            "ok": ocr_ok,
-            "mode": ocr_mode,
-            "engine": ocr_engine,
-            "required": app_config.sticker_ocr_required,
-            "note": ocr_note,
+            "ok": True,
+            "mode": "disabled",
+            "engine": "disabled",
+            "required": False,
+            "note": "OCR removed",
         }
 
         # Push worker
@@ -124,22 +123,6 @@ def create_app() -> Flask:
 
     _register_worker_lifecycle(app)
     return app
-
-
-def _enforce_startup_guards(config: AppConfig) -> None:
-    if not config.sticker_ocr_fail_fast:
-        return
-    ocr_mode = str(config.sticker_ocr_mode or "legacy").strip().lower()
-    ocr_required = config.sticker_ocr_required or ocr_mode in {"primary", "shadow"}
-    if not ocr_required:
-        return
-    engine = str(config.default_ocr_engine or "disabled").strip().lower()
-    if engine in {"", "disabled", "none", "off"}:
-        raise RuntimeError("OCR fail-fast is enabled but QC_SUITE_OCR_ENGINE is disabled.")
-    if engine == "tesseract":
-        import pytesseract  # type: ignore
-
-        pytesseract.get_tesseract_version()
 
 
 def _register_worker_lifecycle(app: Flask) -> None:
