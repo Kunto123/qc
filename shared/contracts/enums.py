@@ -30,6 +30,7 @@ class RejectReasonCode(StrEnum):
     PART_NOT_READY = "PART_NOT_READY"
     COMMIT_TIMEOUT = "COMMIT_TIMEOUT"
     ERROR = "ERROR"
+    PLC_FAULT = "PLC_FAULT"
 
 
 class SessionStatus(StrEnum):

@@ -565,7 +565,7 @@ class AdminScreen(ctk.CTkFrame):
             if int(item.get("template_id") or 0) > 0
         }
         if not active_items and not self._templates_cache:
-            self.preset_table.insert("", "end", iid="__empty__", values=("-", "No presets.", "", ""))
+            self.preset_table.insert("", "end", iid="__empty__", values=("-", "No presets.", "", "", ""))
             return
         for item in active_items:
             # Get latest template name from cache (falls back to deployment snapshot)
@@ -578,6 +578,11 @@ class AdminScreen(ctk.CTkFrame):
                 )
                 if tpl:
                     latest_name = tpl.get("name") or latest_name
+            # Get validator mode from template
+            _vm = "sticker"
+            if template_id > 0 and tpl:
+                _vm = str(tpl.get("sticker", {}).get("validator_mode") or "ml_detection")
+            _mode_label = "Component Counter" if _vm == "component_count" else "QC Sticker"
             self.preset_table.insert(
                 "",
                 "end",
@@ -586,6 +591,7 @@ class AdminScreen(ctk.CTkFrame):
                     f"D{item.get('id')}",
                     _safe_text(latest_name),
                     _safe_text(item.get("template_version_id")),
+                    _mode_label,
                     "ACTIVE",
                 ),
             )
@@ -593,6 +599,8 @@ class AdminScreen(ctk.CTkFrame):
             template_id = int(item.get("id") or 0)
             if template_id in active_template_ids:
                 continue
+            _vm = str(item.get("sticker", {}).get("validator_mode") or "ml_detection")
+            _mode_label = "Component Counter" if _vm == "component_count" else "QC Sticker"
             self.preset_table.insert(
                 "",
                 "end",
@@ -601,6 +609,7 @@ class AdminScreen(ctk.CTkFrame):
                     f"T{template_id}",
                     _safe_text(item.get("name")),
                     _safe_text(item.get("version_id") or item.get("current_version_id")),
+                    _mode_label,
                     _safe_text(item.get("lifecycle_status") or _format_status(item.get("is_active", True))),
                 ),
             )
@@ -917,6 +926,9 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_description_var.set(str(detail.get("description") or ""))
         sticker = detail.get("sticker") or {}
         part_ready = detail.get("part_ready") or {}
+        # Restore validator mode — fires _refresh_comp_roi_editor trace
+        _vm = str(sticker.get("validator_mode") or "")
+        self.preset_validator_mode_var.set("component_count" if _vm == "component_count" else "sticker")
         self.preset_expected_class_var.set(str(sticker.get("expected_class") or ""))
         self.preset_max_tilt_var.set("" if sticker.get("max_tilt_degrees") is None else str(sticker.get("max_tilt_degrees")))
         self.preset_tilt_gate_var.set(bool(sticker.get("tilt_gate_enabled", False)))
@@ -1507,20 +1519,20 @@ class AdminScreen(ctk.CTkFrame):
             },
             "part_ready": {
                 "enabled": True,
-                "method": self.preset_part_ready_method_var.get(),
-                "gap_match_threshold": _float_or_default(self.preset_gap_threshold_var.get(), 0.85),
-                "gap_ref_path": self._get_existing_gap_ref_path(),
+                "method": "" if mode == "component_count" else self.preset_part_ready_method_var.get(),
+                "gap_match_threshold": _float_or_default(self.preset_gap_threshold_var.get(), 0.85) if mode != "component_count" else 0.85,
+                "gap_ref_path": self._get_existing_gap_ref_path() if mode != "component_count" else None,
                 "stable_ms": 500,
                 "release_ms": 300,
-                "mean_max": _float_or_default(self.preset_mean_max_var.get(), 105.0),
-                "std_max": _float_or_default(self.preset_std_max_var.get(), 35.0),
-                "min_match_ratio": _float_or_default(self.preset_min_match_ratio_var.get(), 0.5),
+                "mean_max": _float_or_default(self.preset_mean_max_var.get(), 105.0) if mode != "component_count" else 105.0,
+                "std_max": _float_or_default(self.preset_std_max_var.get(), 35.0) if mode != "component_count" else 35.0,
+                "min_match_ratio": _float_or_default(self.preset_min_match_ratio_var.get(), 0.5) if mode != "component_count" else 0.5,
             },
             "sticker": {
                 "part_name": expected_class,
                 "expected_class": expected_class,
                 "enabled": True,
-                "validator_mode": "ml_detection",
+                "validator_mode": mode if mode == "component_count" else "ml_detection",
                 "min_roi_confidence": 0.0,
                 "min_class_confidence": None,
                 "max_offset_x": 80,

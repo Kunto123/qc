@@ -266,6 +266,30 @@ class ApiClient:
             payload["response_mode"] = str(response_mode).strip()
         return self._post(f"/inspection/sessions/{session_id}/frame", payload)
 
+    def push_frame_local(
+        self,
+        session_id: str,
+        frame,
+        *,
+        username: str | None = None,
+        user_id: int | None = None,
+        response_mode: str | None = None,
+    ) -> dict:
+        """Local-mode fast path: call process_frame_decoded directly, bypassing encode/HTTP.
+
+        Only valid when _local_mode is True. Falls back to push_frame (with re-encode)
+        if something goes wrong importing the backend service.
+        """
+        from backend.app.core.container import inspection_session_service
+
+        return inspection_session_service.process_frame_decoded(
+            session_id,
+            frame=frame,
+            response_mode=response_mode,
+            username=username,
+            user_id=user_id,
+        )
+
     def list_inspections(self, params: dict | None = None) -> list[dict]:
         return self._get("/inspections", params)
 

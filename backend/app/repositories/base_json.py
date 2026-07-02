@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -30,10 +32,27 @@ class JsonRepository:
     def save(self, data: Any) -> None:
         with self._lock:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(
-                json.dumps(data, ensure_ascii=True, indent=2),
-                encoding="utf-8",
+            # Atomic write: write to temp file in same dir, then os.replace.
+            # Prevents corruption on crash/power-loss mid-write.
+            content = json.dumps(data, ensure_ascii=True, indent=2)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=self._path.name + ".",
+                suffix=".tmp",
+                dir=str(self._path.parent),
             )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+                    fh.flush()
+                    os.fsync(fd)
+                os.replace(tmp_path, self._path)
+            except BaseException:
+                # Clean up temp file on failure
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
 
     def _clone_default(self) -> Any:
         return json.loads(json.dumps(self._default_data))

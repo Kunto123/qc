@@ -38,10 +38,21 @@ def _build_strategy(
     adapter: "PlcAdapter",
     settings,  # MachineSettings
     num_channels: int = 4,
+    dry_run: bool = False,
 ) -> PlcFlowStrategy:
-    """Factory: select strategy based on validator_mode."""
+    """Factory: select strategy based on validator_mode.
+
+    Item 4: CounterFlow is a stub — fail-loud when used with live PLC.
+    Only allowed in dry-run mode.
+    """
     mode = (validator_mode or "sticker").strip().lower()
     if mode == "component_count":
+        if not dry_run:
+            raise RuntimeError(
+                "component_count mode requires a PLC flow strategy (CounterFlow), "
+                "which is currently a stub. Either enable dry_run or implement "
+                "CounterFlow in services/counter_flow.py."
+            )
         return CounterFlow(adapter, settings.counter, num_channels)
     # Default: sticker mode
     return StickerFlow(adapter, settings.sticker, num_channels)
@@ -111,9 +122,17 @@ class PlcWorker:
         self._last_template_cycle_at: float | None = None
         self._last_input_snapshot: list[bool] = []
 
+        # Item 1: current decision event_id for actuation callback
+        self._current_decision_event_id: str | None = None
+
+        # Health tracking for commit interlock (Item 1)
+        self._last_poll_ok_at: float = 0.0
+        self._last_write_ok_at: float = 0.0
+
         # Callbacks
         self._template_cycle_callback = None
         self._on_state_change_callback = None
+        self._on_actuation_result_callback = None  # Item 1: actuation ACK/NACK
 
     # ── Strategy setup ───────────────────────────────────────────────
 
@@ -130,7 +149,7 @@ class PlcWorker:
         """
         if settings is not None:
             self._strategy = _build_strategy(
-                mode, self._adapter, settings, self._num_channels
+                mode, self._adapter, settings, self._num_channels, self._dry_run
             )
             logger.info(
                 "[plc-worker] strategy built from MachineSettings: %s",
@@ -140,6 +159,13 @@ class PlcWorker:
             # Legacy fallback — build from constructor args
             from backend.app.models.machine_settings import StickerModeConfig, CounterModeConfig
             if mode == "component_count":
+                # Item 4: CounterFlow is a stub — fail-loud on live PLC (allow only dry-run).
+                if not self._dry_run:
+                    raise RuntimeError(
+                        "component_count mode requires a PLC flow strategy (CounterFlow), "
+                        "which is currently a stub. Either enable dry_run or implement "
+                        "CounterFlow in services/counter_flow.py."
+                    )
                 cfg = CounterModeConfig(
                     relay_clamp_address=self._relay_clamp,
                     relay_ok_light_buzzer_address=self._relay_ok_light_buzzer,
@@ -214,6 +240,14 @@ class PlcWorker:
     def set_on_state_change_callback(self, callback) -> None:
         self._on_state_change_callback = callback
 
+    def set_on_actuation_result_callback(self, callback) -> None:
+        """Item 1: set callback for actuation ACK/NACK.
+
+        Callback signature: cb(event_id: str, decision: str, ok: bool, reason: str = "")
+        Called after _on_accept/_on_reject completes (ok=True) or fails (ok=False).
+        """
+        self._on_actuation_result_callback = callback
+
     def configure_guards(
         self,
         *,
@@ -249,8 +283,30 @@ class PlcWorker:
                 "cycle_locked": self._cycle_locked,
                 "cycle_lock_reason": self._cycle_lock_reason,
                 "dry_run": self._dry_run,
+                "last_poll_ok_at": self._last_poll_ok_at,
+                "last_write_ok_at": self._last_write_ok_at,
                 **self._adapter.status(),
             }
+
+    def is_healthy(self, max_stale_ms: int = 5000) -> bool:
+        """Return True if PLC has been polled successfully within max_stale_ms.
+
+        Used by inspection_session as a commit interlock: if the PLC link is
+        stale/disconnected, commits are blocked to prevent persisting results
+        while no relay can fire.
+        """
+        import time
+        if self._thread is None or not self._thread.is_alive():
+            return False
+        if self._dry_run:
+            return True  # dry-run doesn't need live PLC
+        if not self._adapter.is_connected():
+            return False
+        last_ok = self._last_poll_ok_at
+        if last_ok <= 0:
+            return False  # never successfully polled
+        age_ms = (time.monotonic() - last_ok) * 1000.0
+        return age_ms <= float(max_stale_ms)
 
     def clamp_engaged(self) -> bool:
         with self._lock:
@@ -315,6 +371,7 @@ class PlcWorker:
         for attempt in range(1, max_retries + 1):
             try:
                 self._adapter.write_coil(addr, value)
+                self._last_write_ok_at = time.monotonic()  # Item 1: track successful write
                 return
             except Exception as exc:
                 logger.error("[plc-worker] write_coil addr=%d attempt %d failed: %s", addr, attempt, exc)
@@ -336,16 +393,44 @@ class PlcWorker:
     # ── ACCEPT / REJECT (delegated to strategy when available) ───────
 
     def _on_accept(self) -> None:
-        if self._strategy is not None:
-            self._strategy.on_accept(self)
-            self._set_state("ACCEPT_PULSE")
-        else:
-            # Legacy hardcoded fallback
-            self._set_state("ACCEPT_PULSE")
-            self._write_coil(self._relay_clamp, False)
-            self._write_coil(self._relay_ok_light_buzzer, True)
-            self._accept_pulse_end = time.time() + (self._accept_pulse_ms / 1000.0)
-            logger.info("[plc-worker] ACCEPT — CH1 pulse %dms (legacy)", self._accept_pulse_ms)
+        _event_id = self._current_decision_event_id
+        _decision = "ACCEPT"
+        try:
+            if self._strategy is not None:
+                self._strategy.on_accept(self)
+                self._set_state("ACCEPT_PULSE")
+            else:
+                # Legacy hardcoded fallback
+                self._set_state("ACCEPT_PULSE")
+                self._write_coil(self._relay_clamp, False)
+                self._write_coil(self._relay_ok_light_buzzer, True)
+                self._accept_pulse_end = time.time() + (self._accept_pulse_ms / 1000.0)
+                logger.info("[plc-worker] ACCEPT — CH1 pulse %dms (legacy)", self._accept_pulse_ms)
+            # Item 1: actuation ACK
+            self._fire_actuation_result(_event_id, _decision, True)
+        except Exception as exc:
+            logger.error("[plc-worker] ACCEPT actuation failed: %s", exc)
+            self._enter_plc_fault(f"accept_failed: {exc}")
+            self._fire_actuation_result(_event_id, _decision, False, str(exc))
+
+    def _on_reject(self) -> None:
+        _event_id = self._current_decision_event_id
+        _decision = "REJECT"
+        try:
+            if self._strategy is not None:
+                self._strategy.on_reject(self)
+                self._set_state("REJECT_BUZZER")
+            else:
+                self._set_state("REJECT_BUZZER")
+                self._write_coil(self._relay_enji_buzzer, True)
+                self._write_coil(self._relay_clamp, True)
+                logger.info("[plc-worker] REJECT — CH2 ON, waiting Input 1 (legacy)")
+            # Item 1: actuation ACK
+            self._fire_actuation_result(_event_id, _decision, True)
+        except Exception as exc:
+            logger.error("[plc-worker] REJECT actuation failed: %s", exc)
+            self._enter_plc_fault(f"reject_failed: {exc}")
+            self._fire_actuation_result(_event_id, _decision, False, str(exc))
 
     def _finish_accept_pulse(self) -> None:
         if self._strategy is not None and isinstance(self._strategy, StickerFlow):
@@ -356,16 +441,6 @@ class PlcWorker:
         self._last_clamp_off_at = time.time()
         self._set_state("IDLE")
         logger.info("[plc-worker] ACCEPT done → IDLE")
-
-    def _on_reject(self) -> None:
-        if self._strategy is not None:
-            self._strategy.on_reject(self)
-            self._set_state("REJECT_BUZZER")
-        else:
-            self._set_state("REJECT_BUZZER")
-            self._write_coil(self._relay_enji_buzzer, True)
-            self._write_coil(self._relay_clamp, True)
-            logger.info("[plc-worker] REJECT — CH2 ON, waiting Input 1 (legacy)")
 
     # ── Command handlers ─────────────────────────────────────────────
 
@@ -420,9 +495,18 @@ class PlcWorker:
 
     def _cmd_decision(self, cmd: dict) -> None:
         decision = cmd.get("decision")
+        event_id = cmd.get("event_id")
         with self._lock:
             if self._state not in {"CLAMPING", "CLAMPED"}:
+                # Item 1: don't silently drop — log and fire NACK callback
+                logger.warning(
+                    "[plc-worker] decision '%s' dropped — state=%s (not CLAMPING/CLAMPED)",
+                    decision, self._state,
+                )
+                self._fire_actuation_result(event_id, decision or "?", False, f"wrong_state:{self._state}")
                 return
+        # Store event_id for the actuation callback
+        self._current_decision_event_id = event_id
         if decision == "ACCEPT":
             self._on_accept()
         elif decision == "REJECT":
@@ -430,6 +514,29 @@ class PlcWorker:
 
     def _cmd_force_release(self, cmd: dict) -> None:
         self._all_off(cmd.get("reason", "manual"))
+
+    # ── Item 1: FAULT state + actuation callback ─────────────────────
+
+    def _enter_plc_fault(self, reason: str) -> None:
+        """Transition to FAULT state: lock cycle, drive fault output."""
+        with self._lock:
+            self._cycle_locked = True
+            self._cycle_lock_reason = f"plc_fault:{reason}"
+        self._set_state("FAULT")
+        # Drive fault output (enji buzzer relay) if reachable
+        try:
+            self._write_coil(self._relay_enji_buzzer, True)
+        except Exception:
+            pass  # best-effort; already in fault
+        logger.error("[plc-worker] FAULT state entered: %s", reason)
+
+    def _fire_actuation_result(self, event_id: str | None, decision: str, ok: bool, reason: str = "") -> None:
+        """Item 1: notify caller of actuation result (ACK/NACK)."""
+        if self._on_actuation_result_callback is not None:
+            try:
+                self._on_actuation_result_callback(event_id, decision, ok, reason)
+            except Exception as exc:
+                logger.error("[plc-worker] actuation result callback error: %s", exc)
 
     # ── Main loop ────────────────────────────────────────────────────
 
@@ -465,6 +572,12 @@ class PlcWorker:
         except Exception as exc:
             logger.warning("[plc-worker] read_inputs error: %s — attempting reconnect", exc)
             try:
+                # Force full disconnect first so the adapter actually reopens
+                # the serial port (connect() early-returns if _connected=True).
+                self._adapter.disconnect()
+            except Exception as disconnect_exc:
+                logger.warning("[plc-worker] disconnect before reconnect failed: %s", disconnect_exc)
+            try:
                 self._adapter.connect()
                 logger.info("[plc-worker] reconnect successful after read error")
             except Exception as reconnect_exc:
@@ -476,6 +589,8 @@ class PlcWorker:
         now = time.time()
         with self._lock:
             self._last_input_snapshot = list(inputs[:_INPUT_READ_COUNT])
+        # Track successful poll for commit interlock health check
+        self._last_poll_ok_at = time.monotonic()
 
         # Input release (IN1) — edge triggered + stable debounce
         _release_addr = self._input_release_address

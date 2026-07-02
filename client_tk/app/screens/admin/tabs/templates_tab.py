@@ -76,6 +76,7 @@ class TemplatesTab:
                 ("id", "ID", 55, "center"),
                 ("preset", "Preset", 220, "w"),
                 ("version", "Version", 80, "center"),
+                ("mode", "Mode", 110, "center"),
                 ("status", "Status", 90, "center"),
             ],
             row=2,
@@ -166,7 +167,8 @@ class TemplatesTab:
                 pass
 
         # Part-ready method selector
-        ttk.Label(wizard, text="Part Ready Method").grid(row=12, column=0, sticky="w", padx=(12, 8), pady=5)
+        _pr_label = ttk.Label(wizard, text="Part Ready Method")
+        _pr_label.grid(row=12, column=0, sticky="w", padx=(12, 8), pady=5)
         a.preset_part_ready_method_var = tk.StringVar(value="gap_template_match")
         method_combo = ttk.Combobox(
             wizard,
@@ -179,6 +181,8 @@ class TemplatesTab:
         a.preset_part_ready_method_var.trace_add("write", lambda *_: self._on_part_ready_method_changed(a))
         a.preset_part_ready_method_var.trace_add("write", lambda *_: self._on_method_or_mode_changed(a))
         a.preset_validator_mode_var.trace_add("write", lambda *_: self._on_method_or_mode_changed(a))
+        # Save widgets for hide/show in component_count mode
+        a._part_ready_method_widgets = [_pr_label, method_combo]
         # Mean-Std threshold fields (shown only when method=mean_std_threshold)
         a._mean_std_fields_start = 13
         a._entry(wizard, 13, 0, "MEAN_MAX", a.preset_mean_max_var, columnspan=2)
@@ -283,6 +287,10 @@ class TemplatesTab:
             a._calib_mean_std_frame.grid()
         else:
             a._calib_mean_std_frame.grid_remove()
+        # Hide Part Ready Method selector in component_count mode
+        _is_component = (a.preset_validator_mode_var.get() == "component_count")
+        for w in getattr(a, "_part_ready_method_widgets", []):
+            w.grid_remove() if _is_component else w.grid()
 
     def _on_part_ready_method_changed(self, a) -> None:
         """Show/hide mean-std threshold fields based on part ready method."""
@@ -310,14 +318,15 @@ class TemplatesTab:
     def _on_mode_changed(self, a) -> None:
         """Show/hide fields based on validation mode."""
         mode = a.preset_validator_mode_var.get()
-        # Show/hide sticker fields
+        _is_component = (mode == "component_count")
+        # Show/hide sticker fields (Expected Class, Max Tilt, Tilt Gate, Gap Threshold)
         for w in getattr(a, "_sticker_field_widgets", []):
-            if mode == "component_count":
+            if _is_component:
                 w.grid_remove()
             else:
                 w.grid()
         # Show/hide component editor
-        if mode == "component_count":
+        if _is_component:
             a._comp_editor_frame.grid()
             a._add_comp_roi_btn.grid()
         else:
@@ -325,19 +334,26 @@ class TemplatesTab:
             a._add_comp_roi_btn.grid_remove()
         # Show/hide sticker and part-ready ROI on canvas based on mode
         if hasattr(a, "preset_roi_picker"):
-            a.preset_roi_picker.set_sticker_visible(mode != "component_count")
-            a.preset_roi_picker.set_part_ready_visible(mode != "component_count")
+            a.preset_roi_picker.set_sticker_visible(not _is_component)
+            a.preset_roi_picker.set_part_ready_visible(not _is_component)
         # ROI picker panel stays visible in both modes (used for component ROIs in counter mode)
         # But update its selector to show component ROIs vs sticker/part-ready ROIs
         self._update_roi_selector_dropdown(a)
-        # Show/hide part ready reference buttons and mean-std fields
-        # In component_count mode, part ready = Modbus sensor only -- hide all
-        self._on_part_ready_method_changed(a)
-        _is_component = (mode == "component_count")
-        for w in getattr(a, "_part_ready_ref_widgets", []):
+        # In component_count mode, part ready = Modbus sensor only -- hide ALL part ready config
+        # This includes: Part Ready Method selector, gap threshold, mean-std fields, reference buttons, calibration
+        for w in getattr(a, "_part_ready_method_widgets", []):
+            w.grid_remove() if _is_component else w.grid()
+        for w in getattr(a, "_gap_threshold_widgets", []):
             w.grid_remove() if _is_component else w.grid()
         for w in getattr(a, "_mean_std_field_widgets", []):
             w.grid_remove() if _is_component else w.grid()
+        for w in getattr(a, "_part_ready_ref_widgets", []):
+            w.grid_remove() if _is_component else w.grid()
+        if _is_component:
+            a._calib_mean_std_frame.grid_remove()
+        else:
+            # In sticker mode, let _on_method_or_mode_changed handle calibration visibility
+            self._on_method_or_mode_changed(a)
 
     # ------------------------------------------------------------------
     # ROI Picker

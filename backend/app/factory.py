@@ -22,8 +22,21 @@ logger = logging.getLogger(__name__)
 
 def create_app() -> Flask:
     ensure_data_dirs()
-    app = Flask(__name__)
     config = AppConfig()
+    # P3-8: Refuse to start in production with default secret key
+    _default_secret = "qc-suite-dev-secret"
+    if config.secret_key == _default_secret:
+        if config.environment.lower() == "prod":
+            raise RuntimeError(
+                "Refusing to start in production with default secret_key. "
+                "Set QC_SUITE_SECRET_KEY env var."
+            )
+        else:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Using default secret_key — OK for dev, but set QC_SUITE_SECRET_KEY for production."
+            )
+    app = Flask(__name__)
     app.config["QC_SUITE"] = config
     configure_logging(app)
     app.register_blueprint(auth_blueprint)

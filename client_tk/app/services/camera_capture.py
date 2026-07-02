@@ -22,6 +22,10 @@ class CameraCaptureService:
         self._disconnect_notified = False
         self._status_callback = None
         self._epoch = 0  # generation token — incremented on each start()
+        # Transient-drop tolerance: allow N brief retries before declaring disconnect
+        self._max_consecutive_failures = int(os.getenv("QC_SUITE_CAMERA_MAX_CONSECUTIVE_FAILURES", "5"))
+        self._transient_retry_delay_s = float(os.getenv("QC_SUITE_CAMERA_TRANSIENT_RETRY_S", "0.1"))
+        self._consecutive_fail = 0
 
     def set_status_callback(self, callback) -> None:
         """Set callback for status updates: 'connected', 'reconnecting', 'error'."""
@@ -49,6 +53,7 @@ class CameraCaptureService:
         self._reconnecting = False
         self._disconnect_notified = False
         self._last_frame_before_disconnect = None
+        self._consecutive_fail = 0
         self._open_camera(width, height, fps)
         self._running = True
         self._thread = threading.Thread(
@@ -156,8 +161,15 @@ class CameraCaptureService:
             if ok and frame is not None:
                 with self._lock:
                     self._frame = frame
+                    self._consecutive_fail = 0  # reset on good frame
             else:
-                # Frame read failed — camera may have disconnected
+                # Frame read failed — could be transient (MSMF bandwidth) or real disconnect
+                self._consecutive_fail += 1
+                if self._consecutive_fail < self._max_consecutive_failures:
+                    # Transient drop: brief retry without releasing camera
+                    time.sleep(self._transient_retry_delay_s)
+                    continue
+                # Exceeded tolerance — treat as real disconnect
                 with self._lock:
                     if self._epoch != my_epoch or not self._running:
                         return
@@ -175,6 +187,7 @@ class CameraCaptureService:
                     if self._epoch != my_epoch or not self._running:
                         return
                     self._capture = None
+                    self._consecutive_fail = 0
                 time.sleep(self._reconnect_interval_s)
 
     def get_latest_frame(self):

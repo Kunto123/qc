@@ -81,6 +81,8 @@ class InspectionResult:
     part_ready_roi_meta: dict[str, Any] | None = None
     sticker_roi_meta: dict[str, Any] | None = None
     targets: list[dict[str, Any]] = field(default_factory=list)
+    actuation_status: str | None = None
+    actuation_error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)

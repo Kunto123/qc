@@ -127,6 +127,7 @@ class SessionState:
     part_absent_started_at: datetime | None = None
     # ── Component Count Mode ──
     component_count_history: list = field(default_factory=list)
+    consecutive_component_ok: int = 0
     # ── Logo Anti-Reclamp ──
     expected_logo_edge: object = None  # np.ndarray | None
     # ── Inference Result Cache for Hand-Obstruction Handling ──

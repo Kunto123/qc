@@ -209,8 +209,11 @@ class ResultPanel(ctk.CTkFrame):
         if _policy:
             _action = _policy.get("action", "-")
             _pending_r = _policy.get("pending_reason", "")
+            _plc_fault = _policy.get("plc_fault", False)
             _policy_text = f"{_action}"
-            if _pending_r and _action == "pending":
+            if _plc_fault:
+                _policy_text = "PLC FAULT — COMMIT BLOCKED"
+            elif _pending_r and _action == "pending":
                 _policy_text = f"WAITING: {_pending_r}"
         else:
             _policy_text = "-"

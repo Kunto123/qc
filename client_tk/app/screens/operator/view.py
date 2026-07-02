@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os as _os
 import platform
 import threading
 from time import monotonic, time
@@ -1656,25 +1657,44 @@ class OperatorScreen(ctk.CTkFrame):
                     _time.sleep(0.05)
                     continue
 
-                # Encode frame ke PNG
-                t0 = _time.perf_counter()
-                ok, buffer = _cv2.imencode(".png", frame)
-                encode_ms = (_time.perf_counter() - t0) * 1000.0
-                if not ok:
-                    raise RuntimeError("Failed to encode frame.")
-                t0 = _time.perf_counter()
-                image_b64 = _base64.b64encode(buffer).decode("ascii")
-                b64_ms = (_time.perf_counter() - t0) * 1000.0
-
                 # Upload ke backend
                 active_session = self.state.active_session
                 if active_session and active_session.get("session_id") == session_id:
+                    _username = self.state.user.get("username") if self.state.user else None
+                    _user_id = self.state.user.get("id") if self.state.user else None
                     t0 = _time.perf_counter()
-                    result = self.api.push_frame(
-                        session_id,
-                        image_b64,
-                        response_mode="stream",
-                    )
+                    if self.api._local_mode:
+                        # Fast path: skip encode/base64/HTTP entirely for in-process backend
+                        result = self.api.push_frame_local(
+                            session_id,
+                            frame,
+                            username=_username,
+                            user_id=_user_id,
+                            response_mode="stream",
+                        )
+                        encode_ms = 0.0
+                        b64_ms = 0.0
+                        buffer = None
+                    else:
+                        # Remote path: encode → base64 → HTTP POST
+                        _jpeg_quality = int(_os.getenv("QC_SUITE_JPEG_QUALITY", "85"))
+                        _use_jpeg = int(_os.getenv("QC_SUITE_USE_JPEG", "1"))
+                        t_enc = _time.perf_counter()
+                        if _use_jpeg:
+                            ok, buffer = _cv2.imencode(".jpg", frame, [_cv2.IMWRITE_JPEG_QUALITY, _jpeg_quality])
+                        else:
+                            ok, buffer = _cv2.imencode(".png", frame)
+                        encode_ms = (_time.perf_counter() - t_enc) * 1000.0
+                        if not ok:
+                            raise RuntimeError("Failed to encode frame.")
+                        t_b64 = _time.perf_counter()
+                        image_b64 = _base64.b64encode(buffer).decode("ascii")
+                        b64_ms = (_time.perf_counter() - t_b64) * 1000.0
+                        result = self.api.push_frame(
+                            session_id,
+                            image_b64,
+                            response_mode="stream",
+                        )
                     request_ms = (_time.perf_counter() - t0) * 1000.0
                     if isinstance(result, dict):
                         result.setdefault(
@@ -1686,8 +1706,8 @@ class OperatorScreen(ctk.CTkFrame):
                                 "request_ms": round(request_ms, 2),
                                 "frame_width": frame.shape[1],
                                 "frame_height": frame.shape[0],
-                                "jpeg_quality": 75,
-                                "payload_bytes": int(len(buffer)),
+                                "jpeg_quality": 0 if self.api._local_mode else int(_os.getenv("QC_SUITE_JPEG_QUALITY", "85")),
+                                "payload_bytes": int(len(buffer)) if buffer is not None else 0,
                             },
                         )
                     if result and self._inference_running and (self.state.active_session or {}).get("session_id") == session_id:
@@ -2089,7 +2109,7 @@ class OperatorScreen(ctk.CTkFrame):
         clamp_engaged = status.get("clamp_engaged", False)
         plc_state = str(status.get("state") or "").strip().upper()
         if not connected:
-            self._set_badge("PLC", "DISCONN", "warning")
+            self._set_badge("PLC", "DISCONN", "danger")
         elif clamp_engaged or plc_state == "CLAMPED":
             self._set_badge("PLC", "ENGAGED", "warning")
         elif plc_state == "CLAMPING":
