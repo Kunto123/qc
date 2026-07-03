@@ -63,6 +63,37 @@ def _draw_text_bg(overlay: np.ndarray, pos: tuple[int, int], text: str,
     overlay = cv2.putText(overlay, text, (x, y),
                           cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
     return overlay
+
+
+_ASCII_REPLACE = str.maketrans({
+    "∞": "1+",   # infinity -> 1+
+    "─": "-",    # box-draw horizontal -> -
+    "—": "-",     # em dash -> -
+    "–": "-",     # en dash -> -
+    "≥": ">=",    # greater-or-equal -> >=
+    "→": "->", # right arrow -> ->
+})
+
+def _ascii_safe(text: str) -> str:
+    """Replace non-ASCII characters with ASCII equivalents for OpenCV overlay."""
+    return str(text).translate(_ASCII_REPLACE)
+
+
+def _draw_overlay_roi_rect(overlay: np.ndarray, x: int, y: int,
+                            w: int, h: int, rotation: float,
+                            color, label: str = "") -> None:
+    """Draw ROI rectangle (supporting rotation) on overlay frame."""
+    if abs(rotation) > 0.1:
+        corners = _overlay_rotated_corners(x, y, w, h, rotation)
+        pts = np.array(corners, dtype=np.int32).reshape((-1, 1, 2))
+        cv2.polylines(overlay, [pts], True, color, 2, cv2.LINE_AA)
+    else:
+        cv2.rectangle(overlay, (x, y), (x + w, y + h), color, 2, cv2.LINE_AA)
+    if label:
+        cv2.putText(overlay, label, (x + 4, max(y + 18, 0) + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+
+
 AUTO_START_FRAME_WAIT_MS = 150
 AUTO_START_MAX_ATTEMPTS = 40
 
@@ -1129,45 +1160,100 @@ class OperatorScreen(ctk.CTkFrame):
         """Render component counter ROI results on the overlay."""
         rois = validation_details.get("rois", [])
         fh, fw = frame.shape[:2]
-        y_offset = 90
-        # Semi-transparent background for readability
-        overlay = _draw_text_bg(overlay, (12, y_offset - 12), "─── MODE: COUNTER ───", font_scale=0.5, color=(200, 200, 255))
+
+        # Draw ROI rectangles and per-ROI labels on the frame
         for roi in rois:
-            name = roi.get("name", "ROI")
+            roi_geom = roi.get("roi") or {}
+            if not roi_geom:
+                continue
+            rx = int(float(roi_geom.get("x", 0.0)) * fw)
+            ry = int(float(roi_geom.get("y", 0.0)) * fh)
+            rw = max(1, int(float(roi_geom.get("w", 1.0)) * fw))
+            rh = max(1, int(float(roi_geom.get("h", 1.0)) * fh))
+            rot = float(roi_geom.get("rotation", 0.0))
             ok = roi.get("ok", False)
             color = (0, 200, 0) if ok else (0, 0, 220)
-            total = roi.get("total_detected", 0)
+
+            # Draw the rectangle (support rotation)
+            _draw_overlay_roi_rect(overlay, rx, ry, rw, rh, rot, color)
+
+            # Build compact label near ROI
+            name = roi.get("name", "ROI")
             classes = roi.get("classes", {})
-            # Draw a summary badge (no geometry available — just text)
-            y_offset += 22
             cls_parts = []
             for cn, cr in classes.items():
                 det = cr.get("detected", 0)
                 mn = cr.get("min", "?")
                 _mx = cr.get("max")
-                mx = str(_mx) if _mx is not None else "∞"
-                cls_parts.append(f"{cn}:{det}(mn {mn}, maks {mx})")
-            roi_text = f"{'OK' if ok else 'NG'} {name}: {' | '.join(cls_parts)}"
-            overlay = _draw_text_bg(overlay, (12, y_offset), roi_text,
-                                      font_scale=0.45, color=color)
-            cv2.putText(overlay, f"  {name}: {'OK' if ok else 'NG'} total={total} {'; '.join(cls_parts)}",
-                        (12, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+                mx = f"{mn}+" if _mx is None else str(_mx)  # 1+ for unlimited
+                cls_parts.append(f"{cn}:{det}/{mx}")
+            label = _ascii_safe(f"{'OK' if ok else 'NG'} {name} | {' '.join(cls_parts)}")
+            overlay = _draw_text_bg(overlay, (rx + 4, max(ry, 0) + 16), label,
+                                      font_scale=0.4, color=color)
+
+        # Compact summary in top-left corner
+        y_offset = 30
+        overlay = _draw_text_bg(overlay, (12, y_offset), "MODE: COUNTER (summary)",
+                                  font_scale=0.5, color=(200, 200, 255))
+        for roi in rois:
+            y_offset += 22
+            name = roi.get("name", "ROI")
+            ok = roi.get("ok", False)
+            color = (0, 200, 0) if ok else (0, 0, 220)
+            classes = roi.get("classes", {})
+            cls_parts = []
+            for cn, cr in classes.items():
+                det = cr.get("detected", 0)
+                _mx = cr.get("max")
+                mx = f"{cr.get('min', '?')}+" if _mx is None else str(_mx)
+                cls_parts.append(f"{cn}:{det}/{mx}")
+            summary = _ascii_safe(f"{'OK' if ok else 'NG'} {name} | {' '.join(cls_parts)}")
+            overlay = _draw_text_bg(overlay, (12, y_offset), summary, font_scale=0.4, color=color)
 
     def _render_defect_overlay(self, overlay, frame, validation_details: dict) -> None:
         """Render defect scan ROI results on the overlay."""
         rois = validation_details.get("rois", [])
-        y_offset = 90
-        cv2.putText(overlay, "MODE: DEFECT", (12, y_offset),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 255), 1, cv2.LINE_AA)
+        fh, fw = frame.shape[:2]
+
+        # Draw ROI rectangles and per-ROI labels on the frame
         for roi in rois:
-            name = roi.get("name", "ROI")
+            roi_geom = roi.get("roi") or {}
+            if not roi_geom:
+                continue
+            rx = int(float(roi_geom.get("x", 0.0)) * fw)
+            ry = int(float(roi_geom.get("y", 0.0)) * fh)
+            rw = max(1, int(float(roi_geom.get("w", 1.0)) * fw))
+            rh = max(1, int(float(roi_geom.get("h", 1.0)) * fh))
+            rot = float(roi_geom.get("rotation", 0.0))
             ok = roi.get("ok", False)
-            score = roi.get("score", 0.0)
+            score = roi.get("score")
             threshold = roi.get("threshold", 0.5)
             color = (0, 200, 0) if ok else (0, 0, 220)
+
+            # Draw the rectangle (support rotation)
+            _draw_overlay_roi_rect(overlay, rx, ry, rw, rh, rot, color)
+
+            # Build label near ROI
+            name = roi.get("name", "ROI")
+            score_str = f"{score:.3f}" if score is not None else "ERR"
+            label = _ascii_safe(f"{'OK' if ok else 'NG'} {name}: {score_str}/{threshold:.2f}")
+            overlay = _draw_text_bg(overlay, (rx + 4, max(ry, 0) + 16), label,
+                                      font_scale=0.4, color=color)
+
+        # Compact summary in top-left corner
+        y_offset = 30
+        overlay = _draw_text_bg(overlay, (12, y_offset), "MODE: DEFECT (summary)",
+                                  font_scale=0.5, color=(200, 200, 255))
+        for roi in rois:
             y_offset += 22
-            cv2.putText(overlay, f"  {name}: {'OK' if ok else 'NG'} score={score:.3f}/{threshold:.2f}",
-                        (12, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+            name = roi.get("name", "ROI")
+            ok = roi.get("ok", False)
+            score = roi.get("score")
+            threshold = roi.get("threshold", 0.5)
+            color = (0, 200, 0) if ok else (0, 0, 220)
+            score_str = f"{score:.3f}" if score is not None else "ERR"
+            summary = _ascii_safe(f"{'OK' if ok else 'NG'} {name}: {score_str}/{threshold:.2f}")
+            overlay = _draw_text_bg(overlay, (12, y_offset), summary, font_scale=0.4, color=color)
 
     def _render_roi_overlay(self, frame, payload: dict) -> None:
         """Render ROI overlay on the live frame using payload data.

@@ -83,6 +83,7 @@ class CounterEvaluator(ModeEvaluator):
                 "classes": class_results,
                 "total_detected": total_detected,
                 "foreign_classes": foreign_classes,
+                "roi": roi_rule.get("roi", {}),
             })
 
         consecutive_ok = getattr(ctx.state, "consecutive_component_ok", 0)

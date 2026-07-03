@@ -103,6 +103,32 @@ def is_mode(detail: dict, target: str) -> bool:
     return mode_from_template(detail) == normalize_mode(target)
 
 
+def format_range_widget(min_val, max_val):
+    """Format min/max for Tkinter (supports unicode). Never shows None."""
+    if min_val is not None and max_val is not None:
+        if min_val == max_val:
+            return str(min_val)
+        return f"{min_val}-{max_val}"
+    elif min_val is not None:
+        return f"min {min_val}"
+    elif max_val is not None:
+        return f"max {max_val}"
+    return "?"
+
+
+def format_range_overlay(min_val, max_val):
+    """Format min/max for OpenCV overlay (ASCII only). Never shows None."""
+    if min_val is not None and max_val is not None:
+        if min_val == max_val:
+            return str(min_val)
+        return f"{min_val}-{max_val}"
+    elif min_val is not None:
+        return f"{min_val}+"
+    elif max_val is not None:
+        return str(max_val)
+    return "?"
+
+
 def validator_mode_for_payload(mode_radio: str) -> str:
     """Map radio button value to the validator_mode string saved in sticker.validator_mode.
 

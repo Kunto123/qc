@@ -3410,7 +3410,7 @@ class InspectionSessionService:
                 class_results[cn] = {
                     "detected": detected,
                     "min": min_count,
-                    "max": max_count if max_count is not None else float("inf"),
+                    "max": max_count if max_count is not None else None,  # None = unlimited
                     "ok": ok,
                 }
                 if not ok:

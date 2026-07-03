@@ -172,6 +172,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_validator_mode_var = tk.StringVar(value="sticker")
         self.preset_component_rois: list = []
         self.preset_defect_rois: list = []
+        self.preset_defect_default_model_var = tk.StringVar()
         self._calib_empty_mean: float = 0.0
         self._calib_part_mean: float = 0.0
         self._calib_part_std: float = 0.0
@@ -1010,6 +1011,9 @@ class AdminScreen(ctk.CTkFrame):
         _crit = detail.get("criteria") or {}
         self.preset_component_rois = list(_crit.get("component_rois") or detail.get("component_rois") or [])
         self.preset_defect_rois = list(_crit.get("rois") or [])
+        self.preset_defect_default_model_var.set(str(_crit.get("default_model_path") or ""))
+        if hasattr(self, "_defect_infer_mode_var"):
+            self._defect_infer_mode_var.set(str(_crit.get("inference_mode", "whole_part")))
 
         # Sync component ROIs to the ROI picker canvas
         # Build ROI geometry dicts from the component ROI list
@@ -1539,9 +1543,10 @@ class AdminScreen(ctk.CTkFrame):
         model_path = self.preset_model_path_var.get().strip()
         if not name:
             raise ValueError("Preset name is required.")
-        if not model_path:
-            raise ValueError("Model is required.")
         mode = self.preset_validator_mode_var.get()
+        # Model path is not required for defect mode
+        if mode != "defect" and not model_path:
+            raise ValueError("Model is required.")
         if mode == "component_count" or mode == "defect":
             expected_class = expected_class or ""
         else:
@@ -1572,6 +1577,9 @@ class AdminScreen(ctk.CTkFrame):
         elif mode == "defect":
             _criteria = {
                 "rois": getattr(self, "preset_defect_rois", []),
+                "default_model_path": self.preset_defect_default_model_var.get().strip() or None,
+                "inference_mode": getattr(self, "_defect_infer_mode_var", tk.StringVar(value="whole_part")).get(),
+                "aggregation": "p99",
             }
 
         return {

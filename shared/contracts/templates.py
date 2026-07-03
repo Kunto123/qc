@@ -436,6 +436,9 @@ def validate_criteria(mode: str, criteria: dict[str, Any]) -> list[str]:
         rois = criteria.get("rois", [])
         if not rois:
             errors.append("defect: at least one ROI required")
+        _default_model = criteria.get("default_model_path", "")
+        if _default_model and not isinstance(_default_model, str):
+            errors.append("defect: default_model_path must be a string")
         for i, roi in enumerate(rois):
             name = roi.get("name", f"ROI {i}")
             if not roi.get("geometry"):
@@ -448,6 +451,9 @@ def validate_criteria(mode: str, criteria: dict[str, Any]) -> list[str]:
                         errors.append(f"defect: {name} threshold {t} out of range [0,1]")
                 except (TypeError, ValueError):
                     errors.append(f"defect: {name} threshold must be a float")
+            _roi_model = roi.get("model_path", "")
+            if _roi_model and not isinstance(_roi_model, str):
+                errors.append(f"defect: {name} model_path must be a string")
     else:
         errors.append(f"unknown mode: {mode!r}")
     return errors

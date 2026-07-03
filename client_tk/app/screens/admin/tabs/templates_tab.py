@@ -127,12 +127,15 @@ class TemplatesTab:
 
         a._entry(wizard, 5, 0, "Camera Index", a.preset_camera_index_var, columnspan=1)
 
+        track_widgets = []
         ttk.Label(wizard, text="Model").grid(row=6, column=0, sticky="w", padx=(12, 8), pady=5)
+        track_widgets.extend(wizard.grid_slaves(row=6))
         a.preset_model_selector = ttk.Combobox(wizard, textvariable=a.preset_model_choice_var, state="readonly")
         a.preset_model_selector.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(0, 12), pady=5)
         a.preset_model_selector.bind("<<ComboboxSelected>>", a._on_preset_model_selected)
 
         ttk.Label(wizard, text="Runtime").grid(row=7, column=0, sticky="w", padx=(12, 8), pady=5)
+        track_widgets.extend(wizard.grid_slaves(row=7))
         runtime_combo = ttk.Combobox(
             wizard,
             textvariable=a.preset_runtime_var,
@@ -141,8 +144,10 @@ class TemplatesTab:
             state="readonly",
         )
         runtime_combo.grid(row=7, column=1, columnspan=3, sticky="w", padx=(0, 12), pady=5)
-
+        # Track confidence threshold too (part of YOLO model config)
         a._entry(wizard, 8, 0, "Confidence Threshold", a.preset_conf_threshold_var, columnspan=3)
+        track_widgets.extend(wizard.grid_slaves(row=8))
+        a._model_selector_widgets = track_widgets
 
         # Mean-Std threshold variables (initialized lazily on first method change)
         a.preset_mean_max_var = tk.StringVar(value="105.0")
@@ -338,6 +343,9 @@ class TemplatesTab:
         # Show/hide defect editor
         if hasattr(a, "_defect_editor_frame"):
             a._defect_editor_frame.grid() if _is_defect else a._defect_editor_frame.grid_remove()
+        # Hide YOLO model selector in defect mode
+        for w in getattr(a, "_model_selector_widgets", []):
+            w.grid_remove() if _is_defect else w.grid()
         # Show/hide sticker and part-ready ROI on canvas based on mode
         if hasattr(a, "preset_roi_picker"):
             a.preset_roi_picker.set_sticker_visible(_is_sticker)
@@ -507,6 +515,24 @@ class TemplatesTab:
         header.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
         ctk.CTkLabel(header, text="Defect Scan ROIs", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).pack(side="left")
 
+        # Default anomaly model field (in header row, after title)
+        ctk.CTkLabel(header, text="Model Anomali (default):", font=("Segoe UI", 9), text_color=TEXT_PRIMARY).pack(side="left", padx=(12, 4))
+        a.preset_defect_default_model_entry = ctk.CTkEntry(header, textvariable=a.preset_defect_default_model_var, width=180, height=24)
+        a.preset_defect_default_model_entry.pack(side="left", padx=(0, 4))
+        ctk.CTkLabel(header, text="(kosong = scorer sederhana)", font=("Segoe UI", 9), text_color=TEXT_SECONDARY).pack(side="left", padx=(0, 8))
+
+        # Inference strategy selector
+        ctk.CTkLabel(header, text="Inferensi:", font=("Segoe UI", 9), text_color=TEXT_PRIMARY).pack(side="left", padx=(12, 4))
+        a._defect_infer_mode_var = tk.StringVar(value="whole_part")
+        _infer_combo = ctk.CTkComboBox(
+            header, variable=a._defect_infer_mode_var,
+            values=["whole_part", "per_roi_crop"],
+            width=130, height=24,
+            state="readonly",
+        )
+        _infer_combo.pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(header, text="Part utuh | Per-ROI", font=("Segoe UI", 9), text_color=TEXT_SECONDARY).pack(side="left", padx=(0, 8))
+
         # Add button
         ctk.CTkButton(
             header, text="+ Add Defect ROI", width=110, height=24,
@@ -563,10 +589,12 @@ class TemplatesTab:
         ctk.CTkEntry(row_frame, textvariable=thresh_var, width=60, height=24).grid(row=0, column=2, padx=2)
         thresh_var.trace_add("write", lambda *a2, idx=roi_idx, v=thresh_var: self._on_defect_threshold_changed(a, idx, v))
 
-        # Model path (optional)
-        ctk.CTkLabel(row_frame, text="Model:", font=("Segoe UI", 9), text_color=TEXT_PRIMARY).grid(row=0, column=3, sticky="w", padx=2)
+        # Override model path (optional)
+        ctk.CTkLabel(row_frame, text="Override:", font=("Segoe UI", 9), text_color=TEXT_PRIMARY).grid(row=0, column=3, sticky="w", padx=2)
         model_var = tk.StringVar(value=str(roi_data.get("model_path") or ""))
-        ctk.CTkEntry(row_frame, textvariable=model_var, width=150, height=24).grid(row=0, column=4, padx=2)
+        model_entry = ctk.CTkEntry(row_frame, textvariable=model_var, width=150, height=24)
+        model_entry.grid(row=0, column=4, padx=2)
+        model_entry.configure(placeholder_text="kosong = pakai default")
 
         # Remove button
         ctk.CTkButton(row_frame, text="✕", width=24, height=24, fg_color=BORDER, hover_color=ACCENT_HOVER,

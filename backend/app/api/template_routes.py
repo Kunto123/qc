@@ -296,25 +296,96 @@ def calibrate_defect_threshold(template_id: int):
     rois = criteria.get("rois", [])
     if not rois:
         return jsonify({"error": "Template has no defect ROIs configured"}), 400
-    results = []
-    for roi in rois:
-        name = roi.get("name", "ROI")
-        geom = roi.get("geometry", {})
-        fh, fw = frames[0].shape[:2]
-        x = int(float(geom.get("x", 0.0)) * fw)
-        y = int(float(geom.get("y", 0.0)) * fh)
-        w = max(1, int(float(geom.get("w", 1.0)) * fw))
-        h = max(1, int(float(geom.get("h", 1.0)) * fh))
-        x = max(0, min(fw - 1, x))
-        y = max(0, min(fh - 1, y))
-        w = min(fw - x, w)
-        h = min(fh - y, h)
-        crops = [fr[y:y+h, x:x+w] for fr in frames]
-        crops = [c for c in crops if c.size > 0]
-        if len(crops) < 3:
-            results.append({"name": name, "error": "Not enough valid crops"})
-            continue
-        scorer = SimpleAnomalyScorer()
-        calib_result = scorer.calibrate(crops)
-        results.append({"name": name, **calib_result})
-    return jsonify({"results": results}), 200
+    inference_mode = str(criteria.get("inference_mode", "whole_part")).strip().lower()
+    default_model = criteria.get("default_model_path")
+    fh, fw = frames[0].shape[:2]
+
+    if inference_mode == "whole_part" and not any(r.get("model_path") for r in rois):
+        # Whole-part calibration: single inference on union region, slice per ROI
+        from backend.app.services.evaluators.defect import _build_union_bbox, _parse_geometry, _aggregate_score
+        import logging
+        logger = logging.getLogger(__name__)
+
+        ux, uy, uw, uh = _build_union_bbox(rois, fw, fh)
+        if uw <= 0 or uh <= 0:
+            return jsonify({"error": "Union region is empty"}), 400
+
+        union_crops = [fr[uy:uy+uh, ux:ux+uw] for fr in frames]
+        union_crops = [c for c in union_crops if c.size > 0]
+        if len(union_crops) < 3:
+            return jsonify({"error": "Not enough valid union crops"}), 400
+
+        scorer = get_scorer(default_model)
+        # For each frame, score the union region once, then collect per-ROI slice scores
+        roi_scores: dict[str, list[float]] = {r.get("name", f"ROI {i}"): [] for i, r in enumerate(rois)}
+        for uc in union_crops:
+            try:
+                _, heatmap = scorer.score(uc)
+            except Exception as exc:
+                logger.warning("[calibrate] frame score failed: %s", exc)
+                continue
+            if heatmap is None or heatmap.size == 0:
+                continue
+            for i, roi in enumerate(rois):
+                name = roi.get("name", f"ROI {i}")
+                geom = roi.get("geometry", {})
+                rx, ry, rw, rh = _parse_geometry(geom, fw, fh)
+                # Map ROI coords to union coords
+                hs_y = max(0, ry - uy)
+                hs_x = max(0, rx - ux)
+                hs_h = min(rh, heatmap.shape[0] - hs_y) if heatmap is not None else 0
+                hs_w = min(rw, heatmap.shape[1] - hs_x) if heatmap is not None else 0
+                if hs_h <= 0 or hs_w <= 0:
+                    continue
+                slice_ = heatmap[hs_y:hs_y+hs_h, hs_x:hs_x+hs_w]
+                score = _aggregate_score(slice_, criteria.get("aggregation", "p99"))
+                roi_scores[name].append(score)
+
+        results = []
+        for i, roi in enumerate(rois):
+            name = roi.get("name", f"ROI {i}")
+            scores = roi_scores.get(name, [])
+            if len(scores) < 3:
+                results.append({"name": name, "error": f"Not enough valid scores ({len(scores)})"})
+                continue
+            import numpy as np
+            scores_arr = np.array(scores)
+            mean_score = float(scores_arr.mean())
+            std_score = float(scores_arr.std())
+            suggested_threshold = round(mean_score + 3.0 * std_score, 4)
+            results.append({
+                "name": name,
+                "threshold": round(suggested_threshold, 4),
+                "mean_score": round(mean_score, 4),
+                "std_score": round(std_score, 4),
+                "num_samples": len(scores),
+                "scores": [round(s, 4) for s in sorted(scores)],
+            })
+        logger.info(
+            "[calibrate] whole_part: %d ROIs calibrated from %d frames (union %dx%d)",
+            len(results), len(union_crops), uw, uh,
+        )
+        return jsonify({"results": results, "inference_mode": "whole_part"}), 200
+    else:
+        # Per-ROI crop calibration (legacy or override)
+        results = []
+        for roi in rois:
+            name = roi.get("name", "ROI")
+            geom = roi.get("geometry", {})
+            x = int(float(geom.get("x", 0.0)) * fw)
+            y = int(float(geom.get("y", 0.0)) * fh)
+            w = max(1, int(float(geom.get("w", 1.0)) * fw))
+            h = max(1, int(float(geom.get("h", 1.0)) * fh))
+            x = max(0, min(fw - 1, x))
+            y = max(0, min(fh - 1, y))
+            w = min(fw - x, w)
+            h = min(fh - y, h)
+            crops = [fr[y:y+h, x:x+w] for fr in frames]
+            crops = [c for c in crops if c.size > 0]
+            if len(crops) < 3:
+                results.append({"name": name, "error": "Not enough valid crops"})
+                continue
+            scorer = SimpleAnomalyScorer()
+            calib_result = scorer.calibrate(crops)
+            results.append({"name": name, **calib_result})
+        return jsonify({"results": results, "inference_mode": "per_roi_crop"}), 200
