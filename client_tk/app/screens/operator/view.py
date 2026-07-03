@@ -1003,74 +1003,94 @@ class OperatorScreen(ctk.CTkFrame):
         reject_reason = validation.get("reject_reason_code") or "OK"
         decision_color = (0, 180, 0) if decision == DecisionCode.ACCEPT.value else (0, 0, 220)
 
-        # Part ready ROI box (blue).
-        part_ready_box = self._resolve_roi_rect(
-            part_ready_roi,
-            disp_w,
-            disp_h,
-            source_width=int(sent_w) if sent_w else None,
-            source_height=int(sent_h) if sent_h else None,
-        )
-        if part_ready_box is not None:
-            px, py, pw, ph = part_ready_box
-            _pr_rot = float(part_ready_roi.get("rotation", 0.0) or 0.0)
-            if abs(_pr_rot) > 0.1:
-                import numpy as _np
-                _c = _overlay_rotated_corners(px, py, pw, ph, _pr_rot)
-                cv2.polylines(overlay, [_np.array(
-                    [_c[0], _c[1], _c[3], _c[2]], dtype="int32")],
-                    True, (50, 180, 255), 2, cv2.LINE_AA)
+        # Detect mode from validation details
+        validation_details = validation.get("validation_details") or {}
+        mode = validation_details.get("mode", "sticker")
+
+        # ── Mode-specific rendering ───────────────────────────────
+        if mode == "counter":
+            self._render_counter_overlay(overlay, frame, validation_details)
+        elif mode == "defect":
+            self._render_defect_overlay(overlay, frame, validation_details)
+        else:
+            # ── Sticker mode rendering (original) ────────────────
+            self._render_sticker_overlay(overlay, frame, payload,
+                                          sent_w, sent_h, disp_w, disp_h,
+                                          scale_x, scale_y, _stale_detections)
+        return overlay
+
+    # ── Mode-specific overlay renderers ─────────────────────────────────────
+
+    def _render_sticker_overlay(self, overlay, frame, payload,
+                                 sent_w, sent_h, disp_w, disp_h,
+                                 scale_x, scale_y, stale_detections) -> None:
+        """Render sticker detection (original): part_ready ROI, sticker ROI, bboxes."""
+        validation = payload.get("validation") or {}
+        part_ready = payload.get("part_ready") or {}
+        sticker_roi = payload.get("sticker_roi_meta") or {}
+        part_ready_roi = payload.get("part_ready_roi_meta") or {}
+        detections = payload.get("detections") or []
+        event_state = payload.get("event_state") or "idle"
+        decision = validation.get("decision")
+        reject_reason = validation.get("reject_reason_code") or "OK"
+        decision_color = (0, 180, 0) if decision == "ACCEPT" else (0, 0, 220)
+
+        if stale_detections and not detections:
+            detections = self._last_detections
+            age = monotonic() - self._last_detections_ts
+            if age >= self._detection_holdover_s:
+                detections = []
+
+        # Part ready ROI box (blue)
+        pr_box = self._resolve_roi_rect(part_ready_roi, disp_w, disp_h,
+                                          source_width=sent_w, source_height=sent_h)
+        if pr_box:
+            px, py, pw, ph = pr_box
+            _r = float(part_ready_roi.get("rotation", 0.0) or 0.0)
+            if abs(_r) > 0.1:
+                _c = _overlay_rotated_corners(px, py, pw, ph, _r)
+                cv2.polylines(overlay, [np.array([_c[0], _c[1], _c[3], _c[2]], dtype="int32")],
+                              True, (50, 180, 255), 2, cv2.LINE_AA)
             else:
                 cv2.rectangle(overlay, (px, py), (px + pw, py + ph), (50, 180, 255), 2)
 
-        # Sticker ROI box (yellow).
-        sticker_box = self._resolve_roi_rect(
-            sticker_roi,
-            disp_w,
-            disp_h,
-            source_width=int(sent_w) if sent_w else None,
-            source_height=int(sent_h) if sent_h else None,
-        )
+        # Sticker ROI box (yellow)
+        st_box = self._resolve_roi_rect(sticker_roi, disp_w, disp_h,
+                                          source_width=sent_w, source_height=sent_h)
         sx = sy = sw = sh = 0
-        if sticker_box is not None:
-            sx, sy, sw, sh = sticker_box
-            _st_rot = float(sticker_roi.get("rotation", 0.0) or 0.0)
-            if abs(_st_rot) > 0.1:
-                import numpy as _np
-                _c = _overlay_rotated_corners(sx, sy, sw, sh, _st_rot)
-                cv2.polylines(overlay, [_np.array(
-                    [_c[0], _c[1], _c[3], _c[2]], dtype="int32")],
-                    True, (255, 200, 0), 2, cv2.LINE_AA)
+        if st_box:
+            sx, sy, sw, sh = st_box
+            _r = float(sticker_roi.get("rotation", 0.0) or 0.0)
+            if abs(_r) > 0.1:
+                _c = _overlay_rotated_corners(sx, sy, sw, sh, _r)
+                cv2.polylines(overlay, [np.array([_c[0], _c[1], _c[3], _c[2]], dtype="int32")],
+                              True, (255, 200, 0), 2, cv2.LINE_AA)
             else:
                 cv2.rectangle(overlay, (sx, sy), (sx + sw, sy + sh), (255, 200, 0), 2)
 
-        # Detection bounding boxes (coordinates are relative to sticker ROI, in backend frame space).
+        # Detection bboxes
         for det in detections:
             pos = det.get("position") or {}
             x1 = int(sx + float(pos.get("x1", 0)) * scale_x)
             y1 = int(sy + float(pos.get("y1", 0)) * scale_y)
             x2 = int(sx + float(pos.get("x2", 0)) * scale_x)
             y2 = int(sy + float(pos.get("y2", 0)) * scale_y)
-            _bbox_color = (100, 180, 255) if _stale_detections else (0, 255, 255)  # biru-muda vs cyan
-            cv2.rectangle(overlay, (x1, y1), (x2, y2), _bbox_color, 2)
+            bc = (100, 180, 255) if stale_detections else (0, 255, 255)
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), bc, 2)
             lbl = str(det.get("label") or "")
             conf = float(det.get("confidence") or 0.0)
             cv2.putText(overlay, f"{lbl} {conf:.2f}", (x1, max(20, y1 - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
-        # Expected center crosshair.
+        # Crosshair
         if sw and sh:
-            template_detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
-            sticker_cfg = (template_detail or {}).get("sticker") or {}
-            cx_ratio = float(sticker_cfg.get("expected_center_x") or 0.5)
-            cy_ratio = float(sticker_cfg.get("expected_center_y") or 0.5)
-            exp_x = int(sx + cx_ratio * sw)
-            exp_y = int(sy + cy_ratio * sh)
+            tmpl = {}; cxr, cyr = 0.5, 0.5
+            exp_x, exp_y = int(sx + cxr * sw), int(sy + cyr * sh)
             arm = 18
             cv2.line(overlay, (exp_x - arm, exp_y), (exp_x + arm, exp_y), (0, 220, 255), 2, cv2.LINE_AA)
             cv2.line(overlay, (exp_x, exp_y - arm), (exp_x, exp_y + arm), (0, 220, 255), 2, cv2.LINE_AA)
 
-        # Decision and status text.
+        # Status text
         cv2.putText(overlay, f"{decision} / {reject_reason}", (12, 24),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, decision_color, 2, cv2.LINE_AA)
         pr_val = part_ready.get("part_ready")
@@ -1079,7 +1099,46 @@ class OperatorScreen(ctk.CTkFrame):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
         cv2.putText(overlay, f"state={event_state}", (12, 70),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-        return overlay
+
+    def _render_counter_overlay(self, overlay, frame, validation_details: dict) -> None:
+        """Render component counter ROI results on the overlay."""
+        rois = validation_details.get("rois", [])
+        fh, fw = frame.shape[:2]
+        y_offset = 90
+        cv2.putText(overlay, "MODE: COUNTER", (12, y_offset),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 255), 1, cv2.LINE_AA)
+        for roi in rois:
+            name = roi.get("name", "ROI")
+            ok = roi.get("ok", False)
+            color = (0, 200, 0) if ok else (0, 0, 220)
+            total = roi.get("total_detected", 0)
+            classes = roi.get("classes", {})
+            # Draw a summary badge (no geometry available — just text)
+            y_offset += 22
+            cls_parts = []
+            for cn, cr in classes.items():
+                det = cr.get("detected", 0)
+                mn = cr.get("min", "?")
+                mx = cr.get("max", "∞")
+                cls_parts.append(f"{cn}:{det}({mn}-{mx})")
+            cv2.putText(overlay, f"  {name}: {'OK' if ok else 'NG'} total={total} {'; '.join(cls_parts)}",
+                        (12, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+
+    def _render_defect_overlay(self, overlay, frame, validation_details: dict) -> None:
+        """Render defect scan ROI results on the overlay."""
+        rois = validation_details.get("rois", [])
+        y_offset = 90
+        cv2.putText(overlay, "MODE: DEFECT", (12, y_offset),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 255), 1, cv2.LINE_AA)
+        for roi in rois:
+            name = roi.get("name", "ROI")
+            ok = roi.get("ok", False)
+            score = roi.get("score", 0.0)
+            threshold = roi.get("threshold", 0.5)
+            color = (0, 200, 0) if ok else (0, 0, 220)
+            y_offset += 22
+            cv2.putText(overlay, f"  {name}: {'OK' if ok else 'NG'} score={score:.3f}/{threshold:.2f}",
+                        (12, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
 
     def _render_roi_overlay(self, frame, payload: dict) -> None:
         """Render ROI overlay on the live frame using payload data.
@@ -1822,6 +1881,32 @@ class OperatorScreen(ctk.CTkFrame):
             )
             self.info_var.set("Part-ready ROI dan sticker ROI updated.")
 
+    @staticmethod
+    def _human_readable_reason(code: str) -> str:
+        """Map RejectReasonCode to human-readable Indonesian text."""
+        _map = {
+            "NOT_FOUND": "Sticker tidak ditemukan",
+            "WRONG_TYPE": "Tipe sticker salah",
+            "WRONG_TEXT": "Teks sticker salah",
+            "LOW_ROI_CONF": "Confidence ROI rendah",
+            "LOW_CLASS_CONF": "Confidence kelas rendah",
+            "LOW_OCR_CONF": "Confidence OCR rendah",
+            "OUT_OF_POSITION": "Posisi sticker tidak tepat",
+            "OUT_OF_ANGLE": "Sticker miring",
+            "ANCHOR_NOT_FOUND": "Anchor teks tidak ditemukan",
+            "ANCHOR_MISMATCH": "Anchor teks tidak cocok",
+            "PART_NOT_READY": "Part belum siap",
+            "COMMIT_TIMEOUT": "Timeout — tidak ada ACCEPT",
+            "ERROR": "Error sistem",
+            "PLC_FAULT": "Koneksi PLC terputus",
+            "COMPONENT_COUNT_MISMATCH": "Jumlah komponen di luar batas",
+            "UNEXPECTED_COMPONENT": "Komponen asing terdeteksi",
+            "NO_COMPONENT_ROIS": "Tidak ada ROI komponen",
+            "ANOMALY_DETECTED": "Anomali terdeteksi",
+            "STABILIZING": "Menstabilkan...",
+        }
+        return _map.get(code, code)
+
     def _update_result_info(self, payload: dict) -> None:
         timings = payload.get("timings") or {}
         total_ms = timings.get("total_ms")
@@ -1903,14 +1988,27 @@ class OperatorScreen(ctk.CTkFrame):
             _decision = _disp_val.get("decision") or "WAITING"
             _d_palette = {"ACCEPT": ("#166534", "#f0fdf4"), "REJECT": ("#991b1b", "#fef2f2"), "WAITING": ("#334155", "#f8fafc")}
             _d_bg, _d_fg = _d_palette.get(_decision, ("#334155", "#f8fafc"))
-            self.decision_banner.configure(fg_color=_d_bg, text_color=_d_fg, text=_decision)
-            self.decision_subtitle.configure(
-                text=(
-                    "Banner menampilkan hasil committed terakhir."
-                    if _committed_val
-                    else "Belum ada event committed. Banner mengikuti hasil live terbaru."
-                )
-            )
+
+            # Mode badge
+            _vd = _disp_val.get("validation_details") or {}
+            _mode = _vd.get("mode", "sticker")
+            _mode_label = {"sticker": "QC Sticker", "counter": "Component Counter", "defect": "Defect Scan"}.get(_mode, _mode)
+
+            # Human-readable reason code
+            _reason = _disp_val.get("reject_reason_code")
+            _reason_hr = self._human_readable_reason(_reason) if _reason else ""
+
+            _banner_text = _decision
+            if _reason_hr:
+                _banner_text += f" — {_reason_hr}"
+            _subtitle = f"Mode: {_mode_label}"
+            if _committed_val:
+                _subtitle += " | Menampilkan hasil committed terakhir"
+            else:
+                _subtitle += " | Belum ada event committed. Banner mengikuti hasil live terbaru."
+
+            self.decision_banner.configure(fg_color=_d_bg, text_color=_d_fg, text=_banner_text)
+            self.decision_subtitle.configure(text=_subtitle)
 
             # Update reject breakdown
             _breakdown = (payload.get("counters") or {}).get("session_reject_breakdown") or {}

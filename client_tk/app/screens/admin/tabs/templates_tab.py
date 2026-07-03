@@ -119,6 +119,8 @@ class TemplatesTab:
                            text_color=TEXT_PRIMARY, font=("Segoe UI", 9)).grid(row=0, column=1, sticky="w", padx=(0, 10), pady=6)
         ctk.CTkRadioButton(mode_frame, text="Component Counter", variable=a.preset_validator_mode_var, value="component_count",
                            text_color=TEXT_PRIMARY, font=("Segoe UI", 9)).grid(row=0, column=2, sticky="w", padx=(0, 10), pady=6)
+        ctk.CTkRadioButton(mode_frame, text="Defect Scan", variable=a.preset_validator_mode_var, value="defect",
+                           text_color=TEXT_PRIMARY, font=("Segoe UI", 9)).grid(row=0, column=3, sticky="w", padx=(0, 10), pady=6)
 
         a._entry(wizard, 3, 0, "Preset Name", a.preset_name_var, columnspan=3)
         a._entry(wizard, 4, 0, "Description", a.preset_description_var, columnspan=3)
@@ -209,6 +211,9 @@ class TemplatesTab:
 
         # Component ROI editor (only visible in component_count mode)
         self._build_component_roi_editor(a, wizard)
+
+        # Defect ROI editor (only visible in defect mode)
+        self._build_defect_roi_editor(a, wizard)
 
         # Action buttons
         btn_row = ttk.Frame(wizard)
@@ -319,12 +324,11 @@ class TemplatesTab:
         """Show/hide fields based on validation mode."""
         mode = a.preset_validator_mode_var.get()
         _is_component = (mode == "component_count")
+        _is_defect = (mode == "defect")
+        _is_sticker = (mode == "sticker")
         # Show/hide sticker fields (Expected Class, Max Tilt, Tilt Gate, Gap Threshold)
         for w in getattr(a, "_sticker_field_widgets", []):
-            if _is_component:
-                w.grid_remove()
-            else:
-                w.grid()
+            w.grid() if _is_sticker else w.grid_remove()
         # Show/hide component editor
         if _is_component:
             a._comp_editor_frame.grid()
@@ -332,24 +336,27 @@ class TemplatesTab:
         else:
             a._comp_editor_frame.grid_remove()
             a._add_comp_roi_btn.grid_remove()
+        # Show/hide defect editor
+        if hasattr(a, "_defect_editor_frame"):
+            a._defect_editor_frame.grid() if _is_defect else a._defect_editor_frame.grid_remove()
         # Show/hide sticker and part-ready ROI on canvas based on mode
         if hasattr(a, "preset_roi_picker"):
-            a.preset_roi_picker.set_sticker_visible(not _is_component)
-            a.preset_roi_picker.set_part_ready_visible(not _is_component)
+            a.preset_roi_picker.set_sticker_visible(_is_sticker)
+            a.preset_roi_picker.set_part_ready_visible(_is_sticker)
         # ROI picker panel stays visible in both modes (used for component ROIs in counter mode)
         # But update its selector to show component ROIs vs sticker/part-ready ROIs
         self._update_roi_selector_dropdown(a)
-        # In component_count mode, part ready = Modbus sensor only -- hide ALL part ready config
-        # This includes: Part Ready Method selector, gap threshold, mean-std fields, reference buttons, calibration
+        # In component_count or defect mode, part ready = Modbus sensor only -- hide ALL part ready config
+        _hide_pr = _is_component or _is_defect
         for w in getattr(a, "_part_ready_method_widgets", []):
-            w.grid_remove() if _is_component else w.grid()
+            w.grid_remove() if _hide_pr else w.grid()
         for w in getattr(a, "_gap_threshold_widgets", []):
-            w.grid_remove() if _is_component else w.grid()
+            w.grid_remove() if _hide_pr else w.grid()
         for w in getattr(a, "_mean_std_field_widgets", []):
-            w.grid_remove() if _is_component else w.grid()
+            w.grid_remove() if _hide_pr else w.grid()
         for w in getattr(a, "_part_ready_ref_widgets", []):
-            w.grid_remove() if _is_component else w.grid()
-        if _is_component:
+            w.grid_remove() if _hide_pr else w.grid()
+        if _hide_pr:
             a._calib_mean_std_frame.grid_remove()
         else:
             # In sticker mode, let _on_method_or_mode_changed handle calibration visibility
@@ -477,6 +484,47 @@ class TemplatesTab:
         a.preset_validator_mode_var.trace_add("write", lambda *_: self._refresh_comp_roi_editor(a))
         self._refresh_comp_roi_editor(a)
 
+    # ------------------------------------------------------------------
+    # Defect ROI Editor
+    # ------------------------------------------------------------------
+
+    def _build_defect_roi_editor(self, a, wizard) -> None:
+        a._defect_editor_frame = ctk.CTkFrame(wizard, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)
+        a._defect_editor_frame.grid(row=24, column=0, columnspan=4, sticky="ew", padx=12, pady=(8, 4))
+        a._defect_editor_frame.columnconfigure(0, weight=1)
+        a._defect_editor_frame.grid_remove()
+
+        header = ctk.CTkFrame(a._defect_editor_frame, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+        ctk.CTkLabel(header, text="Defect Scan ROIs", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).pack(side="left")
+        ctk.CTkLabel(header, text="(coming in FASE 4 — anomaly detection)", font=("Segoe UI", 9),
+                     text_color=TEXT_SECONDARY).pack(side="left", padx=8)
+
+        # Simple placeholder: display configured defect ROIs or empty state
+        a._defect_roi_list_frame = ctk.CTkFrame(a._defect_editor_frame, fg_color="transparent")
+        a._defect_roi_list_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
+        a._defect_roi_list_frame.columnconfigure(0, weight=1)
+
+        info_label = ctk.CTkLabel(
+            a._defect_roi_list_frame,
+            text="Defect mode uses anomaly detection (not YOLO).\n"
+                 "Configure ROIs and thresholds here after anomaly backend is installed.\n"
+                 "Each ROI: name, geometry, score threshold, and optional per-ROI model path.",
+            text_color=TEXT_SECONDARY, font=("Segoe UI", 9), justify="left",
+        )
+        info_label.grid(row=0, column=0, sticky="w", padx=4, pady=4)
+
+        a.preset_validator_mode_var.trace_add("write", lambda *_: self._refresh_defect_editor(a))
+        self._refresh_defect_editor(a)
+
+    def _refresh_defect_editor(self, a) -> None:
+        mode = a.preset_validator_mode_var.get()
+        if mode != "defect":
+            a._defect_editor_frame.grid_remove()
+            return
+        a._defect_editor_frame.grid()
+        # FASE 4: populate defect ROI list from a.preset_defect_rois
+
     def _on_add_comp_roi(self, a) -> None:
         idx = a.preset_roi_picker.add_component_roi(f"ROI {chr(65 + len(a.preset_component_rois))}")
         picker_rois = a.preset_roi_picker.get_component_rois()
@@ -541,33 +589,40 @@ class TemplatesTab:
         row_frame.grid(row=roi_idx, column=0, sticky="ew", pady=2)
         row_frame.columnconfigure(1, weight=1)
         name_frame = ctk.CTkFrame(row_frame, fg_color="transparent")
-        name_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 2))
+        name_frame.grid(row=0, column=0, columnspan=3, sticky="ew", padx=8, pady=(4, 2))
         name_var = tk.StringVar(value=roi_data.get("name", f"ROI {chr(65 + roi_idx)}"))
         ctk.CTkEntry(name_frame, textvariable=name_var, width=100, height=24).pack(side="left")
         name_var.trace_add("write", lambda *a2, idx=roi_idx, v=name_var: self._on_comp_roi_name_changed(idx, v))
         ctk.CTkButton(name_frame, text="✕", width=24, height=24, fg_color=BORDER, hover_color=ACCENT_HOVER,
                       command=lambda idx=roi_idx: self._on_remove_comp_roi(a, idx)).pack(side="right")
         cls_frame = ctk.CTkFrame(row_frame, fg_color="transparent")
-        cls_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=2)
+        cls_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=8, pady=2)
         ctk.CTkLabel(cls_frame, text="Class", font=("Segoe UI", 8, "bold"), text_color=TEXT_SECONDARY).grid(row=0, column=0, padx=2)
-        ctk.CTkLabel(cls_frame, text="Count", font=("Segoe UI", 8, "bold"), text_color=TEXT_SECONDARY).grid(row=0, column=1, padx=2)
+        ctk.CTkLabel(cls_frame, text="Min", font=("Segoe UI", 8, "bold"), text_color=TEXT_SECONDARY).grid(row=0, column=1, padx=2)
+        ctk.CTkLabel(cls_frame, text="Max (∞)", font=("Segoe UI", 8, "bold"), text_color=TEXT_SECONDARY).grid(row=0, column=2, padx=2)
         classes = roi_data.get("classes", [])
         for cls_idx, cls_target in enumerate(classes):
             class_var = tk.StringVar(value=cls_target.get("class_name", ""))
-            count_var = tk.StringVar(value=str(cls_target.get("count", 1)))
+            min_var = tk.StringVar(value=str(cls_target.get("min_count", cls_target.get("count", 1))))
+            max_var = tk.StringVar(value=str(cls_target.get("max_count", "")) if cls_target.get("max_count") is not None else "")
             _class_names = [c.strip() for c in a.preset_model_classes_var.get().split(",") if c.strip()] if hasattr(a, "preset_model_classes_var") else []
             if _class_names:
                 ctk.CTkComboBox(cls_frame, variable=class_var, values=_class_names, width=100, height=24).grid(row=cls_idx+1, column=0, padx=2, pady=1)
             else:
                 ctk.CTkEntry(cls_frame, textvariable=class_var, width=100, height=24).grid(row=cls_idx+1, column=0, padx=2, pady=1)
-            ctk.CTkEntry(cls_frame, textvariable=count_var, width=50, height=24).grid(row=cls_idx+1, column=1, padx=2, pady=1)
+            ctk.CTkEntry(cls_frame, textvariable=min_var, width=50, height=24).grid(row=cls_idx+1, column=1, padx=2, pady=1)
+            max_entry = ctk.CTkEntry(cls_frame, textvariable=max_var, width=50, height=24)
+            max_entry.grid(row=cls_idx+1, column=2, padx=2, pady=1)
+            # Show placeholder "∞" when max is empty/unlimited
+            max_entry.configure(placeholder_text="∞")
             class_var.trace_add("write", lambda *a2, idx=roi_idx, cidx=cls_idx, v=class_var: self._on_comp_class_changed(idx, cidx, v))
-            count_var.trace_add("write", lambda *a2, idx=roi_idx, cidx=cls_idx, v=count_var: self._on_comp_count_changed(idx, cidx, v))
+            min_var.trace_add("write", lambda *a2, idx=roi_idx, cidx=cls_idx, v=min_var: self._on_comp_min_changed(idx, cidx, v))
+            max_var.trace_add("write", lambda *a2, idx=roi_idx, cidx=cls_idx, v=max_var: self._on_comp_max_changed(idx, cidx, v))
         ctk.CTkButton(cls_frame, text="+", width=24, height=24, fg_color="transparent", hover_color=PANEL_BG,
                       command=lambda idx=roi_idx: self._on_add_comp_class(a, idx)).grid(row=len(classes)+1, column=0, pady=(2, 4))
         strict_var = tk.BooleanVar(value=roi_data.get("strict_foreign_class", False))
         ctk.CTkCheckBox(row_frame, text="Strict foreign class", variable=strict_var,
-                        text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4))
+                        text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(row=2, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
         strict_var.trace_add("write", lambda *a2, idx=roi_idx, v=strict_var: self._on_comp_strict_changed(idx, v))
 
     def _on_comp_roi_name_changed(self, roi_idx: int, var: tk.StringVar) -> None:
@@ -592,9 +647,29 @@ class TemplatesTab:
     def _on_comp_count_changed(self, roi_idx: int, cls_idx: int, var: tk.StringVar) -> None:
         if roi_idx < len(self.admin.preset_component_rois) and cls_idx < len(self.admin.preset_component_rois[roi_idx]["classes"]):
             try:
-                self.admin.preset_component_rois[roi_idx]["classes"][cls_idx]["count"] = int(var.get())
+                val = int(var.get())
+                self.admin.preset_component_rois[roi_idx]["classes"][cls_idx]["count"] = val
             except ValueError:
                 self.admin.preset_component_rois[roi_idx]["classes"][cls_idx]["count"] = 1
+
+    def _on_comp_min_changed(self, roi_idx: int, cls_idx: int, var: tk.StringVar) -> None:
+        if roi_idx < len(self.admin.preset_component_rois) and cls_idx < len(self.admin.preset_component_rois[roi_idx]["classes"]):
+            try:
+                val = int(var.get())
+                self.admin.preset_component_rois[roi_idx]["classes"][cls_idx]["min_count"] = val
+            except ValueError:
+                pass
+
+    def _on_comp_max_changed(self, roi_idx: int, cls_idx: int, var: tk.StringVar) -> None:
+        if roi_idx < len(self.admin.preset_component_rois) and cls_idx < len(self.admin.preset_component_rois[roi_idx]["classes"]):
+            raw = var.get().strip()
+            if raw == "":
+                self.admin.preset_component_rois[roi_idx]["classes"][cls_idx]["max_count"] = None
+            else:
+                try:
+                    self.admin.preset_component_rois[roi_idx]["classes"][cls_idx]["max_count"] = int(raw)
+                except ValueError:
+                    pass
 
     def _on_comp_strict_changed(self, roi_idx: int, var: tk.BooleanVar) -> None:
         if roi_idx < len(self.admin.preset_component_rois):
@@ -602,7 +677,9 @@ class TemplatesTab:
 
     def _on_add_comp_class(self, a, roi_idx: int) -> None:
         if roi_idx < len(a.preset_component_rois):
-            a.preset_component_rois[roi_idx]["classes"].append({"class_name": "", "count": 1})
+            a.preset_component_rois[roi_idx]["classes"].append({
+                "class_name": "", "count": 1, "min_count": 1, "max_count": None,
+            })
             self._refresh_comp_roi_editor(a)
 
     def _update_roi_selector_dropdown(self, a) -> None:

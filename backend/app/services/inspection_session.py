@@ -28,6 +28,7 @@ from backend.app.services.template_runtime import TemplateRuntimeService
 from backend.app.services.text_tilt import estimate_white_text_tilt
 from shared.contracts.enums import DecisionCode, InspectionEventState, RejectReasonCode, SessionStatus
 from shared.contracts.templates import RoiGeometry
+from backend.app.services.evaluators.registry import get_evaluator
 
 
 logger = logging.getLogger(__name__)
@@ -2579,16 +2580,97 @@ class InspectionSessionService:
         sticker = state.template.sticker
         validator_mode = str(getattr(sticker, "validator_mode", "ml_detection") or "ml_detection").strip().lower()
 
-        # Dispatch to component_count validator if mode is active
-        if validator_mode == "component_count" and state.template.component_rois:
-            return self._validate_component_count(
-                state=state,
+        # Map legacy validator_mode values to evaluator mode names
+        _mode_map = {
+            "ml_detection": "sticker",
+            "component_count": "counter",
+            "ml_roi_class": "sticker",
+            "ml_roi_classification": "sticker",
+            "roi_class": "sticker",
+            "roi_partial": "sticker",
+            "defect": "defect",
+        }
+        evaluator_mode = _mode_map.get(validator_mode, "sticker")
+
+        # If a dedicated evaluator exists, use it instead of inline logic
+        if evaluator_mode != "sticker":
+            from backend.app.services.evaluators.registry import get_evaluator as _get_eval
+            from backend.app.services.evaluators.base import EvalContext
+            _ctx = EvalContext(
                 detections=detections,
-                detection_payload=detection_payload,
-                part_ready_payload=part_ready_payload,
-                username=username,
-                user_id=user_id,
+                frame=None,
+                criteria={
+                    "component_rois": [
+                        {
+                            "name": cr.name,
+                            "classes": [
+                                {
+                                    "class_name": ct.class_name,
+                                    "count": ct.count,
+                                    "min_count": ct.min_count,
+                                    "max_count": ct.max_count,
+                                }
+                                for ct in cr.classes
+                            ],
+                            "strict_foreign_class": cr.strict_foreign_class,
+                        }
+                        for cr in state.template.component_rois
+                    ],
+                },
+                state=state,
+                additional={
+                    "accept_stable_frames": self._accept_stable_frames,
+                },
             )
+            try:
+                _eval = _get_eval(evaluator_mode)
+                _decision = _eval.evaluate(_ctx)
+            except NotImplementedError:
+                # If evaluator raises NotImplemented, fall through to old logic
+                _decision = None
+
+            if _decision is not None:
+                # Convert Decision back to old dict format
+                _is_accept = _decision.accept
+                _reason = _decision.reason_code
+                _details = _decision.details
+
+                # Check for stabilizing state (all ROIs ok but not yet N consecutive)
+                if not _is_accept and _details.get("stabilizing"):
+                    result = self._validate_component_count(
+                        state=state,
+                        detections=detections,
+                        detection_payload=detection_payload,
+                        part_ready_payload=part_ready_payload,
+                        username=username,
+                        user_id=user_id,
+                    )
+                    return result
+
+                _decision_str = DecisionCode.ACCEPT.value if _is_accept else DecisionCode.REJECT.value
+                result = {
+                    "decision": _decision_str,
+                    "decision_code": _decision_str,
+                    "reject_reason_code": _reason if not _is_accept else None,
+                    "validation_details": _details,
+                }
+                # Add convenience fields for backward compat
+                if _details.get("mode") == "counter":
+                    _roi_list = _details.get("rois", [])
+                    _all_ok = _details.get("all_rois_ok", False)
+                    if _all_ok and _is_accept:
+                        from datetime import UTC, datetime
+                        import time as _time
+                        _now = _time.time()
+                        if state.accept_cycle_started_at is None:
+                            state.accept_cycle_started_at = datetime.now(UTC)
+                        if state.policy_stable_started_at is None:
+                            state.policy_stable_started_at = datetime.now(UTC)
+                        state.policy_stable_frames += 1
+                        if state.inference_accept_first_ts == 0.0:
+                            state.inference_accept_first_ts = _now
+                        state.inference_accept_count += 1
+                    return result
 
         position_gate_enabled = validator_mode not in ROI_CLASS_VALIDATOR_MODES
         line_id = state.line_id
@@ -3286,9 +3368,9 @@ class InspectionSessionService:
         """Validate component count mode — per-frame evaluation + N-frame consecutive acceptance.
 
         Rules per ROI (evaluated on THIS frame only):
-        1. detected_count(class) == target for all registered classes
-        2. total detections in ROI == sum(targets)
-        3. (if strict_foreign_class) no foreign class detections in ROI
+        1. For each class: min_count <= detected <= max_count (max_count=None = unlimited)
+        2. (if strict_foreign_class) no foreign class detections in ROI
+        No longer requires total_ok (exact sum match) — min/max range is sufficient.
 
         Stability: all ROIs must pass on N consecutive frames before ACCEPT.
         """
@@ -3318,26 +3400,25 @@ class InspectionSessionService:
         for roi_idx, roi_rule in enumerate(component_rois):
             roi_ok = True
             class_results = {}
-            target_sum = 0
             registered_classes = set()
 
             for ct in roi_rule.classes:
                 cn = ct.class_name.strip().lower()
-                target = ct.count
-                target_sum += target
+                min_count = ct.min_count if ct.min_count is not None else ct.count
+                max_count = ct.max_count  # None = unlimited
                 registered_classes.add(cn)
                 detected = roi_counts[roi_idx].get(cn, 0)
-                ok = detected == target
+                ok = detected >= min_count and (max_count is None or detected <= max_count)
                 class_results[cn] = {
                     "detected": detected,
-                    "target": target,
+                    "min": min_count,
+                    "max": max_count if max_count is not None else float("inf"),
                     "ok": ok,
                 }
                 if not ok:
                     roi_ok = False
 
             total_detected = sum(roi_counts[roi_idx].values())
-            total_ok = total_detected == target_sum
 
             foreign_classes = []
             if roi_rule.strict_foreign_class:
@@ -3346,13 +3427,10 @@ class InspectionSessionService:
                         foreign_classes.append(cls_name)
                         roi_ok = False
 
-            if not total_ok:
-                roi_ok = False
-
             if not roi_ok:
                 all_ok = False
                 if not reject_reason:
-                    if not total_ok:
+                    if foreign_classes:
                         reject_reason = "UNEXPECTED_COMPONENT"
                     else:
                         reject_reason = "COMPONENT_COUNT_MISMATCH"
@@ -3362,7 +3440,6 @@ class InspectionSessionService:
                 "ok": roi_ok,
                 "classes": class_results,
                 "total_detected": total_detected,
-                "total_target": target_sum,
                 "foreign_classes": foreign_classes,
             })
 

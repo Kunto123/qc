@@ -12,6 +12,8 @@ from backend.app.services.gap_detector import save_ref_patch, get_ref_path
 from backend.app.core.http import require_auth, require_roles
 from backend.app.services.template_config_manager import TemplateConfigManager
 from shared.contracts.enums import UserRole
+from shared.contracts.templates import validate_criteria
+from backend.app.services.anomaly_backend import get_scorer, SimpleAnomalyScorer
 
 
 template_blueprint = Blueprint("templates", __name__, url_prefix="/templates")
@@ -54,6 +56,13 @@ def get_runtime_template(version_id: int):
 @require_roles(UserRole.ADMIN)
 def create_template():
     payload = request.get_json(force=True) or {}
+    # Validate criteria if mode+criteria provided
+    _mode = str(payload.get("mode") or "").strip().lower()
+    _criteria = payload.get("criteria") or {}
+    if _mode and _criteria:
+        errors = validate_criteria(_mode, _criteria)
+        if errors:
+            return jsonify({"error": "; ".join(errors)}), 400
     try:
         record = templates_repo.create_template(payload)
     except (ValueError, KeyError, TypeError) as exc:
@@ -243,3 +252,58 @@ def rollback_template_version(template_id: int):
         status_code = 404 if "not found" in message.lower() else 400
         return jsonify({"error": message}), status_code
     return jsonify(result)
+
+
+@template_blueprint.post("/<int:template_id>/defect-calibrate")
+@require_roles(UserRole.ADMIN)
+def calibrate_defect_threshold(template_id: int):
+    """Calibrate defect thresholds for a defect-mode template.
+
+    Accepts a list of known-good frame crops (base64-encoded images).
+    Returns suggested thresholds per ROI.
+    """
+    payload = request.get_json(force=True) or {}
+    frames_b64: list[str] = payload.get("frames_b64") or []
+    if len(frames_b64) < 3:
+        return jsonify({"error": "Need at least 3 known-good frames for calibration"}), 400
+    frames = []
+    for fb64 in frames_b64:
+        try:
+            raw = base64.b64decode(fb64)
+            arr = np.frombuffer(raw, np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is not None:
+                frames.append(img)
+        except Exception:
+            continue
+    if len(frames) < 3:
+        return jsonify({"error": "Failed to decode enough frames"}), 400
+    detail = templates_repo.get_template_detail(template_id)
+    if not detail:
+        return jsonify({"error": "Template not found"}), 404
+    criteria = detail.get("criteria") or {}
+    rois = criteria.get("rois", [])
+    if not rois:
+        return jsonify({"error": "Template has no defect ROIs configured"}), 400
+    results = []
+    for roi in rois:
+        name = roi.get("name", "ROI")
+        geom = roi.get("geometry", {})
+        fh, fw = frames[0].shape[:2]
+        x = int(float(geom.get("x", 0.0)) * fw)
+        y = int(float(geom.get("y", 0.0)) * fh)
+        w = max(1, int(float(geom.get("w", 1.0)) * fw))
+        h = max(1, int(float(geom.get("h", 1.0)) * fh))
+        x = max(0, min(fw - 1, x))
+        y = max(0, min(fh - 1, y))
+        w = min(fw - x, w)
+        h = min(fh - y, h)
+        crops = [fr[y:y+h, x:x+w] for fr in frames]
+        crops = [c for c in crops if c.size > 0]
+        if len(crops) < 3:
+            results.append({"name": name, "error": "Not enough valid crops"})
+            continue
+        scorer = SimpleAnomalyScorer()
+        calib_result = scorer.calibrate(crops)
+        results.append({"name": name, **calib_result})
+    return jsonify({"results": results}), 200

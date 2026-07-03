@@ -40,11 +40,7 @@ def _build_strategy(
     num_channels: int = 4,
     dry_run: bool = False,
 ) -> PlcFlowStrategy:
-    """Factory: select strategy based on validator_mode.
-
-    Item 4: CounterFlow is a stub — fail-loud when used with live PLC.
-    Only allowed in dry-run mode.
-    """
+    """Factory: select strategy based on validator_mode."""
     mode = (validator_mode or "sticker").strip().lower()
     if mode == "component_count":
         if not dry_run:
@@ -54,6 +50,9 @@ def _build_strategy(
                 "CounterFlow in services/counter_flow.py."
             )
         return CounterFlow(adapter, settings.counter, num_channels)
+    if mode == "defect":
+        from backend.app.services.defect_flow import DefectFlow
+        return DefectFlow(adapter, settings.sticker, num_channels)
     # Default: sticker mode
     return StickerFlow(adapter, settings.sticker, num_channels)
 
@@ -187,7 +186,11 @@ class PlcWorker:
                     clamp_feedback_enabled=self._clamp_feedback_enabled,
                     accept_pulse_ms=self._accept_pulse_ms,
                 )
-                self._strategy = StickerFlow(self._adapter, cfg, self._num_channels)
+                if mode == "defect":
+                    from backend.app.services.defect_flow import DefectFlow
+                    self._strategy = DefectFlow(self._adapter, cfg, self._num_channels)
+                else:
+                    self._strategy = StickerFlow(self._adapter, cfg, self._num_channels)
 
     # ── Public API (unchanged signatures) ───────────────────────────
 
