@@ -2213,57 +2213,50 @@ class ApiSmokeTest(unittest.TestCase):
         self.assertEqual(update_template_response.status_code, 200, update_template_response.get_json())
         updated_template = update_template_response.get_json()
 
+        # NEW model (intentional): a deployment is a single global active binding.
+        # line_id/station_id slots were removed; the PUT mutates the bound template
+        # version/name, not a line/station slot.
         deploy_response = self.client.post(
             "/deployments",
             json={
                 "template_id": created_template["id"],
                 "template_version_id": created_template["version_id"],
-                "line_id": "LINE-DEP-OLD",
-                "station_id": "ST-DEP-OLD",
             },
             headers=_headers(self.admin_token),
         )
         self.assertEqual(deploy_response.status_code, 201, deploy_response.get_json())
         deployment = deploy_response.get_json()
 
+        # Operator may not mutate a deployment.
         forbidden_response = self.client.put(
             f"/deployments/{deployment['id']}",
-            json={"line_id": "LINE-DEP-BLOCKED"},
+            json={"template_version_id": updated_template["version_id"]},
             headers=_headers(self.operator_token),
         )
         self.assertEqual(forbidden_response.status_code, 403, forbidden_response.get_json())
 
+        # Admin re-binds the deployment to the updated template version.
         update_response = self.client.put(
             f"/deployments/{deployment['id']}",
-            json={
-                "line_id": "LINE-DEP-NEW",
-                "station_id": "ST-DEP-NEW",
-                "template_version_id": updated_template["version_id"],
-            },
+            json={"template_version_id": updated_template["version_id"]},
             headers=_headers(self.admin_token),
         )
         self.assertEqual(update_response.status_code, 200, update_response.get_json())
         updated_deployment = update_response.get_json()
-        self.assertEqual(updated_deployment["line_id"], "LINE-DEP-NEW")
-        self.assertEqual(updated_deployment["station_id"], "ST-DEP-NEW")
         self.assertEqual(updated_deployment["template_version_id"], updated_template["version_id"])
         self.assertEqual(updated_deployment["version_number"], updated_template["version_number"])
         self.assertEqual(updated_deployment["template_id"], created_template["id"])
 
-        old_active_response = self.client.get(
-            "/deployments/active?line_id=LINE-DEP-OLD&station_id=ST-DEP-OLD",
+        # The single global active deployment now reflects the re-bound version.
+        active_response = self.client.get(
+            "/deployments/active",
             headers=_headers(self.admin_token),
         )
-        self.assertEqual(old_active_response.status_code, 200, old_active_response.get_json())
-        self.assertIsNone(old_active_response.get_json()["deployment"])
-
-        new_active_response = self.client.get(
-            "/deployments/active?line_id=LINE-DEP-NEW&station_id=ST-DEP-NEW",
-            headers=_headers(self.admin_token),
-        )
-        self.assertEqual(new_active_response.status_code, 200, new_active_response.get_json())
-        self.assertIsNotNone(new_active_response.get_json()["deployment"])
-        self.assertEqual(new_active_response.get_json()["deployment"]["id"], deployment["id"])
+        self.assertEqual(active_response.status_code, 200, active_response.get_json())
+        active = active_response.get_json()["deployment"]
+        self.assertIsNotNone(active)
+        self.assertEqual(active["id"], deployment["id"])
+        self.assertEqual(active["template_version_id"], updated_template["version_id"])
 
     def test_11c_deployment_update_rejects_cross_template_and_inactive(self) -> None:
         primary_deployment_response = self.client.post(
@@ -2333,15 +2326,13 @@ class ApiSmokeTest(unittest.TestCase):
         )
         self.assertEqual(inactive_update_response.status_code, 409, inactive_update_response.get_json())
 
-    def test_11d_deployment_allows_multiple_active_records_for_same_slot(self) -> None:
+    def test_11d_get_active_returns_latest_of_multiple_active_deployments(self) -> None:
+        # NEW model (intentional): deployment is a single global active binding with
+        # no line_id/station_id slots. Deploying twice leaves both records active;
+        # get_active() returns the LATEST active one. (Was: per-slot multi-active.)
         first_response = self.client.post(
             "/deployments",
-            json={
-                "template_id": 1,
-                "template_version_id": 1,
-                "line_id": "LINE-DEP-MULTI",
-                "station_id": "ST-DEP-MULTI",
-            },
+            json={"template_id": 1, "template_version_id": 1},
             headers=_headers(self.admin_token),
         )
         self.assertEqual(first_response.status_code, 201, first_response.get_json())
@@ -2349,38 +2340,28 @@ class ApiSmokeTest(unittest.TestCase):
 
         second_response = self.client.post(
             "/deployments",
-            json={
-                "template_id": 1,
-                "template_version_id": 1,
-                "line_id": "LINE-DEP-MULTI",
-                "station_id": "ST-DEP-MULTI",
-            },
+            json={"template_id": 1, "template_version_id": 1},
             headers=_headers(self.admin_token),
         )
         self.assertEqual(second_response.status_code, 201, second_response.get_json())
         second_deployment = second_response.get_json()
 
+        # The global active deployment is the latest one deployed.
         active_response = self.client.get(
-            "/deployments/active?line_id=LINE-DEP-MULTI&station_id=ST-DEP-MULTI",
+            "/deployments/active",
             headers=_headers(self.admin_token),
         )
         self.assertEqual(active_response.status_code, 200, active_response.get_json())
         self.assertIsNotNone(active_response.get_json()["deployment"])
         self.assertEqual(active_response.get_json()["deployment"]["id"], second_deployment["id"])
 
+        # Both records I just created are present and active in the full list.
         list_response = self.client.get("/deployments", headers=_headers(self.admin_token))
         self.assertEqual(list_response.status_code, 200, list_response.get_json())
-        active_records = [
-            item
-            for item in list_response.get_json()
-            if item.get("line_id") == "LINE-DEP-MULTI"
-            and item.get("station_id") == "ST-DEP-MULTI"
-            and bool(item.get("is_active"))
-        ]
-        self.assertEqual(
-            {int(item["id"]) for item in active_records},
-            {int(first_deployment["id"]), int(second_deployment["id"])},
-        )
+        by_id = {int(item["id"]): item for item in list_response.get_json()}
+        for dep_id in (int(first_deployment["id"]), int(second_deployment["id"])):
+            self.assertIn(dep_id, by_id)
+            self.assertTrue(bool(by_id[dep_id].get("is_active")), f"deployment {dep_id} must be active")
 
     # ------------------------------------------------------------------
     # Phase 12 â€” Augment integration eligibility (API-level validation)
