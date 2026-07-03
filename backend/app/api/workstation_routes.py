@@ -625,14 +625,21 @@ def upload_model():
         return jsonify({"error": "name and content_b64 are required"}), 400
     if not isinstance(class_names_raw, list):
         return jsonify({"error": "class_names must be a list"}), 400
+    # P3-9: Sanitize filename — strip path components, prevent traversal
+    file_name = Path(file_name).name  # strips any directory components
+    if not file_name:
+        return jsonify({"error": "file_name must not be empty"}), 400
 
     try:
         content = base64.b64decode(content_b64)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"Invalid base64 content: {exc}"}), 400
 
+    # P3-9: Verify resolved path stays within MODELS_DIR (defense-in-depth)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    dest = MODELS_DIR / file_name
+    dest = (MODELS_DIR / file_name).resolve()
+    if not str(dest).startswith(str(MODELS_DIR.resolve())):
+        return jsonify({"error": "file_name must be within models directory"}), 400
     dest.write_bytes(content)
 
     # Optional companion file (e.g., OpenVINO .bin paired with .xml)
@@ -642,7 +649,11 @@ def upload_model():
     if companion_file_name and companion_b64_str:
         try:
             companion_content = base64.b64decode(companion_b64_str)
-            companion_dest = MODELS_DIR / companion_file_name
+            # P3-9: Same sanitization for companion file
+            companion_file_name = Path(companion_file_name).name
+            companion_dest = (MODELS_DIR / companion_file_name).resolve()
+            if not str(companion_dest).startswith(str(MODELS_DIR.resolve())):
+                return jsonify({"error": "companion_file_name must be within models directory"}), 400
             companion_dest.write_bytes(companion_content)
         except Exception as exc:
             return jsonify({"error": f"Invalid companion file: {exc}"}), 400

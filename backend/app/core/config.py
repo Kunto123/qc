@@ -66,6 +66,10 @@ class AppConfig:
     # If no accept-commit happens within this window, part is rejected as COMMIT_TIMEOUT.
     # Default 15000 = 15 seconds. Set to 0 to disable timeout reject.
     reject_timeout_ms: int = max(0, int(os.getenv("QC_SUITE_REJECT_TIMEOUT_MS", "15000")))
+    # NG JSONL log directory (daily rolling log for component-count rejects). Empty = disabled.
+    ng_log_dir: str = os.getenv("QC_SUITE_NG_LOG_DIR", "")
+    # Deployment environment: "dev" or "prod". Controls hardening checks.
+    environment: str = os.getenv("QC_SUITE_ENV", "dev")
     # Consecutive reject threshold — number of consecutive reject decisions required
     # before a reject is actually committed (PLC reject). 0 = immediate (no delay).
     # Set to 2-3 to allow operator to reposition sticker before final reject.

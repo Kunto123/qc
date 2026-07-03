@@ -152,10 +152,17 @@ class ModbusRtuPlcAdapter(PlcAdapter):
 
     def read_inputs(self, address: int = 0, count: int = 8) -> list[bool]:
         self._ensure_connected()
-        resp = self._client.read_discrete_inputs(address, count=count, device_id=self._slave_id)
-        if resp.isError():
-            logger.warning("[plc-modbus-rtu] read_inputs error: %s", resp)
-            return [False] * count
+        try:
+            resp = self._client.read_discrete_inputs(address, count=count, device_id=self._slave_id)
+            if resp.isError():
+                raise RuntimeError(f"[plc-modbus-rtu] read_inputs error: {resp}")
+        except Exception:
+            # Item 1: close client so worker's connect() actually reconnects
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            raise
         return [bool(resp.bits[i]) for i in range(count)]
 
 
@@ -216,10 +223,17 @@ class ModbusTcpPlcAdapter(PlcAdapter):
 
     def read_inputs(self, address: int = 0, count: int = 8) -> list[bool]:
         self._ensure_connected()
-        resp = self._client.read_discrete_inputs(address, count=count, device_id=self._slave_id)
-        if resp.isError():
-            logger.warning("[plc-modbus-tcp] read_inputs error: %s", resp)
-            return [False] * count
+        try:
+            resp = self._client.read_discrete_inputs(address, count=count, device_id=self._slave_id)
+            if resp.isError():
+                raise RuntimeError(f"[plc-modbus-tcp] read_inputs error: {resp}")
+        except Exception:
+            # Item 1: close client so worker's connect() actually reconnects
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            raise
         return [bool(resp.bits[i]) for i in range(count)]
 
 
@@ -250,6 +264,7 @@ class FXComputerLinkPlcAdapter(PlcAdapter):
         self._client: FXPLCClient | None = None
         self._transport = None  # TransportSerial — kept so we can close the serial port
         self._connected: bool = False
+        self._last_known_inputs: list[bool] = []  # hold last-good for sub-threshold blips
         self._lock = threading.Lock()
 
     def connect(self) -> None:
@@ -300,6 +315,7 @@ class FXComputerLinkPlcAdapter(PlcAdapter):
             self._client = None
             self._close_transport_quietly()
             self._connected = False
+            self._last_known_inputs = []  # clear on disconnect
             if self._loop is not None:
                 self._loop.call_soon_threadsafe(self._loop.stop)
             if self._loop_thread is not None:
@@ -326,7 +342,14 @@ class FXComputerLinkPlcAdapter(PlcAdapter):
     def write_coil(self, address: int, value: bool) -> None:
         self._ensure_connected()
         fx_label = f"Y{format(address, 'o')}"
-        self._run_sync(self._client.write_bit(fx_label, bool(value)))
+        try:
+            self._run_sync(self._client.write_bit(fx_label, bool(value)))
+        except Exception:
+            # Item 1: reset connection state so worker's connect() actually reopens
+            self._connected = False
+            self._client = None
+            self._close_transport_quietly()
+            raise
         time.sleep(0.05)
 
     def write_coils(self, coils: dict[int, bool]) -> None:
@@ -336,16 +359,36 @@ class FXComputerLinkPlcAdapter(PlcAdapter):
     def read_inputs(self, address: int = 0, count: int = 8) -> list[bool]:
         self._ensure_connected()
         result: list[bool] = []
+        consecutive_fail = 0
+        max_bit_failures = 3  # raise after K consecutive bit read failures
         for i in range(address, address + count):
             fx_label = f"X{format(i, 'o')}"
             try:
                 bit = self._run_sync(self._client.read_bit(fx_label))
                 result.append(bool(bit))
+                consecutive_fail = 0  # reset on success
             except Exception as exc:
+                consecutive_fail += 1
                 logger.warning(
-                    "[plc-fx] read_bit %s failed: %s — filling False", fx_label, exc
+                    "[plc-fx] read_bit %s failed (%d/%d): %s",
+                    fx_label, consecutive_fail, max_bit_failures, exc,
                 )
-                result.append(False)
+                if consecutive_fail >= max_bit_failures:
+                    # Item 1: reset connection state so worker's connect() actually reopens
+                    self._connected = False
+                    self._client = None
+                    self._close_transport_quietly()
+                    raise RuntimeError(
+                        f"[plc-fx] {consecutive_fail} consecutive read failures — "
+                        f"serial link may be degraded"
+                    ) from exc
+                # Sub-threshold: hold last-known-good instead of False
+                if i < len(self._last_known_inputs):
+                    result.append(self._last_known_inputs[i])
+                else:
+                    result.append(False)
+        # Update last-known-good on successful read
+        self._last_known_inputs = list(result)
         return result
 
     def all_off(self, num_channels: int = 4) -> None:

@@ -16,7 +16,8 @@ from client_tk.app.theme import BORDER, PANEL_BG, TEXT_PRIMARY, TEXT_SECONDARY
 _COLOR_PART_READY = (50, 180, 255)   # BGR oranye
 _COLOR_STICKER = (0, 200, 255)       # BGR kuning
 _COLOR_CROSSHAIR = (255, 255, 255)   # BGR putih
-_COLOR_COMPONENT = (0, 255, 0)        # BGR hijau
+# BGR hijau
+_COLOR_DEFECT = (200, 50, 200)      # BGR ungu/magenta
 _ARM = 18
 _LABEL_FONT = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -116,7 +117,9 @@ class RoiPickerCanvas(ctk.CTkFrame):
         self._part_ready_roi: dict = {}
         self._sticker_roi: dict = {}
         self._show_sticker: bool = True
-        self._show_part_ready: bool = True  # False saat mode component_count
+        self._show_part_ready: bool = True
+        self._component_rois: list[dict] = []
+        self._defect_rois: list[dict] = []
         self._active_roi_kind: str | None = None
         self._drag_mode: str | None = None
         self._drag_start: tuple[float, float] | None = None
@@ -214,6 +217,35 @@ class RoiPickerCanvas(ctk.CTkFrame):
     def get_component_rois(self) -> list[dict]:
         return [dict(r) for r in self._component_rois]
 
+    # ── Defect ROI API ──
+
+    def set_defect_rois(self, rois: list[dict]) -> None:
+        """Set defect ROIs. Each dict: {name, x, y, w, h, rotation}."""
+        self._defect_rois = []
+        for r in (rois or []):
+            nr = self._normalize_roi(r)
+            nr["name"] = r.get("name", "ROI")
+            self._defect_rois.append(nr)
+        if self._active_roi_kind and self._active_roi_kind.startswith("defect:"):
+            idx = int(self._active_roi_kind.split(":")[1])
+            if idx >= len(self._defect_rois):
+                self._active_roi_kind = None
+        self.redraw()
+
+    def add_defect_roi(self, name: str = "ROI") -> int:
+        """Add a default defect ROI. Returns index."""
+        self._defect_rois.append({"name": name, "x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3, "rotation": 0.0})
+        self.redraw()
+        return len(self._defect_rois) - 1
+
+    def remove_defect_roi(self, idx: int) -> None:
+        if 0 <= idx < len(self._defect_rois):
+            self._defect_rois.pop(idx)
+            self.redraw()
+
+    def get_defect_rois(self) -> list[dict]:
+        return [dict(r) for r in self._defect_rois]
+
     def set_sticker_visible(self, visible: bool) -> None:
         """Show/hide sticker ROI (used for component_count mode)."""
         self._show_sticker = visible
@@ -242,8 +274,15 @@ class RoiPickerCanvas(ctk.CTkFrame):
                     _valid.add(kind)
             except (ValueError, IndexError):
                 pass
+        if kind is not None and kind.startswith("defect:"):
+            try:
+                idx = int(kind.split(":")[1])
+                if 0 <= idx < len(getattr(self, "_defect_rois", [])):
+                    _valid.add(kind)
+            except (ValueError, IndexError):
+                pass
         if kind not in _valid:
-            raise ValueError("kind must be 'part_ready', 'sticker', 'component:<idx>', or None")
+            raise ValueError("kind must be 'part_ready', 'sticker', 'component:<idx>', 'defect:<idx>', or None")
         self._active_roi_kind = kind
         if kind is not None:
             rot = self._roi_for_kind(kind).get("rotation", 0.0)
@@ -417,6 +456,26 @@ class RoiPickerCanvas(ctk.CTkFrame):
                 else:
                     self._draw_handles(canvas_frame, rx, ry, rw, rh, _color)
 
+        # Draw defect ROIs
+        for di, def_roi in enumerate(getattr(self, '_defect_rois', [])):
+            if not def_roi:
+                continue
+            rx, ry, rw, rh = _roi_px(def_roi)
+            _rot = float(def_roi.get("rotation", 0))
+            _name = def_roi.get("name", f"ROI {di}")
+            _color = _COLOR_DEFECT
+            if abs(_rot) > 0.1:
+                _draw_roi_box_rotated(canvas_frame, rx, ry, rw, rh, _rot, _color, _name)
+            else:
+                _draw_roi_box(canvas_frame, rx, ry, rw, rh, _color, _name)
+            if self._active_roi_kind == f"defect:{di}":
+                if abs(_rot) > 0.1:
+                    for px, py in _rotated_corners(rx, ry, rw, rh, _rot):
+                        cv2.rectangle(canvas_frame, (px-5, py-5), (px+5, py+5), _color, -1)
+                        cv2.rectangle(canvas_frame, (px-5, py-5), (px+5, py+5), (255, 255, 255), 1)
+                else:
+                    self._draw_handles(canvas_frame, rx, ry, rw, rh, _color)
+
         return canvas_frame
 
     # ------------------------------------------------------------------
@@ -466,6 +525,13 @@ class RoiPickerCanvas(ctk.CTkFrame):
                     return self._component_rois[idx]
             except (ValueError, IndexError):
                 pass
+        if kind is not None and kind.startswith("defect:"):
+            try:
+                idx = int(kind.split(":")[1])
+                if 0 <= idx < len(self._defect_rois):
+                    return self._defect_rois[idx]
+            except (ValueError, IndexError):
+                pass
         return {}
 
     def _set_roi_for_kind(self, kind: str, roi: dict, *, notify: bool = True) -> None:
@@ -480,6 +546,16 @@ class RoiPickerCanvas(ctk.CTkFrame):
                 if 0 <= idx < len(self._component_rois):
                     existing_name = self._component_rois[idx].get("name", "")
                     self._component_rois[idx] = {**normalized, "name": existing_name}
+                else:
+                    return
+            except (ValueError, IndexError):
+                return
+        elif kind is not None and kind.startswith("defect:"):
+            try:
+                idx = int(kind.split(":")[1])
+                if 0 <= idx < len(self._defect_rois):
+                    existing_name = self._defect_rois[idx].get("name", "")
+                    self._defect_rois[idx] = {**normalized, "name": existing_name}
                 else:
                     return
             except (ValueError, IndexError):
