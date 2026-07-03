@@ -4,6 +4,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
+from client_tk.app.mode_utils import normalize_mode, mode_label
 from client_tk.app.theme import BORDER, PANEL_ALT_BG, PANEL_BG, TEXT_PRIMARY, TEXT_SECONDARY, WARNING, WARNING_HOVER
 
 
@@ -89,8 +90,8 @@ class ResultPanel(ctk.CTkFrame):
 
     def set_mode(self, validator_mode: str) -> None:
         """Show/hide validation sections based on template validator mode."""
-        mode = (validator_mode or "sticker").strip().lower()
-        show_component = mode == "component_count"
+        mode = normalize_mode(validator_mode)  # canonical: sticker|counter|defect
+        show_component = (mode == "counter")
         target_show = self._component_section if show_component else self._sticker_section
         target_hide = self._sticker_section if show_component else self._component_section
         target_hide.pack_forget()
@@ -162,9 +163,9 @@ class ResultPanel(ctk.CTkFrame):
 
         # Component count display
         live_details = live_validation.get("validation_details") or {}
-        self._validator_mode = str(live_details.get("mode") or "sticker").strip().lower()
+        self._validator_mode = normalize_mode(str(live_details.get("mode") or "sticker"))
         # Component count display
-        if self._validator_mode == "component_count":
+        if self._validator_mode == "counter":
             comp_details = display_details.get("component_rois") or []
             self.comp_mode_var.configure(text="Component Count")
             if comp_details:

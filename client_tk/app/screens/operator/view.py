@@ -27,6 +27,7 @@ from client_tk.app.config import (
 )
 from client_tk.app.services.camera_capture import CameraCaptureService
 from client_tk.app.services.frame_upload import FrameUploadService
+from client_tk.app.mode_utils import normalize_mode, mode_from_template, mode_label
 from client_tk.app.theme import APP_BG, ACCENT_SOFT, BORDER, PANEL_ALT_BG, PANEL_BG, SHELL_BG, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, ACCENT_HOVER, TEXT_ON_ACCENT, SUCCESS, SUCCESS_HOVER
 
 
@@ -39,7 +40,29 @@ BADGE_COLORS = {
 }
 RESPONSIVE_BREAKPOINT = 1240
 HEARTBEAT_INTERVAL_MS = 20_000
-PLC_POLL_INTERVAL_MS = 2_000  # 2 detik, responsif untuk template cycling
+PLC_POLL_INTERVAL_MS = 2_000
+
+
+def _draw_text_bg(overlay: np.ndarray, pos: tuple[int, int], text: str,
+                  font_scale: float = 0.5, color=(200, 200, 255),
+                  thickness: int = 1, padding: int = 4) -> np.ndarray:
+    """Draw text with semi-transparent dark background for readability."""
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+    x, y = pos
+    # Background rectangle
+    overlay = cv2.rectangle(overlay,
+                            (x - padding, y - th - padding),
+                            (x + tw + padding, y + padding),
+                            (0, 0, 0, 128), -1, cv2.LINE_AA)
+    # Just draw black fill (semi-transparency approximated by dark fill)
+    overlay = cv2.rectangle(overlay,
+                            (x - padding, y - th - padding),
+                            (x + tw + padding, y + padding),
+                            (20, 20, 30), -1)
+    # Text
+    overlay = cv2.putText(overlay, text, (x, y),
+                          cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
+    return overlay
 AUTO_START_FRAME_WAIT_MS = 150
 AUTO_START_MAX_ATTEMPTS = 40
 
@@ -247,6 +270,8 @@ class OperatorScreen(ctk.CTkFrame):
             font=("Segoe UI", 24, "bold"),
             corner_radius=14,
             anchor="center",
+            wraplength=320,
+            justify="center",
         )
         self.decision_banner.pack(fill="x", padx=12, pady=(12, 6))
         self.decision_subtitle = ctk.CTkLabel(
@@ -467,10 +492,10 @@ class OperatorScreen(ctk.CTkFrame):
         ttk.Label(general, text="0/90/180/270", foreground="gray").grid(row=2, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=(0, 4))
         self._settings_entry(general, 3, 0, "Template Ver", self.template_version_value)
 
-        # Detect validator_mode from active template detail
+        # Detect mode from active template detail
         template_detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
-        validator_mode = str((template_detail or {}).get("sticker", {}).get("validator_mode", "") or "").strip().lower()
-        is_component_counter = validator_mode == "component_count"
+        _mode = mode_from_template(template_detail)  # canonical: sticker|counter|defect
+        is_component_counter = (_mode == "counter")
 
         # Part Ready ROI — only shown in sticker mode
         part_ready_roi = ttk.LabelFrame(body, text="Part Ready ROI", padding=10)
@@ -1105,8 +1130,8 @@ class OperatorScreen(ctk.CTkFrame):
         rois = validation_details.get("rois", [])
         fh, fw = frame.shape[:2]
         y_offset = 90
-        cv2.putText(overlay, "MODE: COUNTER", (12, y_offset),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 255), 1, cv2.LINE_AA)
+        # Semi-transparent background for readability
+        overlay = _draw_text_bg(overlay, (12, y_offset - 12), "─── MODE: COUNTER ───", font_scale=0.5, color=(200, 200, 255))
         for roi in rois:
             name = roi.get("name", "ROI")
             ok = roi.get("ok", False)
@@ -1119,8 +1144,12 @@ class OperatorScreen(ctk.CTkFrame):
             for cn, cr in classes.items():
                 det = cr.get("detected", 0)
                 mn = cr.get("min", "?")
-                mx = cr.get("max", "∞")
-                cls_parts.append(f"{cn}:{det}({mn}-{mx})")
+                _mx = cr.get("max")
+                mx = str(_mx) if _mx is not None else "∞"
+                cls_parts.append(f"{cn}:{det}(mn {mn}, maks {mx})")
+            roi_text = f"{'OK' if ok else 'NG'} {name}: {' | '.join(cls_parts)}"
+            overlay = _draw_text_bg(overlay, (12, y_offset), roi_text,
+                                      font_scale=0.45, color=color)
             cv2.putText(overlay, f"  {name}: {'OK' if ok else 'NG'} total={total} {'; '.join(cls_parts)}",
                         (12, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
 
@@ -1347,8 +1376,8 @@ class OperatorScreen(ctk.CTkFrame):
         sticker_config = detail.get("sticker") or {}
         self.state.cache["selected_template_detail"] = detail
         # Update result panel mode (show/hide sections)
-        validator_mode = str(sticker_config.get("validator_mode", "") or "").strip().lower()
-        self.result_panel.set_mode(validator_mode)
+        _mode = mode_from_template(detail)
+        self.result_panel.set_mode(_mode)
         self._refresh_context_summary()
 
     def _sync_selected_template_detail(self) -> None:
@@ -1824,8 +1853,8 @@ class OperatorScreen(ctk.CTkFrame):
     def _apply_roi(self) -> None:
         # Detect mode from active template detail
         template_detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
-        validator_mode = str((template_detail or {}).get("sticker", {}).get("validator_mode", "") or "").strip().lower()
-        is_component_counter = validator_mode == "component_count"
+        _mode = mode_from_template(template_detail)  # canonical: sticker|counter|defect
+        is_component_counter = (_mode == "counter")
 
         if is_component_counter:
             # Component counter mode: collect component ROI values

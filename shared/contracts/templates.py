@@ -351,6 +351,10 @@ def template_from_dict(payload: dict[str, Any]) -> InspectionTemplate:
     _sticker_filtered = {k: v for k, v in _sticker_raw.items() if k in _VALID_STICKER_FIELDS}
     _part_ready_raw = payload.get("part_ready") or {}
     _part_ready_filtered = {k: v for k, v in _part_ready_raw.items() if k in _VALID_PART_READY_FIELDS}
+    # Normalize empty method to default
+    _method_raw = _part_ready_filtered.get("method")
+    if _method_raw is None or str(_method_raw).strip() == "":
+        _part_ready_filtered["method"] = "gap_template_match"
 
     # Read mode + criteria from new format if available
     _mode_raw = str(payload.get("mode") or "").strip().lower()
@@ -361,6 +365,17 @@ def template_from_dict(payload: dict[str, Any]) -> InspectionTemplate:
     if not _mode_raw or _mode == "sticker":
         _vm = str(_sticker_raw.get("validator_mode") or "ml_detection").strip().lower()
         _mode = normalize_mode(_vm)
+
+    # Parse component_rois — try top-level first, fall back to criteria
+    _component_rois = _parse_component_rois(payload)
+    if not _component_rois and _mode == "counter":
+        # New format: criteria is the source of truth
+        _criteria_rois = _criteria.get("component_rois", [])
+        if _criteria_rois:
+            _component_rois = _parse_component_rois({"component_rois": _criteria_rois})
+            # Also ensure criteria has it (normalize structure)
+            _criteria = dict(_criteria)
+            _criteria["component_rois"] = _criteria_rois
 
     return InspectionTemplate(
         id=payload.get("id"),
@@ -376,7 +391,7 @@ def template_from_dict(payload: dict[str, Any]) -> InspectionTemplate:
         part_ready=PartReadyConfig(**_part_ready_filtered),
         sticker=StickerRule(**_sticker_filtered),
         persistence=PersistenceConfig(**(payload.get("persistence") or {})),
-        component_rois=_parse_component_rois(payload),
+        component_rois=_component_rois,
         metadata=dict(payload.get("metadata") or {}),
         mode=_mode,
         criteria=dict(_criteria) if _criteria else {},

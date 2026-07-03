@@ -506,22 +506,27 @@ class TemplatesTab:
         header = ctk.CTkFrame(a._defect_editor_frame, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
         ctk.CTkLabel(header, text="Defect Scan ROIs", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).pack(side="left")
-        ctk.CTkLabel(header, text="(coming in FASE 4 — anomaly detection)", font=("Segoe UI", 9),
-                     text_color=TEXT_SECONDARY).pack(side="left", padx=8)
 
-        # Simple placeholder: display configured defect ROIs or empty state
+        # Add button
+        ctk.CTkButton(
+            header, text="+ Add Defect ROI", width=110, height=24,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            text_color=TEXT_ON_ACCENT, font=("Segoe UI", 9),
+            command=lambda: self._on_add_defect_roi(a),
+        ).pack(side="right", padx=4)
+
+        # Calibrate threshold button
+        ctk.CTkButton(
+            header, text="Kalibrasi Threshold", width=120, height=24,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            text_color=TEXT_ON_ACCENT, font=("Segoe UI", 9),
+            command=lambda: self._on_calibrate_defect(a),
+        ).pack(side="right", padx=4)
+
+        # List frame for defect ROI rows
         a._defect_roi_list_frame = ctk.CTkFrame(a._defect_editor_frame, fg_color="transparent")
         a._defect_roi_list_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
         a._defect_roi_list_frame.columnconfigure(0, weight=1)
-
-        info_label = ctk.CTkLabel(
-            a._defect_roi_list_frame,
-            text="Defect mode uses anomaly detection (not YOLO).\n"
-                 "Configure ROIs and thresholds here after anomaly backend is installed.\n"
-                 "Each ROI: name, geometry, score threshold, and optional per-ROI model path.",
-            text_color=TEXT_SECONDARY, font=("Segoe UI", 9), justify="left",
-        )
-        info_label.grid(row=0, column=0, sticky="w", padx=4, pady=4)
 
         a.preset_validator_mode_var.trace_add("write", lambda *_: self._refresh_defect_editor(a))
         self._refresh_defect_editor(a)
@@ -529,10 +534,119 @@ class TemplatesTab:
     def _refresh_defect_editor(self, a) -> None:
         mode = a.preset_validator_mode_var.get()
         if mode != "defect":
-            a._defect_editor_frame.grid_remove()
+            if hasattr(a, "_defect_editor_frame"):
+                a._defect_editor_frame.grid_remove()
             return
         a._defect_editor_frame.grid()
-        # FASE 4: populate defect ROI list from a.preset_defect_rois
+        # Rebuild defect ROI list widgets
+        for widget in a._defect_roi_list_frame.winfo_children():
+            widget.destroy()
+        # Sync from a.preset_defect_rois (already loaded from detail/criteria)
+        for roi_idx, roi_data in enumerate(a.preset_defect_rois):
+            self._build_single_defect_roi(a, roi_data, roi_idx)
+        # Sync to canvas
+        self._sync_defect_rois_to_picker(a)
+
+    def _build_single_defect_roi(self, a, roi_data: dict, roi_idx: int) -> None:
+        row_frame = ctk.CTkFrame(a._defect_roi_list_frame, fg_color=PANEL_ALT_BG, corner_radius=6, border_width=1, border_color=BORDER)
+        row_frame.grid(row=roi_idx, column=0, sticky="ew", pady=2)
+        row_frame.columnconfigure(1, weight=1)
+
+        # Name
+        name_var = tk.StringVar(value=roi_data.get("name", f"Defect ROI {chr(65 + roi_idx)}"))
+        ctk.CTkEntry(row_frame, textvariable=name_var, width=100, height=24).grid(row=0, column=0, padx=4, pady=2)
+        name_var.trace_add("write", lambda *a2, idx=roi_idx, v=name_var: self._on_defect_roi_name_changed(a, idx, v))
+
+        # Threshold 0.0-1.0
+        thresh_var = tk.StringVar(value=str(roi_data.get("threshold", 0.5)))
+        ctk.CTkLabel(row_frame, text="Threshold:", font=("Segoe UI", 9), text_color=TEXT_PRIMARY).grid(row=0, column=1, sticky="w", padx=2)
+        ctk.CTkEntry(row_frame, textvariable=thresh_var, width=60, height=24).grid(row=0, column=2, padx=2)
+        thresh_var.trace_add("write", lambda *a2, idx=roi_idx, v=thresh_var: self._on_defect_threshold_changed(a, idx, v))
+
+        # Model path (optional)
+        ctk.CTkLabel(row_frame, text="Model:", font=("Segoe UI", 9), text_color=TEXT_PRIMARY).grid(row=0, column=3, sticky="w", padx=2)
+        model_var = tk.StringVar(value=str(roi_data.get("model_path") or ""))
+        ctk.CTkEntry(row_frame, textvariable=model_var, width=150, height=24).grid(row=0, column=4, padx=2)
+
+        # Remove button
+        ctk.CTkButton(row_frame, text="✕", width=24, height=24, fg_color=BORDER, hover_color=ACCENT_HOVER,
+                      command=lambda idx=roi_idx: self._on_remove_defect_roi(a, idx)).grid(row=0, column=5, padx=4)
+
+    def _on_add_defect_roi(self, a) -> None:
+        idx = a.preset_roi_picker.add_defect_roi(f"Defect ROI {chr(65 + len(a.preset_defect_rois))}")
+        picker_rois = a.preset_roi_picker.get_defect_rois()
+        while len(a.preset_defect_rois) < len(picker_rois):
+            a.preset_defect_rois.append({
+                "name": "", "geometry": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3, "rotation": 0.0},
+                "threshold": 0.5, "model_path": None,
+            })
+        for i, pr in enumerate(picker_rois):
+            if i < len(a.preset_defect_rois):
+                a.preset_defect_rois[i]["name"] = pr.get("name", "")
+                a.preset_defect_rois[i]["geometry"] = {
+                    "x": pr.get("x", 0.1), "y": pr.get("y", 0.1),
+                    "w": pr.get("w", 0.3), "h": pr.get("h", 0.3),
+                    "rotation": pr.get("rotation", 0.0),
+                }
+        self._build_single_defect_roi(a, a.preset_defect_rois[idx], idx)
+        self._update_roi_selector_dropdown(a)
+
+    def _on_remove_defect_roi(self, a, roi_idx: int) -> None:
+        if roi_idx < len(a.preset_defect_rois):
+            a.preset_defect_rois.pop(roi_idx)
+            picker_rois = a.preset_roi_picker.get_defect_rois()
+            if roi_idx < len(picker_rois):
+                a.preset_roi_picker.remove_defect_roi(roi_idx)
+            self._refresh_defect_editor(a)
+            self._update_roi_selector_dropdown(a)
+
+    def _on_defect_roi_name_changed(self, a, roi_idx: int, var: tk.StringVar) -> None:
+        if roi_idx < len(a.preset_defect_rois):
+            a.preset_defect_rois[roi_idx]["name"] = var.get().strip()
+            # Sync to canvas kind
+            picker_rois = a.preset_roi_picker.get_defect_rois()
+            if roi_idx < len(picker_rois):
+                picker_rois[roi_idx]["name"] = var.get().strip()
+                a.preset_roi_picker.set_defect_rois(picker_rois)
+
+    def _on_defect_threshold_changed(self, a, roi_idx: int, var: tk.StringVar) -> None:
+        if roi_idx < len(a.preset_defect_rois):
+            try:
+                val = float(var.get().strip() or "0.5")
+                a.preset_defect_rois[roi_idx]["threshold"] = max(0.0, min(1.0, val))
+            except (ValueError, TypeError):
+                a.preset_defect_rois[roi_idx]["threshold"] = 0.5
+
+    def _sync_defect_rois_to_picker(self, a) -> None:
+        """Sync a.preset_defect_rois to the ROI picker canvas."""
+        rois_for_picker = []
+        for dr in a.preset_defect_rois:
+            geom = dr.get("geometry") or {}
+            rois_for_picker.append({
+                "name": dr.get("name", "ROI"),
+                "x": geom.get("x", 0.0),
+                "y": geom.get("y", 0.0),
+                "w": geom.get("w", 1.0),
+                "h": geom.get("h", 1.0),
+                "rotation": geom.get("rotation", 0.0),
+            })
+        a.preset_roi_picker.set_defect_rois(rois_for_picker)
+        if a.preset_defect_rois:
+            a.preset_roi_picker.set_active_roi("defect:0")
+
+    def _on_calibrate_defect(self, a) -> None:
+        """Open calibration dialog: take N frames from camera, suggest thresholds."""
+        # Placeholder — uses SimpleAnomalyScorer stub
+        from tkinter import messagebox
+        if not a.preset_defect_rois:
+            messagebox.showinfo("Kalibrasi", "Tidak ada ROI defect. Tambahkan ROI terlebih dahulu.")
+            return
+        messagebox.showinfo(
+            "Kalibrasi Threshold",
+            "Fitur kalibrasi memerlukan koneksi kamera live.\n"
+            "Untuk saat ini, atur threshold manual (0.0\u20131.0) per ROI.\n"
+            "Threshold menentukan sensitivitas deteksi anomali."
+        )
 
     def _on_add_comp_roi(self, a) -> None:
         idx = a.preset_roi_picker.add_component_roi(f"ROI {chr(65 + len(a.preset_component_rois))}")
@@ -691,19 +805,20 @@ class TemplatesTab:
 
     def _update_roi_selector_dropdown(self, a) -> None:
         mode = a.preset_validator_mode_var.get()
+        values = ["Part Ready ROI"]
         if mode == "component_count":
-            values = ["Part Ready ROI"]
             for i, cr in enumerate(a.preset_component_rois):
                 name = cr.get("name", f"ROI {chr(65 + i)}")
                 values.append(f"Component: {name}")
-            # Only set choice to first if current choice is not in values
-            current = a.preset_roi_choice_var.get()
-            if current not in values:
-                a.preset_roi_choice_var.set(values[0] if values else "Part Ready ROI")
+        elif mode == "defect":
+            for i, dr in enumerate(a.preset_defect_rois):
+                name = dr.get("name", f"ROI {chr(65 + i)}")
+                values.append(f"Defect: {name}")
         else:
-            values = ["Part Ready ROI", "Sticker ROI"]
-            if a.preset_roi_choice_var.get() not in values:
-                a.preset_roi_choice_var.set("Part Ready ROI")
+            values.append("Sticker ROI")
+        current = a.preset_roi_choice_var.get()
+        if current not in values:
+            a.preset_roi_choice_var.set(values[0] if values else "Part Ready ROI")
         a.preset_roi_selector.configure(values=values)
 
     # ------------------------------------------------------------------
