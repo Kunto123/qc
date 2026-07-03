@@ -17,21 +17,24 @@ python -m pytest backend/tests -q
 
 ## 1. Final suite state
 
-| Metric | Baseline | After FASE 0 |
-| --- | --- | --- |
-| passed | 229 | **292** |
-| failed | 49 | **37** (all documented suspected regressions) |
-| skipped | 1 | **10** (env-blocked api tests, see 2b) |
+| Metric | Baseline | After triage | After adjudication (final) |
+| --- | --- | --- | --- |
+| passed | 229 | 292 | **315** |
+| failed | 49 | 37 | **0** |
+| skipped | 1 | 10 | **10** (real-model integration tests, see 2b) |
 
-(Collected count grew from 279 to 339 because 60 new tests were added. The 49
-baseline failures resolved to: 10 skipped (2b), 2 fixed via env seeding —
-`test_00b` and `test_07` — and 37 kept RED as suspected regressions (section 3).)
+The suite is now **FULLY GREEN** (0 failed). The 10 skips are the api_smoke
+integration tests that require the production sticker model (outside the repo) —
+that's acceptable and expected; see 2b.
 
-The 37 remaining failures are ALL in the "SUSPECTED REGRESSIONS" bucket below —
-they are kept RED on purpose. A visible failing test beats a green lie.
-
-The definition of done for FASE 0: **green except the explicitly-listed suspected
-regressions**. That is met.
+**History:** After my initial triage the 5 regression clusters R1–R5 were kept RED
+pending a human decision. The human orchestrator then ADJUDICATED all five as
+INTENTIONAL redesigns (not accidental regressions), so those tests were obsolete
+tests for deliberately-removed/changed features. I resolved them per the decisions
+in section 3 (RESOLVED) — rewriting to cover the NEW behavior where coverage
+mattered (PLC adapter/worker, deployment, plc/status auth) and deleting only the
+truly-dead OCR tests. Production dead-code cleanup that these decisions imply is
+out of my region and is captured in section 6 (FASE 1 handoff).
 
 ---
 
@@ -71,93 +74,72 @@ Marked with `@unittest.skip(_REQUIRES_REAL_STICKER_MODEL)` in `test_api_smoke.py
 remove the decorators. A later phase should provide a small checked-in test model
 (or a deterministic fake detection backend) so these run in CI.
 
-### 2c. No genuinely-stale tests were rewritten-to-pass
+### 2c. No genuinely-stale tests were silently rewritten-to-pass during triage
 
-Every remaining failure is a real dropped-feature regression (see below), not a
-cosmetic test-drift. The classic "stale drift" symptom the brief mentioned
-(`ModbusTcpClient('10.0.0.5', ...)` positional vs `host=` keyword) is part of the
-SAME PLC-adapter rewrite regression cluster, so it is documented, not silently
-"fixed" — fixing it would hide that the whole adapter API changed.
+During triage I did not paper over any failure. Every RED test was either an
+env/infra skip or was escalated to the orchestrator as a suspected regression
+(section 3). The classic "stale drift" symptom (`ModbusTcpClient('10.0.0.5', ...)`
+positional vs `host=` keyword) was part of the PLC-adapter rewrite cluster (R1) and
+was resolved only after the orchestrator confirmed the rewrite was intentional.
 
 ---
 
-## 3. SUSPECTED REGRESSIONS (kept RED — need a production-code decision)
+## 3. RESOLVED — orchestrator decided (intentional redesign)
 
-Each of these is ambiguous: the failing test may be catching a real accidental
-regression, OR the feature was intentionally removed/redesigned and the test is
-obsolete. I did NOT rewrite them to pass. A human/later phase must decide per item.
+The human orchestrator adjudicated all five clusters as INTENTIONAL redesigns. The
+RED tests were therefore obsolete tests for deliberately-removed/changed features. I
+resolved each below — keeping coverage of the NEW behavior wherever it mattered, and
+deleting only genuinely-dead tests. All are now GREEN.
 
-### R1 — PLC Modbus adapter: entire clamp/readback/command-mode API removed
-**Tests (23):** all of `backend/tests/test_plc_modbus_adapter.py`.
-**Symptom:** `TypeError: ModbusTcpPlcAdapter.__init__() got an unexpected keyword
-argument 'timeout_s'`; `AttributeError: ... object has no attribute
-'send_clamp_hold'`; `KeyError: 'transport'`; `build_plc_adapter(invalid)` no longer
-raises `ValueError`; `ModbusTcpClient('10.0.0.5', ...)` positional vs `host=` keyword.
-**Evidence of regression:** `backend/app/services/plc_adapter.py` was rewritten to a
-minimal `testall.py`-style design (`write_coil`/`read_inputs`, `slave_id`, no
-`send_clamp_hold`/`send_clamp_release`, no readback, no command_mode, no
-`TcpPlcAdapter` compat alias, no `zero_based_addressing`). **BUT** `config.py` still
-defines `plc_modbus_command_mode`, `plc_modbus_zero_based_addressing`,
-`plc_modbus_readback_mode`, hold/release addresses & expected values, and
-`machine_settings_repository.py` still persists them. So the config/persistence layer
-expects a feature-rich adapter that no longer exists → those settings are now DEAD.
-**Production change needed to make tests pass:** restore the clamp/readback/
-command-mode adapter API, OR (if the simplification is intentional) delete the dead
-config fields + persistence and DELETE these tests. Decide the direction first.
+### R1 — PLC adapter: minimal `write_coil`/`read_inputs`/`slave_id` design is intended
+**Decision:** the minimal adapter is the new design (clamp/readback/command-mode API
+intentionally removed).
+**Action taken:** REPLACED `backend/tests/test_plc_modbus_adapter.py` — retired the 23
+obsolete old-API tests and wrote a lean suite (19 tests) for the API that exists now:
+`DryRunPlcAdapter` lifecycle/status/read_inputs; `ModbusTcpPlcAdapter` host/port/timeout
+wiring + lazy-connect + `write_coil(addr,val,device_id=slave_id)` + FC02 read + error
+raise; `ModbusRtuPlcAdapter` constructor + write; `build_plc_adapter` selection
+(dry-run/tcp/rtu/unknown→dry-run). PLC adapter coverage did not drop to zero.
+**Dead production code this leaves → FASE 1:** see section 6.
 
-### R2 — PLC worker: constructor param `hold_ms` dropped; clamp semantics changed
-**Tests:** `test_api_smoke::test_15e_plc_worker_enqueue_once_per_commit`,
-`test_api_smoke::test_15f_plc_worker_dry_run_adapter_logs_only`,
-`test_plc_modbus_adapter::test_plc_worker_input1_manual_release_still_all_off`.
-**Symptom:** `PlcWorker.__init__() got an unexpected keyword argument 'hold_ms'`;
-`'DryRunPlcAdapter' object has no attribute 'send_clamp_hold'`; input1 manual
-release no longer triggers `all_off` (`0 != 1`).
-**Evidence:** `PlcWorker.__init__` now takes `accept_pulse_ms` + address params
-(no `hold_ms`); the clamp hold/release model was replaced by an accept-pulse +
-input-polling strategy model. Same subsystem rewrite as R1.
-**Production change needed:** re-add `hold_ms`/clamp API, or delete/rewrite these tests.
+### R2 — PLC worker: accept-pulse + input-polling model is intended (no `hold_ms`)
+**Decision:** clamp hold/release + `hold_ms` intentionally replaced.
+**Action taken:** REWROTE the three worker tests for the new behavior:
+- `test_15e` → `test_15e_plc_worker_notify_decision_enqueues_once`: asserts
+  `worker.notify_decision(...)` enqueues one command per decision (dry-run).
+- `test_15f`: asserts `DryRunPlcAdapter` write/read/all_off + status (was send_clamp_*).
+- The `test_plc_modbus_adapter` worker test → `PlcWorkerInputPollingTest`: IN1
+  manual-release needs stable debounce before all-off; IN2 template-cycle once per
+  debounce; `notify_decision` enqueues. Worker coverage preserved.
 
-### R3 — `/inspection/plc/status` no longer admin-only
-**Test:** `test_api_smoke::test_15b_plc_status_requires_admin`.
-**Symptom:** operator token gets `200`, test expects `403`.
-**Evidence:** route is decorated `@require_roles(UserRole.ADMIN, UserRole.OPERATOR)`
-in `backend/app/api/inspection_routes.py:408` — operators are explicitly allowed.
-**Ambiguity:** opening a read-only status endpoint to line operators is plausibly
-intentional; but the test asserts the opposite. Decide: keep operator access (delete
-test) or re-restrict to admin (real regression).
+### R3 — `/inspection/plc/status` operator access is intended
+**Decision:** operators legitimately need to see PLC status.
+**Action taken:** RENAMED `test_15b` → `test_15b_plc_status_allows_operator_but_rejects_anonymous`;
+now asserts operator and admin get `200` and an unauthenticated caller gets `401`.
 
-### R4 — Deployment records dropped `line_id` / `station_id`; slot semantics changed
-**Tests:** `test_api_smoke::test_11b_admin_can_update_deployment_binding`,
-`test_api_smoke::test_11d_deployment_allows_multiple_active_records_for_same_slot`.
-**Symptom:** `KeyError: 'line_id'` on the update response; `test_11d` finds no active
-records matching its `line_id`/`station_id` filter.
-**Evidence:** `deployments_repository.deploy()` no longer stores `line_id`/`station_id`
-(record has only template/version fields); `update_deployment()` only mutates
-`template_version_id`/`template_name` (ignores `line_id`/`station_id` sent in the PUT
-body); `get_active()` returns the last active deployment regardless of line/station.
-Deployments appear to have been redesigned from per-line/station slots to a single
-global active binding.
-**Production change needed:** if multi-line/station deployment is still a requirement,
-restore `line_id`/`station_id` storage + slot-scoped `get_active`/update. If the
-global-binding redesign is intended, delete/rewrite these two tests.
+### R4 — Deployment is a single global active binding (no line/station slots)
+**Decision:** the global-binding redesign is intended.
+**Action taken:** REWROTE the two deployment tests to the new semantics:
+- `test_11b`: admin PUT re-binds the deployment to a new template version;
+  `/deployments/active` (no query params) returns the single active binding reflecting
+  the re-bound version; operator PUT still `403`.
+- `test_11d` → `test_11d_get_active_returns_latest_of_multiple_active_deployments`:
+  deploying twice leaves both active; `get_active` returns the latest; both created IDs
+  appear active in the list (scoped by created IDs, not by removed slot fields).
 
-### R5 — Sticker OCR validation disabled and its StickerRule/VisionConfig fields dropped
-**Tests (9):** all of `backend/tests/test_sticker_detection_gates.py::OcrAnchorPrimaryGateTest`,
-`...::StickerOnlyOcrGateTest`, and both `backend/tests/test_sticker_inference.py`.
-**Symptom:** `TypeError: StickerRule.__init__() got an unexpected keyword argument
-'ocr_mode'` / `'use_ocr'`; `VisionConfig.__init__() got an unexpected keyword argument
-'ocr_engine'`.
-**Evidence:** OCR appears deliberately disabled but not cleanly removed:
-- `StickerEvaluator`/`sticker_inference.py` still READ `use_ocr`, `ocr_expected_code`,
-  `expected_dot_x/y` via `getattr(sticker_rule, ..., default)` — but `StickerRule`
-  no longer declares those fields and `templates._VALID_STICKER_FIELDS` strips them
-  on parse, so any template's OCR settings are silently lost.
-- `sticker_inference._resolve_ocr_engine()` is hardcoded `return "disabled"` (ignores
-  the `vision` arg / the removed `ocr_engine` field).
-**Production change needed:** either (a) fully remove OCR (delete the getattr calls,
-delete these tests, note in migration docs) or (b) restore OCR (re-add the StickerRule/
-VisionConfig fields to `_VALID_STICKER_FIELDS` + real `_resolve_ocr_engine`). Right now
-it is a half-removed feature — the worst state — and these tests correctly flag it.
+### R5 — OCR sticker validation fully removed by design
+**Decision:** OCR is fully removed; sticker now validates presence/position/tilt, NOT
+code/content.
+**Action taken:** DELETED only the OCR-specific tests and PRESERVED the rest:
+- `test_sticker_detection_gates.py`: deleted `OcrAnchorPrimaryGateTest` and the OCR
+  cases of `StickerOnlyOcrGateTest`; kept the non-OCR tilt-normalization test (class
+  renamed `TiltNormalizationTest`); all tilt-gate / observability / backward-compat
+  classes untouched.
+- `test_sticker_inference.py`: deleted the two `_augment_with_*_ocr` payload tests; kept
+  the OCR text-normalization utility tests (`_normalize_ocr_text`, `_parse_unique_code`,
+  flip-fallback) which test helpers that still exist.
+A retirement note was added to `TESTING.md`.
+**Dead production code this leaves → FASE 1:** see section 6.
 
 ---
 
@@ -191,4 +173,51 @@ it is a half-removed feature — the worst state — and these tests correctly f
 | `backend/tests/test_golden_templates.py` | 7 | 3 golden fixtures parse+validate+dispatch; `Decision -> validation_details` intact + JSON-safe |
 | `backend/tests/fixtures/golden_template_{sticker,counter,defect}.json` | 3 | frozen template contracts for later phases |
 
-Total new: **60 tests** (all green).
+Total new: **60 tests** (all green). After adjudication the PLC adapter/worker and
+deployment/plc-status tests were rewritten to the new behavior (section 3), so the
+final suite is **315 passed / 0 failed / 10 skipped**.
+
+---
+
+## 6. FASE 1 DEAD-CODE CLEANUP (production — OUT OF MY REGION)
+
+The orchestrator's "intentional redesign" decisions leave dead production code that I
+must NOT touch (it lives under `backend/app/` / `shared/`). Capture for FASE 1:
+
+### 6a. CONTRACT / RUNTIME — dead PLC Modbus settings (from R1)
+`backend/app/core/config.py` still DEFINES, and
+`backend/app/repositories/machine_settings_repository.py` still PERSISTS, settings the
+new minimal adapter ignores entirely:
+- `plc_modbus_command_mode`
+- `plc_modbus_zero_based_addressing`
+- `plc_modbus_readback_mode`
+- hold/release addresses + expected hold/release values (readback pair)
+
+These are now NO-OP settings. They will still render in the admin UI as if they do
+something. **FASE 1 action:** remove/reconcile these config fields + their persistence
++ any admin-UI widgets that expose them, so the settings surface matches the adapter.
+
+### 6b. RUNTIME — dead OCR reads in sticker inference (from R5)
+`backend/app/services/sticker_inference.py` still READS removed fields via
+`getattr(sticker_rule, "use_ocr", False)`, `getattr(..., "ocr_expected_code", ...)`,
+`getattr(..., "expected_dot_x/y", ...)` — always the defaults now, since `StickerRule`
+dropped those fields and `templates._VALID_STICKER_FIELDS` strips them on parse. And
+`_resolve_ocr_engine()` is hardcoded `return "disabled"`. The
+`_augment_with_anchor_ocr` / `_augment_with_ocr_only` code paths (and any OCR path in
+`InspectionSessionService._validate_sticker`) are now dead. **FASE 1 action:** delete
+the dead OCR reads/methods now that OCR is officially removed. (`StickerEvaluator` also
+still has OCR-shaped `additional` handling that is moot — see it when wiring B5.)
+
+### 6c. RUNTIME — PLC hardening targets the NEW design (note for FASE 1)
+The "Ketahanan PLC" / PLC-resilience hardening must target the NEW minimal
+accept-pulse + input-polling model (`ModbusTcpPlcAdapter.write_coil`/`read_inputs`,
+`PlcWorker` accept-pulse + `_poll_inputs` + strategy). **There is no clamp/hold/release
+or readback API to harden** — do not design hardening around the removed API.
+
+### 6d. Non-blocking code-smells still open (from section 4)
+- `DefectEvaluator` `w<=0` empty-crop branch is dead (geometry clamps to ≥1px);
+  `_aggregate_score` returns `float("inf")` on empty slices (JSON-unsafe if it ever
+  reaches `Decision.details`). Pinned by a test.
+- `StickerEvaluator` is still not wired into `registry.py` (TODO B5); sticker uses the
+  inline `_validate_sticker` path. Pinned by a test.
+- api_smoke cross-file shared state under `QC_SUITE_DATA_ROOT` — watch for flakiness.

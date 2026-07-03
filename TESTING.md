@@ -24,15 +24,29 @@ seeds non-empty, and register custom markers.
 
 ### Expected state
 
-The suite is green **except** the failures documented in `HANDOFF.md` under
-"SUSPECTED REGRESSIONS". Those are kept RED on purpose — they flag production
-changes (PLC adapter/worker rewrite, deployment slot redesign, OCR half-removal)
-that need a human decision. Do not silence them by editing the test to pass; if you
-resolve the underlying production question, either restore the behavior (test goes
-green) or delete the obsolete test **and** update `HANDOFF.md`.
+The suite is **fully green: 0 failed**. Ten `test_api_smoke` tests are skipped
+because they need the real trained sticker model (outside the repo); that is
+expected — see `HANDOFF.md` section 2b to un-skip them locally.
 
-Ten `test_api_smoke` tests are skipped because they need the real trained sticker
-model (outside the repo). See `HANDOFF.md` section 2b to un-skip them locally.
+(History: five clusters of RED tests from a multi-round refactor were adjudicated by
+the orchestrator as intentional redesigns and resolved — PLC adapter/worker rewrite,
+deployment global-binding, `/plc/status` operator access, OCR removal. See
+`HANDOFF.md` section 3 "RESOLVED" and section 6 "FASE 1 dead-code cleanup".)
+
+If you later change what the code *does*, do not silence a failing test by editing it
+to pass — either restore the behavior (test goes green) or delete/rewrite the obsolete
+test **and** update `HANDOFF.md`.
+
+### Retired: OCR sticker validation (by design)
+
+OCR-based sticker validation was **removed on purpose**. Sticker mode now validates
+**presence / position / tilt**, NOT code/content. The OCR-specific tests were retired:
+`OcrAnchorPrimaryGateTest`, the OCR cases of `StickerOnlyOcrGateTest` (in
+`test_sticker_detection_gates.py`), and the `_augment_with_*_ocr` payload tests (in
+`test_sticker_inference.py`). Non-OCR tests (tilt gates, geometry/position, OCR
+text-normalization helpers that still exist) were preserved. Do NOT re-add tests that
+depend on the removed `StickerRule`/`VisionConfig` OCR fields (`use_ocr`,
+`ocr_expected_code`, `ocr_mode`, `ocr_engine`, `expected_dot_x/y`, `max_anchor_offset`).
 
 ## The rule
 
