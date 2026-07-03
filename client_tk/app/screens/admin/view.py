@@ -172,7 +172,6 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_validator_mode_var = tk.StringVar(value="sticker")
         self.preset_component_rois: list = []
         self.preset_defect_rois: list = []
-        self.preset_defect_default_model_var = tk.StringVar()
         self._calib_empty_mean: float = 0.0
         self._calib_part_mean: float = 0.0
         self._calib_part_std: float = 0.0
@@ -232,6 +231,9 @@ class AdminScreen(ctk.CTkFrame):
         self.after_idle(self._apply_responsive_layout)
 
         self.refresh_all()
+        # Guard: verify all preset_* vars are registered in FORM_DEFAULTS
+        # Runs after tabs are built so all vars (including from _build_wizard) exist
+        self._assert_form_defaults()
 
     # ------------------------------------------------------------------
     # Layout
@@ -868,6 +870,110 @@ class AdminScreen(ctk.CTkFrame):
         self.admin_cards["accept"].set_value(accept)
         self.admin_cards["reject"].set_value(reject)
 
+    # ── Centralized form defaults ──
+    # All form state variables must be registered here. Adding a new preset_*
+    # variable without registering it triggers _assert_form_defaults() at startup.
+    FORM_DEFAULTS = {
+        # tk variables
+        "preset_name_var": "",
+        "preset_description_var": "",
+        "preset_validator_mode_var": "sticker",
+        "preset_model_choice_var": "",
+        "preset_model_path_var": "",
+        "preset_model_meta_path_var": "",
+        "preset_model_classes_var": "",
+        "preset_runtime_var": "auto",
+        "preset_conf_threshold_var": "0.25",
+        "preset_expected_class_var": "",
+        "preset_max_tilt_var": "",
+        "preset_tilt_gate_var": False,
+        "preset_gap_threshold_var": "0.85",
+        "preset_part_ready_method_var": "gap_template_match",
+        "preset_mean_max_var": "105.0",
+        "preset_std_max_var": "35.0",
+        "preset_min_match_ratio_var": "0.5",
+        "preset_camera_index_var": "0",
+        "preset_camera_rotation_var": "0",
+        "preset_roi_choice_var": "Part Ready ROI",
+        # complex types
+        "preset_component_rois": lambda: [],
+        "preset_defect_rois": lambda: [],
+    }
+
+    def _reset_preset_form(self) -> None:
+        """Reset ALL form fields to defaults. Called before loading a new preset or on New Preset."""
+        for key, default in self.FORM_DEFAULTS.items():
+            obj = getattr(self, key, None)
+            if obj is None:
+                continue
+            if isinstance(obj, tk.Variable):
+                if isinstance(default, bool):
+                    obj.set(bool(default))
+                else:
+                    obj.set(str(default))
+            elif isinstance(obj, list):
+                # Create a NEW list — do NOT .clear() the old one (widgets may share references)
+                setattr(self, key, default() if callable(default) else list(default))
+            elif hasattr(obj, "set"):
+                obj.set(str(default))
+        # Reset visual children
+        self._preset_roi_image_path = ""
+        if hasattr(self, "preset_roi_picker"):
+            try:
+                self.preset_roi_picker.clear()
+                self.preset_roi_picker.set_component_rois([])
+                self.preset_roi_picker.set_defect_rois([])
+                self._sync_preset_roi_picker(part_ready_rotation=0.0, sticker_rotation=0.0)
+            except Exception:
+                pass
+        # Reset ROI entry fields (prefix not preset_)
+        for var_attr in ("part_ready_roi_x_var", "part_ready_roi_y_var",
+                         "part_ready_roi_w_var", "part_ready_roi_h_var",
+                         "sticker_roi_x_var", "sticker_roi_y_var",
+                         "sticker_roi_w_var", "sticker_roi_h_var"):
+            v = getattr(self, var_attr, None)
+            if v is not None:
+                defaults = {"x": "0.2", "y": "0.2", "w": "0.6", "h": "0.6"}
+                key = var_attr.split("_")[-2]  # x, y, w, h
+                default = defaults.get(key, "0.2") if "sticker" in var_attr else defaults.get(key, "0.2")
+                if "part_ready" in var_attr:
+                    default = defaults.get(key, "0.2") if key == "x" or key == "y" else defaults.get(key, "0.25")
+                v.set(default)
+        # Refresh editors
+        if hasattr(self, "_templates_tab") and self._templates_tab:
+            try:
+                self._templates_tab._refresh_comp_roi_editor(self)
+                self._templates_tab._refresh_defect_editor(self)
+                self._templates_tab._update_roi_selector_dropdown(self)
+            except Exception:
+                pass
+        # Clear gap ref status
+        if hasattr(self, "gap_ref_status_label"):
+            try:
+                self.gap_ref_status_label.configure(
+                    text="Referensi: belum dikonfigurasi", foreground="gray")
+            except Exception:
+                pass
+
+    def _assert_form_defaults(self) -> None:
+        """Assert all preset_* variables are registered in FORM_DEFAULTS.
+        Call once at end of __init__ to catch missing registrations.
+        """
+        missing = []
+        for name in dir(self):
+            if not name.startswith("preset_"):
+                continue
+            if name in self.FORM_DEFAULTS:
+                continue
+            obj = getattr(self, name, None)
+            if isinstance(obj, (tk.Variable, list, dict)):
+                missing.append(name)
+        if missing:
+            raise AssertionError(
+                f"Form variables not registered in FORM_DEFAULTS: {missing}. "
+                "Add them to FORM_DEFAULTS to prevent state-leak bugs."
+            )
+
     # ------------------------------------------------------------------
     # Preset behavior
     def reset_preset_wizard(self) -> None:
@@ -879,27 +985,7 @@ class AdminScreen(ctk.CTkFrame):
             for item_id in self.preset_table.selection():
                 self.preset_table.selection_remove(item_id)
             self.preset_table.focus("")
-        self.preset_name_var.set("")
-        self.preset_description_var.set("")
-        self.preset_expected_class_var.set("")
-        self.preset_conf_threshold_var.set("0.25")
-        self.preset_max_tilt_var.set("")
-        self.preset_tilt_gate_var.set(False)
-        self.preset_gap_threshold_var.set("0.85")
-        self.preset_camera_index_var.set("0")
-        self.preset_camera_rotation_var.set("0")
-        self.part_ready_roi_x_var.set("0.2")
-        self.part_ready_roi_y_var.set("0.2")
-        self.part_ready_roi_w_var.set("0.25")
-        self.part_ready_roi_h_var.set("0.25")
-        self.sticker_roi_x_var.set("0.2")
-        self.sticker_roi_y_var.set("0.2")
-        self.sticker_roi_w_var.set("0.6")
-        self.sticker_roi_h_var.set("0.6")
-        self._preset_roi_image_path = ""
-        if hasattr(self, "preset_roi_picker"):
-            self.preset_roi_picker.clear()
-            self._sync_preset_roi_picker(part_ready_rotation=0.0, sticker_rotation=0.0)
+        self._reset_preset_form()
         self._set_status("Preset wizard reset.")
 
     def _on_preset_selected(self, _event=None) -> None:
@@ -944,6 +1030,8 @@ class AdminScreen(ctk.CTkFrame):
         self._set_status(f"Loaded preset {_safe_text(deployment.get('template_name'))}.")
 
     def _apply_preset_detail(self, detail: dict, *, deployment: dict | None = None) -> None:
+        # Reset form first to purge any state from previous preset/mode
+        self._reset_preset_form()
         self.current_template_id = int(detail.get("id") or (deployment or {}).get("template_id") or 0) or None
         self.current_template_version_id = int(detail.get("version_id") or (deployment or {}).get("template_version_id") or 0) or None
         self.preset_name_var.set(str(detail.get("name") or (deployment or {}).get("template_name") or ""))
@@ -1000,12 +1088,19 @@ class AdminScreen(ctk.CTkFrame):
         )
 
         vision = detail.get("vision") or {}
-        model_path = str(vision.get("model_path") or "")
-        self.preset_model_path_var.set(model_path)
+        _crit = detail.get("criteria") or {}
+        _vm = mode_from_template(detail)
+        # Single model selector: load from criteria.default_model_path in defect mode,
+        # from vision.model_path in sticker/counter mode
+        if _vm == "defect":
+            _model_for_selector = str(_crit.get("default_model_path") or vision.get("model_path") or "")
+        else:
+            _model_for_selector = str(vision.get("model_path") or "")
+        self.preset_model_path_var.set(_model_for_selector)
         self.preset_model_meta_path_var.set(str(vision.get("model_meta_path") or ""))
         self.preset_conf_threshold_var.set(str(vision.get("conf_threshold", 0.25)))
         self.preset_runtime_var.set(str(vision.get("runtime") or "auto"))
-        self._select_model_label_for_path(model_path)
+        self._select_model_label_for_path(_model_for_selector)
 
         # ── Load component ROIs from detail (criteria first, top-level fallback) ──
         _crit = detail.get("criteria") or {}
@@ -1575,9 +1670,11 @@ class AdminScreen(ctk.CTkFrame):
                 "component_rois": self.preset_component_rois,
             }
         elif mode == "defect":
+            # Single model selector writes to criteria.default_model_path for defect mode
+            _defect_model = self.preset_model_path_var.get().strip() or None
             _criteria = {
                 "rois": getattr(self, "preset_defect_rois", []),
-                "default_model_path": self.preset_defect_default_model_var.get().strip() or None,
+                "default_model_path": _defect_model,
                 "inference_mode": getattr(self, "_defect_infer_mode_var", tk.StringVar(value="whole_part")).get(),
                 "aggregation": "p99",
             }
@@ -1611,7 +1708,8 @@ class AdminScreen(ctk.CTkFrame):
                 "rotation": self.preset_roi_picker.get_roi("sticker").get("rotation", 0.0),
             },
             "vision": {
-                "model_path": model_path,
+                # Defect mode writes placeholder to vision.model_path; actual model->criteria.default_model_path
+                "model_path": model_path if mode != "defect" else "models/dummy.pt",
                 "model_meta_path": self.preset_model_meta_path_var.get().strip() or None,
                 "runtime": self.preset_runtime_var.get().strip() or "auto",
                 "conf_threshold": _float_or_default(self.preset_conf_threshold_var.get(), 0.15),

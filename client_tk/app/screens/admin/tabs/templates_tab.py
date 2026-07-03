@@ -128,7 +128,9 @@ class TemplatesTab:
         a._entry(wizard, 5, 0, "Camera Index", a.preset_camera_index_var, columnspan=1)
 
         track_widgets = []
-        ttk.Label(wizard, text="Model").grid(row=6, column=0, sticky="w", padx=(12, 8), pady=5)
+        a._preset_model_label_var = tk.StringVar(value="Model")
+        a._preset_model_label = ttk.Label(wizard, textvariable=a._preset_model_label_var)
+        a._preset_model_label.grid(row=6, column=0, sticky="w", padx=(12, 8), pady=5)
         track_widgets.extend(wizard.grid_slaves(row=6))
         a.preset_model_selector = ttk.Combobox(wizard, textvariable=a.preset_model_choice_var, state="readonly")
         a.preset_model_selector.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(0, 12), pady=5)
@@ -343,9 +345,16 @@ class TemplatesTab:
         # Show/hide defect editor
         if hasattr(a, "_defect_editor_frame"):
             a._defect_editor_frame.grid() if _is_defect else a._defect_editor_frame.grid_remove()
-        # Hide YOLO model selector in defect mode
-        for w in getattr(a, "_model_selector_widgets", []):
-            w.grid_remove() if _is_defect else w.grid()
+        # Update model selector label & visibility by mode
+        if _is_defect:
+            a._preset_model_label_var.set("Model Anomaly (semua ROI)")
+            for w in getattr(a, "_model_selector_widgets", []):
+                w.grid()
+        else:
+            a._preset_model_label_var.set("Model")
+            for w in getattr(a, "_model_selector_widgets", []):
+                w.grid()
+        # In defect mode, the model selector is visible but writes to criteria.default_model_path
         # Show/hide sticker and part-ready ROI on canvas based on mode
         if hasattr(a, "preset_roi_picker"):
             a.preset_roi_picker.set_sticker_visible(_is_sticker)
@@ -515,12 +524,6 @@ class TemplatesTab:
         header.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
         ctk.CTkLabel(header, text="Defect Scan ROIs", font=("Segoe UI", 10, "bold"), text_color=TEXT_PRIMARY).pack(side="left")
 
-        # Default anomaly model field (in header row, after title)
-        ctk.CTkLabel(header, text="Model Anomali (default):", font=("Segoe UI", 9), text_color=TEXT_PRIMARY).pack(side="left", padx=(12, 4))
-        a.preset_defect_default_model_entry = ctk.CTkEntry(header, textvariable=a.preset_defect_default_model_var, width=180, height=24)
-        a.preset_defect_default_model_entry.pack(side="left", padx=(0, 4))
-        ctk.CTkLabel(header, text="(kosong = scorer sederhana)", font=("Segoe UI", 9), text_color=TEXT_SECONDARY).pack(side="left", padx=(0, 8))
-
         # Inference strategy selector
         ctk.CTkLabel(header, text="Inferensi:", font=("Segoe UI", 9), text_color=TEXT_PRIMARY).pack(side="left", padx=(12, 4))
         a._defect_infer_mode_var = tk.StringVar(value="whole_part")
@@ -589,12 +592,7 @@ class TemplatesTab:
         ctk.CTkEntry(row_frame, textvariable=thresh_var, width=60, height=24).grid(row=0, column=2, padx=2)
         thresh_var.trace_add("write", lambda *a2, idx=roi_idx, v=thresh_var: self._on_defect_threshold_changed(a, idx, v))
 
-        # Override model path (optional)
-        ctk.CTkLabel(row_frame, text="Override:", font=("Segoe UI", 9), text_color=TEXT_PRIMARY).grid(row=0, column=3, sticky="w", padx=2)
-        model_var = tk.StringVar(value=str(roi_data.get("model_path") or ""))
-        model_entry = ctk.CTkEntry(row_frame, textvariable=model_var, width=150, height=24)
-        model_entry.grid(row=0, column=4, padx=2)
-        model_entry.configure(placeholder_text="kosong = pakai default")
+        # (per-ROI override model_path removed from UI; kept in contract as optional field)
 
         # Remove button
         ctk.CTkButton(row_frame, text="✕", width=24, height=24, fg_color=BORDER, hover_color=ACCENT_HOVER,
