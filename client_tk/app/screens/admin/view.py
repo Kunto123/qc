@@ -578,10 +578,10 @@ class AdminScreen(ctk.CTkFrame):
                 )
                 if tpl:
                     latest_name = tpl.get("name") or latest_name
-            # Get validator mode from template
+            # Get validator mode from template (prefer top-level `mode` field)
             _vm = "sticker"
             if template_id > 0 and tpl:
-                _vm = str(tpl.get("sticker", {}).get("validator_mode") or "ml_detection")
+                _vm = str(tpl.get("mode") or tpl.get("sticker", {}).get("validator_mode") or "ml_detection")
             _mode_label = {"component_count": "Component Counter", "defect": "Defect Scan"}.get(_vm, "QC Sticker")
             self.preset_table.insert(
                 "",
@@ -599,7 +599,7 @@ class AdminScreen(ctk.CTkFrame):
             template_id = int(item.get("id") or 0)
             if template_id in active_template_ids:
                 continue
-            _vm = str(item.get("sticker", {}).get("validator_mode") or "ml_detection")
+            _vm = str(item.get("mode") or item.get("sticker", {}).get("validator_mode") or "ml_detection")
             _mode_label = {"component_count": "Component Counter", "defect": "Defect Scan"}.get(_vm, "QC Sticker")
             self.preset_table.insert(
                 "",
@@ -932,13 +932,17 @@ class AdminScreen(ctk.CTkFrame):
         sticker = detail.get("sticker") or {}
         part_ready = detail.get("part_ready") or {}
         # Restore validator mode — fires _refresh_comp_roi_editor trace
-        _vm = str(sticker.get("validator_mode") or "")
-        if _vm in ("component_count",):
-            self.preset_validator_mode_var.set("component_count")
-        elif _vm in ("defect",):
-            self.preset_validator_mode_var.set("defect")
+        # Read from new `mode` field first, fall back to legacy sticker.validator_mode
+        _mode_raw = str(detail.get("mode") or "").strip().lower()
+        if _mode_raw:
+            from shared.contracts.templates import normalize_mode
+            _vm = normalize_mode(_mode_raw)
         else:
-            self.preset_validator_mode_var.set("sticker")
+            _vm = str(sticker.get("validator_mode") or "ml_detection").strip().lower()
+            # Map legacy values to normalized mode
+            _vm = {"component_count": "counter", "defect": "defect", "ml_detection": "sticker"}.get(_vm, "sticker")
+        # Radio button values use normalized mode names
+        self.preset_validator_mode_var.set({"counter": "component_count", "defect": "defect", "sticker": "sticker"}.get(_vm, "sticker"))
         self.preset_expected_class_var.set(str(sticker.get("expected_class") or ""))
         self.preset_max_tilt_var.set("" if sticker.get("max_tilt_degrees") is None else str(sticker.get("max_tilt_degrees")))
         self.preset_tilt_gate_var.set(bool(sticker.get("tilt_gate_enabled", False)))
@@ -1329,8 +1333,17 @@ class AdminScreen(ctk.CTkFrame):
         self.current_template_id = template_id
         self.current_template_version_id = version_id
         self._editing_deployment_id = int(deployment.get("id") or 0) or self._editing_deployment_id
+        # Re-apply saved data to wizard so UI reflects updated mode/criteria
+        try:
+            reloaded = self.api.get_template(template_id) if template_id else None
+            if reloaded:
+                self._apply_preset_detail(reloaded, deployment=deployment)
+                self._set_status(f"Preset deployed — mode: {reloaded.get('mode', 'sticker')}")
+            else:
+                self._set_status("Preset deployed.")
+        except Exception:
+            self._set_status("Preset deployed.")
         self.refresh_presets()
-        self._set_status("Preset deployed.")
         messagebox.showinfo("Preset", "Preset saved and deployed.")
 
 
@@ -1554,14 +1567,14 @@ class AdminScreen(ctk.CTkFrame):
             },
             "part_ready": {
                 "enabled": True,
-                "method": "" if mode != "sticker" else self.preset_part_ready_method_var.get(),
-                "gap_match_threshold": _float_or_default(self.preset_gap_threshold_var.get(), 0.85) if mode == "sticker" else 0.85,
-                "gap_ref_path": self._get_existing_gap_ref_path() if mode == "sticker" else None,
+                "method": self.preset_part_ready_method_var.get(),
+                "gap_match_threshold": _float_or_default(self.preset_gap_threshold_var.get(), 0.85),
+                "gap_ref_path": self._get_existing_gap_ref_path(),
                 "stable_ms": 500,
                 "release_ms": 300,
-                "mean_max": _float_or_default(self.preset_mean_max_var.get(), 105.0) if mode == "sticker" else 105.0,
-                "std_max": _float_or_default(self.preset_std_max_var.get(), 35.0) if mode == "sticker" else 35.0,
-                "min_match_ratio": _float_or_default(self.preset_min_match_ratio_var.get(), 0.5) if mode == "sticker" else 0.5,
+                "mean_max": _float_or_default(self.preset_mean_max_var.get(), 105.0),
+                "std_max": _float_or_default(self.preset_std_max_var.get(), 35.0),
+                "min_match_ratio": _float_or_default(self.preset_min_match_ratio_var.get(), 0.5),
             },
             "sticker": {
                 "part_name": expected_class,

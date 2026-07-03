@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
-
 from backend.app.services.evaluators.base import ModeEvaluator
-from backend.app.services.evaluators.sticker import StickerEvaluator
 from backend.app.services.evaluators.counter import CounterEvaluator
 from backend.app.services.evaluators.defect import DefectEvaluator
+# TODO(B5): connect StickerEvaluator once migration from inline _validate_sticker is complete.
+# from backend.app.services.evaluators.sticker import StickerEvaluator
 
 # ── Registry ────────────────────────────────────────────────────────────────
 # To add a new mode: create an evaluator class, import it, add to _EVALUATORS.
@@ -14,7 +13,7 @@ from backend.app.services.evaluators.defect import DefectEvaluator
 _EVALUATORS: dict[str, ModeEvaluator] = {
     e.mode_name: e
     for e in (
-        StickerEvaluator(),
+        # StickerEvaluator(),  # B5: not yet connected — sticker uses inline path
         CounterEvaluator(),
         DefectEvaluator(),
     )

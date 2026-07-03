@@ -822,11 +822,7 @@ class InspectionSessionService:
         _settle_now = datetime.now(UTC)
         _raw_part_ready = part_ready.get("part_ready", False)
 
-        if is_component_counter:
-            # No settle wait for component_count: part is always "ready" from frame 1.
-            part_ready_settled = True
-            settle_remaining_ms = 0.0
-        elif state.part_ready_latched:
+        if state.part_ready_latched:
             # Sudah engaged — tetap settled tanpa melihat raw part_ready
             part_ready_settled = True
             settle_remaining_ms = 0.0
@@ -1214,6 +1210,7 @@ class InspectionSessionService:
             part_ready_payload=effective_part_ready,
             username=username,
             user_id=user_id,
+            full_frame=frame,  # needed for defect mode (crop ROIs)
         )
         timings["validation_ms"] = _elapsed_ms(validation_started)
         validation_details = validation.get("validation_details") or {}
@@ -2576,6 +2573,7 @@ class InspectionSessionService:
         part_ready_payload: dict[str, Any],
         username: str | None,
         user_id: int | None,
+        full_frame=None,
     ) -> dict[str, Any]:
         sticker = state.template.sticker
         validator_mode = str(getattr(sticker, "validator_mode", "ml_detection") or "ml_detection").strip().lower()
@@ -2596,10 +2594,9 @@ class InspectionSessionService:
         if evaluator_mode != "sticker":
             from backend.app.services.evaluators.registry import get_evaluator as _get_eval
             from backend.app.services.evaluators.base import EvalContext
-            _ctx = EvalContext(
-                detections=detections,
-                frame=None,
-                criteria={
+            # Build mode-specific EvalContext
+            if evaluator_mode == "counter":
+                _criteria = state.template.criteria if state.template.criteria else {
                     "component_rois": [
                         {
                             "name": cr.name,
@@ -2616,7 +2613,20 @@ class InspectionSessionService:
                         }
                         for cr in state.template.component_rois
                     ],
-                },
+                }
+                _frame = None
+            elif evaluator_mode == "defect":
+                _criteria = state.template.criteria if state.template.criteria else {"rois": []}
+                # Frame required for defect (crop ROIs per camera geometry)
+                _frame = full_frame
+            else:
+                _criteria = {}
+                _frame = None
+
+            _ctx = EvalContext(
+                detections=detections,
+                frame=_frame,
+                criteria=_criteria,
                 state=state,
                 additional={
                     "accept_stable_frames": self._accept_stable_frames,
@@ -2635,18 +2645,6 @@ class InspectionSessionService:
                 _reason = _decision.reason_code
                 _details = _decision.details
 
-                # Check for stabilizing state (all ROIs ok but not yet N consecutive)
-                if not _is_accept and _details.get("stabilizing"):
-                    result = self._validate_component_count(
-                        state=state,
-                        detections=detections,
-                        detection_payload=detection_payload,
-                        part_ready_payload=part_ready_payload,
-                        username=username,
-                        user_id=user_id,
-                    )
-                    return result
-
                 _decision_str = DecisionCode.ACCEPT.value if _is_accept else DecisionCode.REJECT.value
                 result = {
                     "decision": _decision_str,
@@ -2656,9 +2654,9 @@ class InspectionSessionService:
                 }
                 # Add convenience fields for backward compat
                 if _details.get("mode") == "counter":
-                    _roi_list = _details.get("rois", [])
                     _all_ok = _details.get("all_rois_ok", False)
                     if _all_ok and _is_accept:
+                        # Update stability counters (moved from legacy _validate_component_count)
                         from datetime import UTC, datetime
                         import time as _time
                         _now = _time.time()

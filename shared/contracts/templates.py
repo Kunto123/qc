@@ -83,11 +83,14 @@ class ComponentClassTarget:
     max_count: int | None = None
 
     def __post_init__(self) -> None:
-        """Backward compat: derive min/max from count if not explicitly set."""
-        if self.min_count is None:
+        """Backward compat: derive min/max from count ONLY for legacy data."""
+        if self.min_count is None and self.max_count is None:
+            # Legacy data: only has `count` → exact match
             self.min_count = self.count
-        if self.max_count is None:
             self.max_count = self.count
+        elif self.min_count is None:
+            self.min_count = 0
+        # max_count stays None = unlimited — DO NOT derive from count
 
 
 @dataclass(slots=True)
@@ -236,6 +239,22 @@ class InspectionTemplate:
 
 _ROI_ALLOWED = {"x", "y", "w", "h", "rotation", "width"}
 
+_MODE_ALIASES = {
+    "component_count": "counter", "count": "counter", "counter": "counter",
+    "ml_detection": "sticker", "sticker": "sticker",
+    "defect": "defect", "": "sticker",
+}
+
+
+def normalize_mode(raw: str | None) -> str:
+    """Normalize legacy validator_mode strings to canonical mode names.
+
+    Returns one of ``"sticker" | "counter" | "defect"``.
+    Unknown values are returned as-is so caller's validator can reject with a clear message.
+    """
+    key = str(raw or "").strip().lower()
+    return _MODE_ALIASES.get(key, key)
+
 
 def _pick_roi_payload(payload: dict[str, Any], *keys: str) -> dict[str, Any]:
     for key in keys:
@@ -287,17 +306,20 @@ def _parse_component_rois(payload: dict[str, Any]) -> list[ComponentRoiRule]:
             cn = str(rc.get("class_name") or "").strip()
             if not cn:
                 continue
-            try:
-                cnt = int(rc.get("count") or 0)
-            except (TypeError, ValueError):
-                cnt = 0
-            if cnt <= 0:
-                continue
-            # Read min/max if explicitly provided, else derive from count via __post_init__
+            # Read min/max if explicitly provided
             _min = rc.get("min_count")
             _max = rc.get("max_count")
             min_count = int(_min) if _min is not None else None
             max_count = int(_max) if _max is not None else None
+            # count may be 0 when min/max are explicitly set — don't skip
+            try:
+                cnt = int(rc.get("count") or 0)
+            except (TypeError, ValueError):
+                cnt = 0
+            if cnt <= 0 and min_count is None and max_count is None:
+                continue
+            if cnt <= 0:
+                cnt = max(min_count or 1, 0)  # derive from min_count for compat
             classes.append(ComponentClassTarget(
                 class_name=cn, count=cnt,
                 min_count=min_count, max_count=max_count,
@@ -331,18 +353,14 @@ def template_from_dict(payload: dict[str, Any]) -> InspectionTemplate:
     _part_ready_filtered = {k: v for k, v in _part_ready_raw.items() if k in _VALID_PART_READY_FIELDS}
 
     # Read mode + criteria from new format if available
-    _mode = str(payload.get("mode") or "").strip().lower()
+    _mode_raw = str(payload.get("mode") or "").strip().lower()
+    _mode = normalize_mode(_mode_raw)
     _criteria = payload.get("criteria") or {}
 
     # Backward compat: if mode not explicitly set, derive from sticker.validator_mode
-    if not _mode:
+    if not _mode_raw or _mode == "sticker":
         _vm = str(_sticker_raw.get("validator_mode") or "ml_detection").strip().lower()
-        if _vm == "component_count":
-            _mode = "counter"
-        elif _vm == "defect":
-            _mode = "defect"
-        else:
-            _mode = "sticker"
+        _mode = normalize_mode(_vm)
 
     return InspectionTemplate(
         id=payload.get("id"),
@@ -370,6 +388,7 @@ def validate_criteria(mode: str, criteria: dict[str, Any]) -> list[str]:
 
     Empty list means valid.
     """
+    mode = normalize_mode(mode)
     errors: list[str] = []
     if mode == "sticker":
         if not criteria.get("expected_class"):

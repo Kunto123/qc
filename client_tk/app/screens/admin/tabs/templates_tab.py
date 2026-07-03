@@ -292,10 +292,9 @@ class TemplatesTab:
             a._calib_mean_std_frame.grid()
         else:
             a._calib_mean_std_frame.grid_remove()
-        # Hide Part Ready Method selector in component_count mode
-        _is_component = (a.preset_validator_mode_var.get() == "component_count")
-        for w in getattr(a, "_part_ready_method_widgets", []):
-            w.grid_remove() if _is_component else w.grid()
+        # NOTE: Part-ready method visibility is handled by _on_mode_changed alone.
+        # Do NOT hide/show _part_ready_method_widgets here — _on_mode_changed is the
+        # single authority for mode-based show/hide.
 
     def _on_part_ready_method_changed(self, a) -> None:
         """Show/hide mean-std threshold fields based on part ready method."""
@@ -342,24 +341,34 @@ class TemplatesTab:
         # Show/hide sticker and part-ready ROI on canvas based on mode
         if hasattr(a, "preset_roi_picker"):
             a.preset_roi_picker.set_sticker_visible(_is_sticker)
-            a.preset_roi_picker.set_part_ready_visible(_is_sticker)
+            # Part ready ROI is ALWAYS visible in all modes (A3 correction)
+            a.preset_roi_picker.set_part_ready_visible(True)
         # ROI picker panel stays visible in both modes (used for component ROIs in counter mode)
         # But update its selector to show component ROIs vs sticker/part-ready ROIs
         self._update_roi_selector_dropdown(a)
-        # In component_count or defect mode, part ready = Modbus sensor only -- hide ALL part ready config
-        _hide_pr = _is_component or _is_defect
+        # Part ready panels are ALWAYS visible in all modes (A3 correction)
         for w in getattr(a, "_part_ready_method_widgets", []):
-            w.grid_remove() if _hide_pr else w.grid()
+            w.grid()
         for w in getattr(a, "_gap_threshold_widgets", []):
-            w.grid_remove() if _hide_pr else w.grid()
+            if _is_sticker:
+                # In sticker mode, let method choice decide gap visibility
+                _method = a.preset_part_ready_method_var.get()
+                w.grid() if _method == "gap_template_match" else w.grid_remove()
+            else:
+                w.grid()
         for w in getattr(a, "_mean_std_field_widgets", []):
-            w.grid_remove() if _hide_pr else w.grid()
+            if _is_sticker:
+                _method = a.preset_part_ready_method_var.get()
+                w.grid() if _method == "mean_std_threshold" else w.grid_remove()
+            else:
+                w.grid()
         for w in getattr(a, "_part_ready_ref_widgets", []):
-            w.grid_remove() if _hide_pr else w.grid()
-        if _hide_pr:
-            a._calib_mean_std_frame.grid_remove()
-        else:
-            # In sticker mode, let _on_method_or_mode_changed handle calibration visibility
+            if _is_sticker:
+                _method = a.preset_part_ready_method_var.get()
+                w.grid() if _method == "gap_template_match" else w.grid_remove()
+            else:
+                w.grid()
+        if _is_sticker:
             self._on_method_or_mode_changed(a)
 
     # ------------------------------------------------------------------
@@ -572,13 +581,11 @@ class TemplatesTab:
             _roi["name"] = _cr.get("name", "ROI")
             rois.append(_roi)
         a.preset_roi_picker.set_component_rois(rois)
-        # Only rebuild widgets if count changed
-        existing_count = len(a._comp_roi_list_frame.winfo_children())
-        if existing_count != len(a.preset_component_rois):
-            for widget in a._comp_roi_list_frame.winfo_children():
-                widget.destroy()
-            for roi_idx, roi_data in enumerate(a.preset_component_rois):
-                self._build_single_comp_roi(a, roi_data, roi_idx)
+        # Always rebuild the ROI widget list to reflect class changes
+        for widget in a._comp_roi_list_frame.winfo_children():
+            widget.destroy()
+        for roi_idx, roi_data in enumerate(a.preset_component_rois):
+            self._build_single_comp_roi(a, roi_data, roi_idx)
         self._update_roi_selector_dropdown(a)
         # Set active ROI to first component so user can immediately interact
         if a.preset_component_rois:
@@ -685,14 +692,14 @@ class TemplatesTab:
     def _update_roi_selector_dropdown(self, a) -> None:
         mode = a.preset_validator_mode_var.get()
         if mode == "component_count":
-            values = []
+            values = ["Part Ready ROI"]
             for i, cr in enumerate(a.preset_component_rois):
                 name = cr.get("name", f"ROI {chr(65 + i)}")
                 values.append(f"Component: {name}")
             # Only set choice to first if current choice is not in values
             current = a.preset_roi_choice_var.get()
-            if current not in values and values:
-                a.preset_roi_choice_var.set(values[0])
+            if current not in values:
+                a.preset_roi_choice_var.set(values[0] if values else "Part Ready ROI")
         else:
             values = ["Part Ready ROI", "Sticker ROI"]
             if a.preset_roi_choice_var.get() not in values:

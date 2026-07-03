@@ -12,7 +12,7 @@ from backend.app.services.gap_detector import save_ref_patch, get_ref_path
 from backend.app.core.http import require_auth, require_roles
 from backend.app.services.template_config_manager import TemplateConfigManager
 from shared.contracts.enums import UserRole
-from shared.contracts.templates import validate_criteria
+from shared.contracts.templates import normalize_mode, validate_criteria
 from backend.app.services.anomaly_backend import get_scorer, SimpleAnomalyScorer
 
 
@@ -56,8 +56,10 @@ def get_runtime_template(version_id: int):
 @require_roles(UserRole.ADMIN)
 def create_template():
     payload = request.get_json(force=True) or {}
-    # Validate criteria if mode+criteria provided
-    _mode = str(payload.get("mode") or "").strip().lower()
+    # Normalize mode before validation
+    _mode = normalize_mode(payload.get("mode"))
+    if _mode and _mode not in ("sticker", "counter", "defect"):
+        return jsonify({"error": f"Unknown mode {_mode!r}. Must be one of: sticker, counter, defect"}), 400
     _criteria = payload.get("criteria") or {}
     if _mode and _criteria:
         errors = validate_criteria(_mode, _criteria)
@@ -74,6 +76,15 @@ def create_template():
 @require_roles(UserRole.ADMIN)
 def update_template(template_id: int):
     payload = request.get_json(force=True) or {}
+    # Normalize mode and validate criteria (same as create)
+    _mode = normalize_mode(payload.get("mode"))
+    if _mode and _mode not in ("sticker", "counter", "defect"):
+        return jsonify({"error": f"Unknown mode {_mode!r}. Must be one of: sticker, counter, defect"}), 400
+    _criteria = payload.get("criteria") or {}
+    if _mode and _criteria:
+        errors = validate_criteria(_mode, _criteria)
+        if errors:
+            return jsonify({"error": "; ".join(errors)}), 400
     update_current = str(request.args.get("update_current") or "").lower() in ("1", "true", "yes")
     try:
         if update_current:
