@@ -3064,114 +3064,61 @@ class ApiSmokeTest(unittest.TestCase):
         body = resp.get_json()
         self.assertFalse(body.get("enabled"), "PLC must be disabled by default (QC_SUITE_PLC_ENABLED=0)")
 
-    def test_15b_plc_status_requires_admin(self) -> None:
-        """GET /inspection/plc/status is admin-only."""
-        resp = self.client.get("/inspection/plc/status", headers=_headers(self.operator_token))
-        self.assertEqual(resp.status_code, 403, resp.get_json())
+    def test_15b_plc_status_allows_operator_but_rejects_anonymous(self) -> None:
+        """GET /inspection/plc/status is available to operators (by design), not anon.
 
-    def test_15e_plc_worker_enqueue_once_per_commit(self) -> None:
-        """A committed inspection must enqueue exactly one PLC command.
-
-        Uses a dry-run PlcWorker injected directly into inspection_session_service.
-        Sends two frames after commit â€” the queue must not grow beyond 1 because
-        InspectionSessionService gates count_committed on current_event_committed.
+        Decision (orchestrator): line operators legitimately need to see PLC status,
+        so the endpoint is @require_roles(ADMIN, OPERATOR). It must still reject an
+        unauthenticated caller.
         """
-        import queue as _queue_mod
+        # Operator is allowed -> 200
+        op_resp = self.client.get("/inspection/plc/status", headers=_headers(self.operator_token))
+        self.assertEqual(op_resp.status_code, 200, op_resp.get_json())
+        # Admin is allowed -> 200
+        admin_resp = self.client.get("/inspection/plc/status", headers=_headers(self.admin_token))
+        self.assertEqual(admin_resp.status_code, 200, admin_resp.get_json())
+        # No token -> rejected
+        anon_resp = self.client.get("/inspection/plc/status")
+        self.assertEqual(anon_resp.status_code, 401, anon_resp.get_json())
+
+    def test_15e_plc_worker_notify_decision_enqueues_once(self) -> None:
+        """NEW model (was clamp-hold): notify_decision enqueues exactly one command.
+
+        The old test drove the full HTTP+model commit path to assert a single
+        send_clamp_hold. Clamp hold/release was removed by design; the worker now
+        takes an accept-pulse + input-polling model where the inspection service
+        calls notify_decision(...) once per committed decision. This exercises that
+        contract directly at the worker level (dry-run, no camera/model needed).
+        """
         from backend.app.services.plc_adapter import DryRunPlcAdapter
         from backend.app.workers.plc_worker import PlcWorker
-        from backend.app.core.container import inspection_session_service
 
-        captured: list[dict] = []
+        worker = PlcWorker(DryRunPlcAdapter(), num_channels=4)
+        worker.configure_guards(dry_run=True)
 
-        class _CapturingAdapter(DryRunPlcAdapter):
-            def send_clamp_hold(self, *, event_id=None, decision=None):
-                captured.append({"cmd": "hold", "event_id": event_id, "decision": decision})
-
-            def send_clamp_release(self, *, event_id=None, reason=None):
-                captured.append({"cmd": "release", "event_id": event_id, "reason": reason})
-
-        worker = PlcWorker(_CapturingAdapter(), hold_ms=0)
-        original_worker = inspection_session_service._plc_worker
-        inspection_session_service._plc_worker = worker
-        worker.start()
-
-        try:
-            tpl_resp = self.client.post(
-                "/templates",
-                json={
-                    "name": "PLC Enqueue Regression",
-                    "description": "",
-                    "is_active": True,
-                    "camera": {"camera_index": 0, "width": 640, "height": 480, "fps": 15},
-                    "part_ready_roi": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
-                    "sticker_roi": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
-                    "vision": {"model_path": "models/dummy.pt", "classes": ["K0W-HB0"]},
-                    "part_ready": {"enabled": False},
-                    "sticker": {
-                        "part_name": "PLC Part",
-                        "expected_class": "K0W-HB0",
-                        "line": "LINE-PLC",
-                        "enabled": True,
-                        "validator_mode": "ml_detection",
-                        "min_roi_confidence": 0.0,
-                        "part_ready_settle_ms": 0,
-                    },
-                    "persistence": {"write_to_db": False},
-                    "metadata": {},
-                },
-                headers=_headers(self.admin_token),
-            )
-            self.assertEqual(tpl_resp.status_code, 201, tpl_resp.get_json())
-            version_id = tpl_resp.get_json()["version_id"]
-
-            sess_resp = self.client.post(
-                "/inspection/sessions/start",
-                json={"client_id": "plc-test", "camera_index": 0, "template_version_id": version_id},
-                headers=_headers(self.operator_token),
-            )
-            self.assertEqual(sess_resp.status_code, 201)
-            sid = sess_resp.get_json()["session_id"]
-
-            # Frame 1 â€” should commit (settle_ms=0)
-            f1 = self.client.post(
-                f"/inspection/sessions/{sid}/frame",
-                json={"image_b64": _sample_image_b64()},
-                headers=_headers(self.operator_token),
-            )
-            self.assertEqual(f1.status_code, 200)
-            self.assertTrue(f1.get_json()["count_committed"], "frame 1 must commit")
-
-            # Frame 2 â€” must NOT commit again (event already committed)
-            f2 = self.client.post(
-                f"/inspection/sessions/{sid}/frame",
-                json={"image_b64": _sample_image_b64()},
-                headers=_headers(self.operator_token),
-            )
-            self.assertEqual(f2.status_code, 200)
-            self.assertFalse(f2.get_json()["count_committed"], "frame 2 must not re-commit same event")
-
-            # Drain worker queue
-            import time
-            time.sleep(0.15)
-
-            # Exactly one hold + one release (hold_ms=0 â†’ immediate release)
-            hold_cmds = [c for c in captured if c["cmd"] == "hold"]
-            self.assertEqual(len(hold_cmds), 1, f"expected 1 clamp_hold, got {len(hold_cmds)}: {captured}")
-        finally:
-            worker.stop()
-            inspection_session_service._plc_worker = original_worker
+        self.assertEqual(worker.status()["cmd_queue_depth"], 0)
+        worker.notify_decision("ACCEPT", event_id="evt-1")
+        self.assertEqual(worker.status()["cmd_queue_depth"], 1)
+        # A second decision for a new event enqueues one more — no silent coalescing.
+        worker.notify_decision("REJECT", event_id="evt-2")
+        self.assertEqual(worker.status()["cmd_queue_depth"], 2)
 
     def test_15f_plc_worker_dry_run_adapter_logs_only(self) -> None:
-        """DryRunPlcAdapter.send_clamp_hold/release must not raise and return None."""
+        """NEW model: DryRunPlcAdapter write/read/all_off must not raise, status ok.
+
+        (Was: assert send_clamp_hold/release — those were removed by design.)
+        """
         from backend.app.services.plc_adapter import DryRunPlcAdapter
         adapter = DryRunPlcAdapter()
         adapter.connect()
-        adapter.send_clamp_hold(event_id="evt-1", decision="ACCEPT")
-        adapter.send_clamp_release(event_id="evt-1", reason="auto")
-        adapter.disconnect()
+        adapter.write_coil(0, True)
+        adapter.write_coils({1: True, 2: False})
+        self.assertEqual(adapter.read_inputs(count=8), [False] * 8)
+        adapter.all_off(4)
         st = adapter.status()
         self.assertEqual(st["adapter"], "DryRunPlcAdapter")
         self.assertTrue(st.get("connected"))
+        adapter.disconnect()
 
     @unittest.skip(_REQUIRES_REAL_STICKER_MODEL)
     def test_15g_rejects_are_logged_locally_and_not_persisted_to_results_db(self) -> None:
