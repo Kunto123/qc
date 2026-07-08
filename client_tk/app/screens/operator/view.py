@@ -1218,11 +1218,15 @@ class OperatorScreen(ctk.CTkFrame):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
     def _render_counter_overlay(self, overlay, frame, validation_details: dict) -> None:
-        """Render component counter ROI results on the overlay."""
+        """Render component counter ROI results on the overlay.
+
+        Minimal display: ROI borders only (green=OK, red=NG), match ratio in top-left.
+        No text labels on ROIs per requirement #3.
+        """
         rois = validation_details.get("rois", [])
         fh, fw = frame.shape[:2]
 
-        # Draw ROI rectangles and per-ROI labels on the frame
+        # Draw ROI rectangles only — green if ok, red if not
         for roi in rois:
             roi_geom = roi.get("roi") or {}
             if not roi_geom:
@@ -1235,41 +1239,15 @@ class OperatorScreen(ctk.CTkFrame):
             ok = roi.get("ok", False)
             color = (0, 200, 0) if ok else (0, 0, 220)
 
-            # Draw the rectangle (support rotation)
             _draw_overlay_roi_rect(overlay, rx, ry, rw, rh, rot, color)
+            # NO label text on ROI — per requirement #3
 
-            # Build compact label near ROI
-            name = roi.get("name", "ROI")
-            classes = roi.get("classes", {})
-            cls_parts = []
-            for cn, cr in classes.items():
-                det = cr.get("detected", 0)
-                mn = cr.get("min", "?")
-                _mx = cr.get("max")
-                mx = f"{mn}+" if _mx is None else str(_mx)  # 1+ for unlimited
-                cls_parts.append(f"{cn}:{det}/{mx}")
-            label = _ascii_safe(f"{'OK' if ok else 'NG'} {name} | {' '.join(cls_parts)}")
-            overlay = _draw_text_bg(overlay, (rx + 4, max(ry, 0) + 16), label,
-                                      font_scale=0.4, color=color)
-
-        # Compact summary in top-left corner
-        y_offset = 30
-        overlay = _draw_text_bg(overlay, (12, y_offset), "MODE: COUNTER (summary)",
-                                  font_scale=0.5, color=(200, 200, 255))
-        for roi in rois:
-            y_offset += 22
-            name = roi.get("name", "ROI")
-            ok = roi.get("ok", False)
-            color = (0, 200, 0) if ok else (0, 0, 220)
-            classes = roi.get("classes", {})
-            cls_parts = []
-            for cn, cr in classes.items():
-                det = cr.get("detected", 0)
-                _mx = cr.get("max")
-                mx = f"{cr.get('min', '?')}+" if _mx is None else str(_mx)
-                cls_parts.append(f"{cn}:{det}/{mx}")
-            summary = _ascii_safe(f"{'OK' if ok else 'NG'} {name} | {' '.join(cls_parts)}")
-            overlay = _draw_text_bg(overlay, (12, y_offset), summary, font_scale=0.4, color=color)
+        # Top-left: Match Ratio only
+        total = len(rois)
+        ok_count = sum(1 for r in rois if r.get("ok", False))
+        ratio = (ok_count / total * 100) if total > 0 else 0.0
+        overlay = _draw_text_bg(overlay, (12, 30), f"Match Ratio: {ratio:.1f}%",
+                                  font_scale=0.7, color=(200, 200, 255))
 
     def _render_defect_overlay(self, overlay, frame, validation_details: dict) -> None:
         """Render defect scan ROI results on the overlay."""

@@ -53,6 +53,27 @@ class CounterPanel(ctk.CTkFrame):
         self.reject_value.configure(text=str(counters.get("session_reject", 0)))
         self.meta_var.configure(text=f"Scope: {counters.get('scope') or 'session'}")
 
+        # Update match ratio from validation_details
+        if payload:
+            validation_details = (payload.get("validation") or {}).get("validation_details") or {}
+            if validation_details.get("mode") == "counter":
+                rois = validation_details.get("rois", [])
+                if rois:
+                    total = len(rois)
+                    ok_count = sum(1 for r in rois if r.get("ok", False))
+                    ratio = (ok_count / total * 100) if total > 0 else 0.0
+                    self.update_match_ratio(ratio)
+                else:
+                    self.update_match_ratio(0.0)
+            # For sticker mode: show part_ready match_ratio instead
+            elif validation_details.get("mode") in (None, "", "sticker"):
+                pr = payload.get("part_ready") or {}
+                match_r = pr.get("match_ratio")
+                if match_r is not None:
+                    self.update_match_ratio(float(match_r) * 100.0)
+                else:
+                    self.match_ratio_var.configure(text="Match Ratio: --%", text_color=TEXT_PRIMARY)
+
     def update_match_ratio(self, ratio: float) -> None:
         """Update the match ratio display with color coding."""
         self.match_ratio_var.configure(text=f"Match Ratio: {ratio:.1f}%")

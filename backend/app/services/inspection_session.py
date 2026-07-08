@@ -574,7 +574,7 @@ class InspectionSessionService:
         )
         if after_part_ready_signature != before_part_ready_signature:
             state.part_ready_ratio_history.clear()
-            state.part_ready_ema_ratio = 0.0
+            state.part_ready_ema_ratio = -1.0
             state.hsv_adaptive_lower = None
             state.hsv_adaptive_upper = None
         return self._session_payload(state)
@@ -1538,7 +1538,7 @@ class InspectionSessionService:
             state.inference_accept_first_ts = 0.0
             # Reset ratio history — prevent stale ratios from contaminating next cycle
             state.part_ready_ratio_history.clear()
-            state.part_ready_ema_ratio = 0.0
+            state.part_ready_ema_ratio = -1.0
             # Reset adaptive HSV thresholds — start fresh for next cycle
             state.hsv_adaptive_lower = None
             state.hsv_adaptive_upper = None
@@ -2041,7 +2041,7 @@ class InspectionSessionService:
         raw_ratio = float(evaluation["match_ratio"])
         # EMA smoothing — more responsive to current conditions than simple average
         _ema_alpha = max(0.0, min(1.0, float(getattr(config, "ema_alpha", 0.3) or 0.3)))
-        if state.part_ready_ema_ratio == 0.0:
+        if state.part_ready_ema_ratio < 0.0:
             # First reading in cycle — initialize EMA with raw value
             state.part_ready_ema_ratio = raw_ratio
         else:
@@ -2139,7 +2139,7 @@ class InspectionSessionService:
         raw_ratio = float(evaluation["match_ratio"])
         # EMA smoothing — more responsive to current conditions than simple average
         _ema_alpha = max(0.0, min(1.0, float(getattr(config, "ema_alpha", 0.3) or 0.3)))
-        if state.part_ready_ema_ratio == 0.0:
+        if state.part_ready_ema_ratio < 0.0:
             state.part_ready_ema_ratio = raw_ratio
         else:
             state.part_ready_ema_ratio = round(
@@ -2170,9 +2170,10 @@ class InspectionSessionService:
         evaluation = evaluate_mean_std_threshold(frame, config)
 
         # EMA smoothing on the classification confidence (match_ratio)
+        # Use sentinel -1.0 to distinguish "not yet initialized" from valid 0.0
         _ema_alpha = max(0.0, min(1.0, float(getattr(config, "ema_alpha", 0.3) or 0.3)))
         raw_ratio = float(evaluation["match_ratio"])
-        if state.part_ready_ema_ratio == 0.0:
+        if state.part_ready_ema_ratio < 0.0:
             state.part_ready_ema_ratio = raw_ratio
         else:
             state.part_ready_ema_ratio = round(
