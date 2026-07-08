@@ -709,7 +709,7 @@ class InspectionSessionService:
         part_ready_started = time.perf_counter()
         validator_mode = str(getattr(state.template.sticker, "validator_mode", "") or "").strip().lower()
         is_component_counter = validator_mode == "component_count"
-        is_sticker = validator_mode == "sticker"
+        is_sticker = validator_mode in ("sticker", "ml_detection")
 
         if is_component_counter:
             # Component Counter mode: part readiness from Modbus sensor input only,
