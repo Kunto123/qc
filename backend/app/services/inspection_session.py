@@ -1464,6 +1464,15 @@ class InspectionSessionService:
                 _policy_action = "plc_fault"
                 _pending_reason = "plc_unhealthy_commit_blocked"
 
+        # ── Item 2: below_min_confidence gate from part_ready ──
+        # If part_ready reported that match_ratio is below min_match_ratio,
+        # block commit even if inference says ACCEPT. This prevents committing
+        # results when the part_ready confidence is too low.
+        if _commit_allowed and part_ready.get("below_min_confidence"):
+            _commit_allowed = False
+            _policy_action = "low_confidence_pending"
+            _pending_reason = "part_ready_below_min_confidence"
+
         # Build inspection_policy response
         inspection_policy = {
             "action": _policy_action,
@@ -1931,14 +1940,16 @@ class InspectionSessionService:
             }
 
         # Universal min_match_ratio gate: apply floor confidence to ALL methods
-        # If match_ratio is below min_match_ratio, override to not-ready
+        # If match_ratio is below min_match_ratio, mark it but DON'T change part_ready
+        # (part_ready controls whether inference runs; we still want inference to run
+        # so the operator sees results, but commit gate should check this flag)
         _min_conf = float(getattr(config, "min_match_ratio", 0.5) or 0.5)
         _match_ratio = result.get("match_ratio")
         if _match_ratio is not None and result.get("part_ready", False) and _match_ratio < _min_conf:
-            result["part_ready"] = False
+            result["below_min_confidence"] = True
+            # Override status to signal low confidence but keep part_ready=True
+            # so inference can still run. The commit gate will check this flag.
             result["part_ready_confidence"] = _match_ratio
-            result["decision"] = DecisionCode.REJECT.value
-            result["reject_reason_code"] = RejectReasonCode.PART_NOT_READY.value
             result["status"] = "below_min_confidence"
 
         return result
