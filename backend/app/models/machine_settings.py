@@ -23,17 +23,9 @@ class PlcConnectionConfig:
     serial_stopbits: int = 1
     timeout_ms: int = 1000
     modbus_unit_id: int = 255
-    modbus_command_mode: str = "coil"
-    modbus_hold_address: int = 0
-    modbus_release_address: int = 0
-    modbus_hold_value: int = 1
-    modbus_release_value: int = 0
-    modbus_zero_based_addressing: bool = True
-    modbus_readback_enabled: bool = False
-    modbus_readback_mode: str = "discrete_input"
-    modbus_readback_address: int = 0
-    modbus_readback_expected_hold_value: int = 1
-    modbus_readback_expected_release_value: int = 0
+    # NOTE: clamp/hold/release + readback fields removed in the accept-pulse
+    # adapter redesign. from_dict() filters unknown keys, so legacy stored
+    # settings that still carry them load fine (the dead keys are dropped).
 
 
 @dataclass(slots=True)

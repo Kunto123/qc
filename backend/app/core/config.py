@@ -172,23 +172,9 @@ class AppConfig:
     # Modbus TCP mapping for clamp control.
     # Defaults are placeholders until the remote I/O datasheet is finalized.
     plc_modbus_unit_id: int = max(0, int(os.getenv("QC_SUITE_PLC_MODBUS_UNIT_ID", "1")))
-    plc_modbus_command_mode: str = os.getenv("QC_SUITE_PLC_MODBUS_COMMAND_MODE", "coil").strip().lower() or "coil"
-    plc_modbus_hold_address: int = max(0, int(os.getenv("QC_SUITE_PLC_MODBUS_HOLD_ADDRESS", "0")))
-    plc_modbus_release_address: int = max(0, int(os.getenv("QC_SUITE_PLC_MODBUS_RELEASE_ADDRESS", "0")))
-    plc_modbus_hold_value: int = max(0, int(os.getenv("QC_SUITE_PLC_MODBUS_HOLD_VALUE", "1")))
-    plc_modbus_release_value: int = max(0, int(os.getenv("QC_SUITE_PLC_MODBUS_RELEASE_VALUE", "0")))
-    plc_modbus_zero_based_addressing: bool = os.getenv("QC_SUITE_PLC_MODBUS_ZERO_BASED_ADDRESSING", "1").strip() != "0"
-    plc_modbus_readback_enabled: bool = os.getenv("QC_SUITE_PLC_MODBUS_READBACK_ENABLED", "0").strip() == "1"
-    plc_modbus_readback_mode: str = os.getenv("QC_SUITE_PLC_MODBUS_READBACK_MODE", "discrete_input").strip().lower() or "discrete_input"
-    plc_modbus_readback_address: int = max(0, int(os.getenv("QC_SUITE_PLC_MODBUS_READBACK_ADDRESS", "0")))
-    plc_modbus_readback_expected_hold_value: int = max(
-        0,
-        int(os.getenv("QC_SUITE_PLC_MODBUS_READBACK_EXPECTED_HOLD_VALUE", "1")),
-    )
-    plc_modbus_readback_expected_release_value: int = max(
-        0,
-        int(os.getenv("QC_SUITE_PLC_MODBUS_READBACK_EXPECTED_RELEASE_VALUE", "0")),
-    )
+    # NOTE: The clamp/hold/release + readback Modbus fields were removed in the
+    # accept-pulse adapter redesign (FASE 0/1). The current adapter uses only
+    # plc_modbus_unit_id (as slave_id) plus call-time coil/input addresses.
 
     # ── 4-Relay + 2-Input Modbus mapping ──
     # Coil addresses (FC05/FC15) — 4 output relays

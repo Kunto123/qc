@@ -43,12 +43,6 @@ def _build_strategy(
     """Factory: select strategy based on validator_mode."""
     mode = (validator_mode or "sticker").strip().lower()
     if mode == "component_count":
-        if not dry_run:
-            raise RuntimeError(
-                "component_count mode requires a PLC flow strategy (CounterFlow), "
-                "which is currently a stub. Either enable dry_run or implement "
-                "CounterFlow in services/counter_flow.py."
-            )
         return CounterFlow(adapter, settings.counter, num_channels)
     if mode == "defect":
         from backend.app.services.defect_flow import DefectFlow
@@ -158,13 +152,6 @@ class PlcWorker:
             # Legacy fallback — build from constructor args
             from backend.app.models.machine_settings import StickerModeConfig, CounterModeConfig
             if mode == "component_count":
-                # Item 4: CounterFlow is a stub — fail-loud on live PLC (allow only dry-run).
-                if not self._dry_run:
-                    raise RuntimeError(
-                        "component_count mode requires a PLC flow strategy (CounterFlow), "
-                        "which is currently a stub. Either enable dry_run or implement "
-                        "CounterFlow in services/counter_flow.py."
-                    )
                 cfg = CounterModeConfig(
                     relay_clamp_address=self._relay_clamp,
                     relay_ok_light_buzzer_address=self._relay_ok_light_buzzer,

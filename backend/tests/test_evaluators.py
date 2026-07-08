@@ -222,18 +222,16 @@ class DefectEvaluatorTest(unittest.TestCase):
             d = self.ev.evaluate(_ctx(criteria=crit))
         _assert_json_safe(d)
 
-    def test_aggregate_score_empty_slice_is_infinite_and_leaks_to_json(self) -> None:
-        # Direct probe of the JSON-safety risk: _aggregate_score returns
-        # float('inf') for an empty heatmap slice. If that value ever reaches
-        # Decision.details, json.dumps(..., allow_nan=False) would raise. This
-        # test documents the raw behavior so a later refactor that routes inf
-        # into details is caught. See HANDOFF.md JSON-safety note.
+    def test_aggregate_score_empty_slice_returns_none_json_safe(self) -> None:
+        # Empty heatmap slice should return None (JSON-safe), not float('inf').
+        # This prevents json.dumps(..., allow_nan=False) from raising.
         from backend.app.services.evaluators.defect import _aggregate_score
 
         empty = np.empty((0, 0), dtype=np.float32)
-        self.assertEqual(_aggregate_score(empty), float("inf"))
-        with self.assertRaises(ValueError):
-            json.dumps({"score": _aggregate_score(empty)}, allow_nan=False)
+        self.assertIsNone(_aggregate_score(empty))
+        # Verify JSON safety
+        import json
+        json.dumps({"score": _aggregate_score(empty)}, allow_nan=False)
 
     def test_model_load_failure_rejects(self) -> None:
         crit = {"rois": [self._roi(threshold=0.5)], "inference_mode": "per_roi_crop"}
