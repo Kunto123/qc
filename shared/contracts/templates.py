@@ -99,6 +99,7 @@ class ComponentRoiRule:
     roi: RoiGeometry
     classes: list[ComponentClassTarget]
     strict_foreign_class: bool = False
+    model_override: str | None = None
 
 
 @dataclass(slots=True)
@@ -226,6 +227,7 @@ class InspectionTemplate:
                     "roi": asdict(cr.roi),
                     "classes": [asdict(c) for c in cr.classes],
                     "strict_foreign_class": cr.strict_foreign_class,
+                    "model_override": cr.model_override,
                 }
                 for cr in self.component_rois
             ],
@@ -331,6 +333,7 @@ def _parse_component_rois(payload: dict[str, Any]) -> list[ComponentRoiRule]:
             roi=roi_geom,
             classes=classes,
             strict_foreign_class=bool(raw_roi.get("strict_foreign_class", False)),
+            model_override=raw_roi.get("model_override"),
         ))
     return result
 

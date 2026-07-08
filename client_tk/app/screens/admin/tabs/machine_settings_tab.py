@@ -144,21 +144,36 @@ class MachineSettingsTab:
     # ── Counter Mode section ─────────────────────────────────────────
 
     def _build_counter_section(self, parent, row: int) -> None:
-        sec = self._section_frame(parent, row, "Counter Mode — I/O Addresses (placeholder)")
+        sec = self._section_frame(parent, row, "Counter Mode — I/O Addresses")
         r = 1
         ctk.CTkLabel(
             sec,
-            text="Counter mode is not yet implemented. These settings are stored but not used.",
-            font=("Segoe UI", 9, "italic"), text_color=WARNING,
-        ).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6)); r += 1
+            text="Relay Coil Addresses (same as Sticker Mode)",
+            font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
+        ).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(4, 0)); r += 1
+        self._add_field(sec, r, "Clamp (CH3)", "counter.relay_clamp_address", "3"); r += 1
+        self._add_field(sec, r, "OK Light+Buzzer (CH2)", "counter.relay_ok_light_buzzer_address", "2"); r += 1
+        self._add_field(sec, r, "Enji Buzzer (CH1)", "counter.relay_enji_buzzer_address", "1"); r += 1
+        self._add_field(sec, r, "Spare (CH4)", "counter.relay_spare_address", "0"); r += 1
 
-        self._add_field(sec, r, "Sensor Input Addr", "counter.input_sensor_address", "0"); r += 1
-        self._add_field(sec, r, "Release Input Addr", "counter.input_release_address", "1"); r += 1
-        self._add_field(sec, r, "Template Input Addr", "counter.input_template_address", "2"); r += 1
-        self._add_field(sec, r, "Clamp Feedback Addr", "counter.input_clamp_engaged_address", "2"); r += 1
+        ctk.CTkLabel(
+            sec, text="Input Addresses", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
+        ).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 0)); r += 1
+        self._add_field(sec, r, "Sensor (IN0)", "counter.input_sensor_address", "0"); r += 1
+        self._add_field(sec, r, "Release (IN1)", "counter.input_release_address", "1"); r += 1
+        self._add_field(sec, r, "Template Cycle (IN2)", "counter.input_template_address", "2"); r += 1
+        self._add_field(sec, r, "Clamp Feedback (IN3)", "counter.input_clamp_engaged_address", "2"); r += 1
+
+        ctk.CTkLabel(
+            sec, text="Feedback & Timing", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
+        ).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 0)); r += 1
         self._add_checkbox(sec, r, "Clamp Feedback Enabled", "counter.clamp_feedback_enabled"); r += 1
+        self._add_field(sec, r, "Feedback Timeout (ms)", "counter.clamp_feedback_timeout_ms", "1500"); r += 1
+        self._add_field(sec, r, "Feedback Fallback Delay (ms)", "counter.clamp_feedback_fallback_delay_ms", "300"); r += 1
         self._add_field(sec, r, "Accept Pulse (ms)", "counter.accept_pulse_ms", "1000"); r += 1
+        self._add_field(sec, r, "Clamp Hold (ms)", "counter.clamp_hold_ms", "2000"); r += 1
         self._add_field(sec, r, "Min Reclamp Interval (ms)", "counter.min_reclamp_interval_ms", "3000"); r += 1
+        self._add_field(sec, r, "Release Debounce (ms)", "counter.release_input_debounce_ms", "200"); r += 1
 
     # ── Diagnostics section ──────────────────────────────────────────
 

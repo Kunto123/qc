@@ -28,3 +28,17 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 include = ["backend*", "client_tk*", "shared*"]
+
+[tool.pytest.ini_options]
+# Run from the repo root: `python -m pytest backend/tests`
+# rootdir is the repo root so the root-level conftest.py is always loaded,
+# which fixes sys.path and seeds the model-registry env before app import.
+testpaths = ["backend/tests"]
+python_files = ["test_*.py"]
+python_classes = ["*Test", "Test*"]
+python_functions = ["test_*"]
+markers = [
+  "requires_real_sticker_model: needs the production sticker model (outside repo); skipped in bare checkout",
+  "requires_plc_hardware: needs real PLC hardware; skipped",
+  "suspected_regression: pinned RED to flag a possible production regression (see HANDOFF.md)",
+]

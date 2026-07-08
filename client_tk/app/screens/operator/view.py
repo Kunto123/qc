@@ -876,6 +876,9 @@ class OperatorScreen(ctk.CTkFrame):
             height, width = frame.shape[:2]
             client_timings.setdefault("frame_width", width)
             client_timings.setdefault("frame_height", height)
+        # Get current mode from template detail
+        detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
+        _mode = mode_from_template(detail) if detail else "sticker"
         return {
             "validation": base_payload.get("validation") or {},
             "part_ready": base_payload.get("part_ready") or {},
@@ -885,7 +888,57 @@ class OperatorScreen(ctk.CTkFrame):
             "part_ready_roi_meta": self._roi_meta_payload("part_ready"),
             "sticker_roi_meta": self._roi_meta_payload("sticker"),
             "client_timings": client_timings,
+            "mode": _mode,
         }
+
+    def _get_current_mode(self) -> str:
+        """Get current inspection mode from cached template detail."""
+        detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
+        if detail:
+            return mode_from_template(detail)
+        return "sticker"
+
+    def _draw_component_roi_overlays(self, frame, payload: dict):
+        """Draw component ROIs on frame for counter mode preview."""
+        if frame is None:
+            return None
+        overlay = frame.copy()
+        disp_h, disp_w = overlay.shape[:2]
+        client_timings = payload.get("client_timings") or {}
+        sent_w = client_timings.get("frame_width")
+        sent_h = client_timings.get("frame_height")
+
+        # Get component ROIs from template detail
+        detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
+        component_rois = detail.get("component_rois", []) if detail else []
+
+        for roi_data in component_rois:
+            roi_geom = roi_data.get("roi") or {}
+            if not roi_geom:
+                continue
+            rx = int(float(roi_geom.get("x", 0.0)) * disp_w)
+            ry = int(float(roi_geom.get("y", 0.0)) * disp_h)
+            rw = max(1, int(float(roi_geom.get("w", 1.0)) * disp_w))
+            rh = max(1, int(float(roi_geom.get("h", 1.0)) * disp_h))
+            rot = float(roi_geom.get("rotation", 0.0))
+            # Default color for preview (no validation yet) - use cyan for component ROIs
+            color = (50, 200, 255)
+
+            if abs(rot) > 0.1:
+                corners = _overlay_rotated_corners(rx, ry, rw, rh, rot)
+                pts = [list(c) for c in corners]
+                cv2.polylines(overlay, [__import__("numpy").array(
+                    [pts[0], pts[1], pts[3], pts[2]], dtype="int32")],
+                    True, color, 2, cv2.LINE_AA)
+                cv2.putText(overlay, f"Comp: {roi_data.get('name', 'ROI')}",
+                    (pts[0][0], max(18, pts[0][1] - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+            else:
+                cv2.rectangle(overlay, (rx, ry), (rx + rw, ry + rh), color, 2)
+                cv2.putText(overlay, f"Comp: {roi_data.get('name', 'ROI')}", (rx, max(18, ry - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+
+        return overlay
 
     def _decode_image_b64(self, image_b64: str | None):
         if not image_b64:
@@ -906,6 +959,14 @@ class OperatorScreen(ctk.CTkFrame):
         sent_w = client_timings.get("frame_width")
         sent_h = client_timings.get("frame_height")
 
+        # Get mode from payload or template detail
+        _mode = payload.get("mode") or self._get_current_mode()
+
+        if _mode == "counter":
+            # Counter mode: draw only component ROIs
+            return self._draw_component_roi_overlays(frame, payload)
+
+        # Sticker/Defect mode: draw part_ready and sticker ROIs
         part_ready_roi = payload.get("part_ready_roi_meta") or {}
         sticker_roi = payload.get("sticker_roi_meta") or {}
 
@@ -1274,14 +1335,50 @@ class OperatorScreen(ctk.CTkFrame):
         if frame is None:
             self.main_view.reset()
             return
-        annotated = frame.copy()
-        annotated = self._build_full_frame_with_roi(
-            annotated, "part_ready", label="Part Ready ROI", color=(50, 180, 255)
-        )
-        if annotated is not None:
+        
+        # Get current mode
+        _mode = self._get_current_mode()
+        
+        if _mode == "counter":
+            # Counter mode: draw component ROIs
+            detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
+            component_rois = detail.get("component_rois", []) if detail else []
+            annotated = frame.copy()
+            disp_h, disp_w = annotated.shape[:2]
+            for roi_data in component_rois:
+                roi_geom = roi_data.get("roi") or {}
+                if not roi_geom:
+                    continue
+                rx = int(float(roi_geom.get("x", 0.0)) * disp_w)
+                ry = int(float(roi_geom.get("y", 0.0)) * disp_h)
+                rw = max(1, int(float(roi_geom.get("w", 1.0)) * disp_w))
+                rh = max(1, int(float(roi_geom.get("h", 1.0)) * disp_h))
+                rot = float(roi_geom.get("rotation", 0.0))
+                color = (50, 200, 255)
+                if abs(rot) > 0.1:
+                    corners = _overlay_rotated_corners(rx, ry, rw, rh, rot)
+                    pts = [list(c) for c in corners]
+                    cv2.polylines(annotated, [__import__("numpy").array(
+                        [pts[0], pts[1], pts[3], pts[2]], dtype="int32")],
+                        True, color, 2, cv2.LINE_AA)
+                    cv2.putText(annotated, f"Comp: {roi_data.get('name', 'ROI')}",
+                        (pts[0][0], max(18, pts[0][1] - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+                else:
+                    cv2.rectangle(annotated, (rx, ry), (rx + rw, ry + rh), color, 2)
+                    cv2.putText(annotated, f"Comp: {roi_data.get('name', 'ROI')}", (rx, max(18, ry - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+        else:
+            # Sticker/Defect mode: draw part_ready and sticker ROIs
+            annotated = frame.copy()
             annotated = self._build_full_frame_with_roi(
-                annotated, "sticker", label="Sticker ROI", color=(255, 200, 0)
+                annotated, "part_ready", label="Part Ready ROI", color=(50, 180, 255)
             )
+            if annotated is not None:
+                annotated = self._build_full_frame_with_roi(
+                    annotated, "sticker", label="Sticker ROI", color=(255, 200, 0)
+                )
+
         if annotated is not None:
             self._cached_overlay_frame = annotated.copy()
             self.main_view.update_bgr(annotated)

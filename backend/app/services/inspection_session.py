@@ -709,6 +709,7 @@ class InspectionSessionService:
         part_ready_started = time.perf_counter()
         validator_mode = str(getattr(state.template.sticker, "validator_mode", "") or "").strip().lower()
         is_component_counter = validator_mode == "component_count"
+        is_sticker = validator_mode == "sticker"
 
         if is_component_counter:
             # Component Counter mode: part readiness from Modbus sensor input only,
@@ -1400,23 +1401,28 @@ class InspectionSessionService:
             _pending_reason = "component_stabilizing"
 
         elif _is_hard_reject:
-            # Hard reject (OUT_OF_ANGLE): commit only after grace + higher stability
-            _grace_ok = _stable_elapsed_ms >= self._commit_grace_ms
-            _frames_ok = state.policy_stable_frames >= self._hard_reject_stable_frames
-            _ms_ok = _stable_elapsed_ms >= self._hard_reject_stable_ms
-            if _grace_ok and _frames_ok and _ms_ok:
-                _commit_allowed = True
-                _policy_action = "hard_reject_commit"
-            else:
+            # Hard reject (OUT_OF_ANGLE, WRONG_TYPE): commit only after grace + higher stability
+            # EXCEPTION: For sticker mode, do NOT auto-commit hard reject — wait for timeout reject instead
+            if is_sticker:
                 _policy_action = "pending"
-                _parts = []
-                if not _grace_ok:
-                    _parts.append(f"grace({_stable_elapsed_ms:.0f}/{self._commit_grace_ms}ms)")
-                if not _frames_ok:
-                    _parts.append(f"stable_frames({state.policy_stable_frames}/{self._hard_reject_stable_frames})")
-                if not _ms_ok:
-                    _parts.append(f"stable_ms({_stable_elapsed_ms:.0f}/{self._hard_reject_stable_ms}ms)")
-                _pending_reason = f"hard_reject_stabilizing({', '.join(_parts)})"
+                _pending_reason = "sticker_hard_reject_awaiting_timeout"
+            else:
+                _grace_ok = _stable_elapsed_ms >= self._commit_grace_ms
+                _frames_ok = state.policy_stable_frames >= self._hard_reject_stable_frames
+                _ms_ok = _stable_elapsed_ms >= self._hard_reject_stable_ms
+                if _grace_ok and _frames_ok and _ms_ok:
+                    _commit_allowed = True
+                    _policy_action = "hard_reject_commit"
+                else:
+                    _policy_action = "pending"
+                    _parts = []
+                    if not _grace_ok:
+                        _parts.append(f"grace({_stable_elapsed_ms:.0f}/{self._commit_grace_ms}ms)")
+                    if not _frames_ok:
+                        _parts.append(f"stable_frames({state.policy_stable_frames}/{self._hard_reject_stable_frames})")
+                    if not _ms_ok:
+                        _parts.append(f"stable_ms({_stable_elapsed_ms:.0f}/{self._hard_reject_stable_ms}ms)")
+                    _pending_reason = f"hard_reject_stabilizing({', '.join(_parts)})"
 
         else:
             # Non-hard reject (NOT_FOUND, gap, low conf, etc.) — never auto-commit.
@@ -1426,9 +1432,11 @@ class InspectionSessionService:
 
         # ── Timeout reject ──
         # Jika part sudah settled tapi tidak ada accept-commit dalam waktu reject_timeout_ms
+        # For sticker mode: also allow timeout reject for hard rejects (OUT_OF_ANGLE, WRONG_TYPE)
+        _allow_timeout_for_hard_reject = is_sticker and _is_hard_reject
         if (
             not _commit_allowed
-            and not _is_hard_reject
+            and (not _is_hard_reject or _allow_timeout_for_hard_reject)
             and state.part_ready_settled_at is not None
             and self._reject_timeout_ms > 0
         ):
@@ -1439,7 +1447,6 @@ class InspectionSessionService:
                 _decision = DecisionCode.REJECT.value
                 _commit_allowed = True  # Allow commit untuk reject timeout
                 _policy_action = "timeout_reject"
-                # Sync back to validation dict for _maybe_persist
                 validation["decision"] = DecisionCode.REJECT.value
                 validation["reject_reason_code"] = RejectReasonCode.COMMIT_TIMEOUT.value
 

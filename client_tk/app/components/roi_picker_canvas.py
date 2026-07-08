@@ -17,7 +17,8 @@ _COLOR_PART_READY = (50, 180, 255)   # BGR oranye
 _COLOR_STICKER = (0, 200, 255)       # BGR kuning
 _COLOR_CROSSHAIR = (255, 255, 255)   # BGR putih
 # BGR hijau
-_COLOR_DEFECT = (200, 50, 200)      # BGR ungu/magenta
+_COLOR_DEFECT = (200, 50, 200)       # BGR ungu/magenta
+_COLOR_COMPONENT = (0, 255, 0)       # BGR hijau untuk component ROI
 _ARM = 18
 _LABEL_FONT = cv2.FONT_HERSHEY_SIMPLEX
 

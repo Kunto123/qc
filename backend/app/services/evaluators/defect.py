@@ -15,15 +15,18 @@ from backend.app.services.anomaly_backend import get_scorer
 logger = logging.getLogger(__name__)
 
 
-def _aggregate_score(heatmap_slice: np.ndarray, method: str = "p99") -> float:
+def _aggregate_score(heatmap_slice: np.ndarray, method: str = "p99") -> float | None:
     """Aggregate anomaly scores from a heatmap slice into a single score.
 
     Args:
         heatmap_slice: 2D numpy array of anomaly scores.
         method: One of "p99", "max", "topk_mean" (mean of top 10 pixels).
+
+    Returns:
+        Aggregated score as float, or None if the slice is empty (JSON-safe).
     """
     if heatmap_slice.size == 0:
-        return float("inf")
+        return None
     flat = heatmap_slice.ravel()
     if method == "max":
         return float(flat.max())
