@@ -39,7 +39,7 @@ class SessionState:
     recent_events: list[dict[str, Any]] = field(default_factory=list)
     last_committed_result: dict[str, Any] | None = None
     part_ready_ratio_history: list[float] = field(default_factory=list)
-    part_ready_ema_ratio: float = 0.0
+    part_ready_ema_ratio: float = -1.0
     # Adaptive HSV thresholds — updated at runtime when hsv_adaptive=True
     hsv_adaptive_lower: list[float] | None = None
     hsv_adaptive_upper: list[float] | None = None

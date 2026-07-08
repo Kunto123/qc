@@ -766,7 +766,7 @@ class TemplatesTab:
 
         # Model override (optional per-ROI)
         model_override_var = tk.StringVar(value=roi_data.get("model_override", ""))
-        ctk.CTkLabel(row_frame, text="Model Override (optional)", font=("Segoe UI", 8, "bold"), text_color=TEXT_SECONDARY).grid(row=3, column=0, sticky="w", padx=8, pady=(0, 2))
+        ctk.CTkLabel(row_frame, text="Model Override (optional — not active yet)", font=("Segoe UI", 8, "bold"), text_color=TEXT_SECONDARY).grid(row=3, column=0, sticky="w", padx=8, pady=(0, 2))
         # Get model choices from main model selector
         model_choices = list(a.preset_model_selector.cget("values")) if hasattr(a, "preset_model_selector") else []
         if model_choices:

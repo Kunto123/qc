@@ -190,8 +190,10 @@ def evaluate_mean_std_threshold(frame, config) -> dict[str, Any]:
         # Low mean + high std = black part with white sticker (high contrast)
         part_ready = True
         condition = "sticker"
-        # Confidence: how much std exceeds threshold (0 at boundary, ~1 at 2x threshold)
-        match_ratio = min(1.0, max(0.0, (std_val - std_max) / std_max))
+        # Confidence: 0.5 at std=std_max boundary, 1.0 at ~2x threshold.
+        # This ensures the sticker operating point has confidence >= 0.5,
+        # which is the default min_match_ratio threshold.
+        match_ratio = min(1.0, std_val / (std_max * 2.0))
     else:
         # Low mean + low std = uniform black part
         part_ready = True

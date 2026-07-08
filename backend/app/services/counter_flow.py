@@ -69,7 +69,9 @@ class CounterFlow(PlcFlowStrategy):
         s = self._counter_settings
         self.write_coil(worker, s.relay_clamp_address, False)
         self.write_coil(worker, s.relay_ok_light_buzzer_address, True)
-        self._accept_pulse_end = time.time() + (s.accept_pulse_ms / 1000.0)
+        # Set worker's accept_pulse_end so the worker's pulse timer can track it
+        worker._accept_pulse_end = time.time() + (s.accept_pulse_ms / 1000.0)
+        self._accept_pulse_end = worker._accept_pulse_end
         logger.info(
             "[counter-flow] ACCEPT — pulse %dms (addr=%d)",
             s.accept_pulse_ms, s.relay_ok_light_buzzer_address,
