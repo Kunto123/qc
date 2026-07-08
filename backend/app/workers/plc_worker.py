@@ -122,6 +122,11 @@ class PlcWorker:
         self._last_poll_ok_at: float = 0.0
         self._last_write_ok_at: float = 0.0
 
+        # Reconnect backoff — prevents tight reconnect loop when device is dead
+        self._reconnect_failures: int = 0
+        self._reconnect_backoff_until: float = 0.0
+        self._max_reconnect_backoff_s: float = 30.0  # cap at 30s
+
         # Callbacks
         self._template_cycle_callback = None
         self._on_state_change_callback = None
@@ -557,10 +562,23 @@ class PlcWorker:
             self._cmd_event.clear()
 
     def _poll_inputs(self) -> None:
+        # Reconnect backoff: skip polling if we're in backoff window
+        if self._reconnect_backoff_until > time.time():
+            return
         try:
             inputs = self._adapter.read_inputs(address=0, count=_INPUT_READ_COUNT)
         except Exception as exc:
-            logger.warning("[plc-worker] read_inputs error: %s — attempting reconnect", exc)
+            self._reconnect_failures += 1
+            # Exponential backoff: 2^failures seconds, capped at _max_reconnect_backoff_s
+            _delay = min(self._max_reconnect_backoff_s, 2 ** self._reconnect_failures)
+            # Minimum 2s floor to avoid rapid retries on sustained failures
+            _delay = max(2.0, _delay)
+            self._reconnect_backoff_until = time.time() + _delay
+            logger.warning(
+                "[plc-worker] read_inputs error (%d consecutive): %s — "
+                "reconnect backoff %.0fs",
+                self._reconnect_failures, exc, _delay,
+            )
             try:
                 # Force full disconnect first so the adapter actually reopens
                 # the serial port (connect() early-returns if _connected=True).
@@ -573,6 +591,9 @@ class PlcWorker:
             except Exception as reconnect_exc:
                 logger.error("[plc-worker] reconnect failed: %s", reconnect_exc)
             return
+        # Successful poll — reset backoff counter
+        self._reconnect_failures = 0
+        self._reconnect_backoff_until = 0.0
         if not inputs or len(inputs) < 2:
             return
 
