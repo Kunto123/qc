@@ -30,6 +30,9 @@ from client_tk.app.services.frame_upload import FrameUploadService
 from client_tk.app.mode_utils import normalize_mode, mode_from_template, mode_label
 from client_tk.app.theme import APP_BG, ACCENT_SOFT, BORDER, PANEL_ALT_BG, PANEL_BG, SHELL_BG, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, ACCENT_HOVER, TEXT_ON_ACCENT, SUCCESS, SUCCESS_HOVER
 
+import logging
+_logger = logging.getLogger(__name__)
+
 
 BADGE_COLORS = {
     "neutral": ("#475569", "#f8fafc"),
@@ -1420,7 +1423,7 @@ class OperatorScreen(ctk.CTkFrame):
                     self.display_source.set("Right View: Live Camera + ROIs (overlay)")
                     return overlay
             except Exception:
-                pass
+                _logger.warning("Overlay rendering error in _build_preview_frame", exc_info=True)
         overlay = self._draw_roi_overlays(frame, self._build_preview_overlay_payload(frame))
         if overlay is not None:
             self.display_source.set("Right View: Live Camera + ROIs")
@@ -1876,6 +1879,7 @@ class OperatorScreen(ctk.CTkFrame):
         self._start_session()
 
     def _stop_production(self) -> None:
+        self._stop_session()
         self._refresh_context_summary()
         self._update_status_badges()
 
@@ -2238,7 +2242,8 @@ class OperatorScreen(ctk.CTkFrame):
                     pass  # rotation failed, use original frame
 
             # Enrich payload with client-side frame dimensions for scaling.
-            client_timings = payload.get("client_timings") or {}
+            # Use a COPY of client_timings to avoid mutating the original payload.
+            client_timings = dict(payload.get("client_timings") or {})
             client_timings["frame_width"] = frame.shape[1]
             client_timings["frame_height"] = frame.shape[0]
             enriched = {**payload, "client_timings": client_timings}
@@ -2250,7 +2255,7 @@ class OperatorScreen(ctk.CTkFrame):
                 self.display_source.set("Right View: Live Camera + ROIs (local)")
 
         except Exception:
-            pass
+            _logger.warning("Overlay rendering error in _render_overlay_direct", exc_info=True)
 
     def _show_cached_overlay_or_frame(self, frame) -> None:
         """Show cached overlay if available, otherwise show raw frame."""
