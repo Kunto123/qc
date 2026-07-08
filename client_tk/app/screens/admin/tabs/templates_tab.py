@@ -736,41 +736,44 @@ class TemplatesTab:
         row_frame.grid(row=roi_idx, column=0, sticky="ew", pady=2)
         row_frame.columnconfigure(1, weight=1)
         name_frame = ctk.CTkFrame(row_frame, fg_color="transparent")
-        name_frame.grid(row=0, column=0, columnspan=3, sticky="ew", padx=8, pady=(4, 2))
+        name_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 2))
         name_var = tk.StringVar(value=roi_data.get("name", f"ROI {chr(65 + roi_idx)}"))
         ctk.CTkEntry(name_frame, textvariable=name_var, width=100, height=24).pack(side="left")
         name_var.trace_add("write", lambda *a2, idx=roi_idx, v=name_var: self._on_comp_roi_name_changed(idx, v))
         ctk.CTkButton(name_frame, text="✕", width=24, height=24, fg_color=BORDER, hover_color=ACCENT_HOVER,
                       command=lambda idx=roi_idx: self._on_remove_comp_roi(a, idx)).pack(side="right")
+
+        # Class filter - simple class name selection (no min/max)
         cls_frame = ctk.CTkFrame(row_frame, fg_color="transparent")
-        cls_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=8, pady=2)
-        ctk.CTkLabel(cls_frame, text="Class", font=("Segoe UI", 8, "bold"), text_color=TEXT_SECONDARY).grid(row=0, column=0, padx=2)
-        ctk.CTkLabel(cls_frame, text="Min", font=("Segoe UI", 8, "bold"), text_color=TEXT_SECONDARY).grid(row=0, column=1, padx=2)
-        ctk.CTkLabel(cls_frame, text="Max (∞)", font=("Segoe UI", 8, "bold"), text_color=TEXT_SECONDARY).grid(row=0, column=2, padx=2)
+        cls_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=2)
+        ctk.CTkLabel(cls_frame, text="Allowed Classes", font=("Segoe UI", 8, "bold"), text_color=TEXT_SECONDARY).grid(row=0, column=0, padx=2)
         classes = roi_data.get("classes", [])
         for cls_idx, cls_target in enumerate(classes):
             class_var = tk.StringVar(value=cls_target.get("class_name", ""))
-            min_var = tk.StringVar(value=str(cls_target.get("min_count", cls_target.get("count", 1))))
-            max_var = tk.StringVar(value=str(cls_target.get("max_count", "")) if cls_target.get("max_count") is not None else "")
             _class_names = [c.strip() for c in a.preset_model_classes_var.get().split(",") if c.strip()] if hasattr(a, "preset_model_classes_var") else []
             if _class_names:
-                ctk.CTkComboBox(cls_frame, variable=class_var, values=_class_names, width=100, height=24).grid(row=cls_idx+1, column=0, padx=2, pady=1)
+                ctk.CTkComboBox(cls_frame, variable=class_var, values=_class_names, width=150, height=24).grid(row=cls_idx+1, column=0, padx=2, pady=1)
             else:
-                ctk.CTkEntry(cls_frame, textvariable=class_var, width=100, height=24).grid(row=cls_idx+1, column=0, padx=2, pady=1)
-            ctk.CTkEntry(cls_frame, textvariable=min_var, width=50, height=24).grid(row=cls_idx+1, column=1, padx=2, pady=1)
-            max_entry = ctk.CTkEntry(cls_frame, textvariable=max_var, width=50, height=24)
-            max_entry.grid(row=cls_idx+1, column=2, padx=2, pady=1)
-            # Show placeholder "∞" when max is empty/unlimited
-            max_entry.configure(placeholder_text="∞")
+                ctk.CTkEntry(cls_frame, textvariable=class_var, width=150, height=24).grid(row=cls_idx+1, column=0, padx=2, pady=1)
             class_var.trace_add("write", lambda *a2, idx=roi_idx, cidx=cls_idx, v=class_var: self._on_comp_class_changed(idx, cidx, v))
-            min_var.trace_add("write", lambda *a2, idx=roi_idx, cidx=cls_idx, v=min_var: self._on_comp_min_changed(idx, cidx, v))
-            max_var.trace_add("write", lambda *a2, idx=roi_idx, cidx=cls_idx, v=max_var: self._on_comp_max_changed(idx, cidx, v))
         ctk.CTkButton(cls_frame, text="+", width=24, height=24, fg_color="transparent", hover_color=PANEL_BG,
                       command=lambda idx=roi_idx: self._on_add_comp_class(a, idx)).grid(row=len(classes)+1, column=0, pady=(2, 4))
+
         strict_var = tk.BooleanVar(value=roi_data.get("strict_foreign_class", False))
-        ctk.CTkCheckBox(row_frame, text="Strict foreign class", variable=strict_var,
-                        text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(row=2, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+        ctk.CTkCheckBox(row_frame, text="Strict foreign class (reject if other classes detected)", variable=strict_var,
+                        text_color=TEXT_SECONDARY, font=("Segoe UI", 8)).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4))
         strict_var.trace_add("write", lambda *a2, idx=roi_idx, v=strict_var: self._on_comp_strict_changed(idx, v))
+
+        # Model override (optional per-ROI)
+        model_override_var = tk.StringVar(value=roi_data.get("model_override", ""))
+        ctk.CTkLabel(row_frame, text="Model Override (optional)", font=("Segoe UI", 8, "bold"), text_color=TEXT_SECONDARY).grid(row=3, column=0, sticky="w", padx=8, pady=(0, 2))
+        # Get model choices from main model selector
+        model_choices = list(a.preset_model_selector.cget("values")) if hasattr(a, "preset_model_selector") else []
+        if model_choices:
+            ctk.CTkComboBox(row_frame, variable=model_override_var, values=[""] + model_choices, width=200, height=24).grid(row=4, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 4))
+        else:
+            ctk.CTkEntry(row_frame, textvariable=model_override_var, width=200, height=24, placeholder_text="No models available").grid(row=4, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 4))
+        model_override_var.trace_add("write", lambda *a2, idx=roi_idx, v=model_override_var: self._on_comp_model_override_changed(idx, v))
 
     def _on_comp_roi_name_changed(self, roi_idx: int, var: tk.StringVar) -> None:
         if roi_idx < len(self.admin.preset_component_rois):
