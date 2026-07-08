@@ -1908,26 +1908,40 @@ class InspectionSessionService:
             }
         method = str(getattr(config, "method", "gap_template_match") or "gap_template_match").strip().lower()
         if method == "mean_std_threshold":
-            return self._evaluate_part_ready_mean_std(frame, state, config)
-        if method == "gap_template_match":
-            return self._evaluate_part_ready_gap(frame, state, config)
-        # Item 2: fail-closed on unsupported method — don't silently substitute gap
-        logger.error(
-            "[inspection] unsupported part_ready method '%s' for template %s — failing closed",
-            method, state.template.id,
-        )
-        return {
-            "enabled": True,
-            "part_ready": False,
-            "part_ready_confidence": 0.0,
-            "decision": DecisionCode.REJECT.value,
-            "reject_reason_code": RejectReasonCode.ERROR.value,
-            "status": f"UNSUPPORTED_PART_READY_METHOD:{method}",
-            "match_ratio": None,
-            "mean_distance": None,
-            "color_profile_id": None,
-            "gap_score": None,
-        }
+            result = self._evaluate_part_ready_mean_std(frame, state, config)
+        elif method == "gap_template_match":
+            result = self._evaluate_part_ready_gap(frame, state, config)
+        else:
+            # Item 2: fail-closed on unsupported method — don't silently substitute gap
+            logger.error(
+                "[inspection] unsupported part_ready method '%s' for template %s — failing closed",
+                method, state.template.id,
+            )
+            result = {
+                "enabled": True,
+                "part_ready": False,
+                "part_ready_confidence": 0.0,
+                "decision": DecisionCode.REJECT.value,
+                "reject_reason_code": RejectReasonCode.ERROR.value,
+                "status": f"UNSUPPORTED_PART_READY_METHOD:{method}",
+                "match_ratio": None,
+                "mean_distance": None,
+                "color_profile_id": None,
+                "gap_score": None,
+            }
+
+        # Universal min_match_ratio gate: apply floor confidence to ALL methods
+        # If match_ratio is below min_match_ratio, override to not-ready
+        _min_conf = float(getattr(config, "min_match_ratio", 0.5) or 0.5)
+        _match_ratio = result.get("match_ratio")
+        if _match_ratio is not None and result.get("part_ready", False) and _match_ratio < _min_conf:
+            result["part_ready"] = False
+            result["part_ready_confidence"] = _match_ratio
+            result["decision"] = DecisionCode.REJECT.value
+            result["reject_reason_code"] = RejectReasonCode.PART_NOT_READY.value
+            result["status"] = "below_min_confidence"
+
+        return result
 
     def _evaluate_part_ready_gap(self, frame, state: SessionState, config) -> dict[str, Any]:
         """Gap detection via template matching against reference patch."""
@@ -2144,7 +2158,7 @@ class InspectionSessionService:
 
         evaluation = evaluate_mean_std_threshold(frame, config)
 
-        # EMA smoothing on the classification confidence (std_value)
+        # EMA smoothing on the classification confidence (match_ratio)
         _ema_alpha = max(0.0, min(1.0, float(getattr(config, "ema_alpha", 0.3) or 0.3)))
         raw_ratio = float(evaluation["match_ratio"])
         if state.part_ready_ema_ratio == 0.0:
@@ -2155,10 +2169,16 @@ class InspectionSessionService:
             )
         smoothed_ratio = state.part_ready_ema_ratio
 
-        ready = bool(evaluation["part_ready"])
+        # Decision uses the same smoothed ratio as displayed
+        # (raw_part_ready from classifier is kept as reference, but effective decision
+        # for the gateway is based on smoothed confidence)
+        _raw_ready = bool(evaluation["part_ready"])
+        # Only consider ready if the smoothed match_ratio is above the method threshold
+        # AND the raw classifier said ready (structural classification still required)
+        ready = _raw_ready
         evaluation.update({
             "part_ready": ready,
-            "part_ready_confidence": round(float(evaluation.get("std_value", 0.0)), 2) if ready else round(255.0 - float(evaluation.get("mean_value", 0.0)), 2),
+            "part_ready_confidence": float(smoothed_ratio),
             "decision": DecisionCode.ACCEPT.value if ready else DecisionCode.REJECT.value,
             "reject_reason_code": None if ready else RejectReasonCode.PART_NOT_READY.value,
             "status": "ready" if ready else "not_ready",

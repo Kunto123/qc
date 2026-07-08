@@ -1051,6 +1051,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_part_ready_method_var.set(_method)
         self.preset_mean_max_var.set(str(part_ready.get("mean_max", 105.0)))
         self.preset_std_max_var.set(str(part_ready.get("std_max", 35.0)))
+        self.preset_min_match_ratio_var.set(str(part_ready.get("min_match_ratio", 0.5)))
         # Update gap ref status label
         _gap_ref_path = detail.get("gap_ref_path") or part_ready.get("gap_ref_path")
         _gap_ref_type = str(part_ready.get("gap_ref_type") or "").strip() or "raw"
