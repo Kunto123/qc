@@ -370,7 +370,7 @@ class FXComputerLinkPlcAdapter(PlcAdapter):
             except Exception as exc:
                 consecutive_fail += 1
                 logger.warning(
-                    "[plc-fx] read_bit %s failed (%d/%d): %s",
+                    "[plc-fx] read_bit %s failed (%d/%d): %r",
                     fx_label, consecutive_fail, max_bit_failures, exc,
                 )
                 if consecutive_fail >= max_bit_failures:
