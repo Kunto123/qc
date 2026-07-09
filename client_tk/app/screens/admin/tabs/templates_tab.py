@@ -192,12 +192,30 @@ class TemplatesTab:
         a.preset_validator_mode_var.trace_add("write", lambda *_: self._on_method_or_mode_changed(a))
         # Save widgets for hide/show in component_count mode
         a._part_ready_method_widgets = [_pr_label, method_combo]
+        # Part-ready source selector (shown only in component_count mode)
+        a._part_ready_source_label = ttk.Label(wizard, text="Part Ready Source")
+        a._part_ready_source_label.grid(row=13, column=0, sticky="w", padx=(12, 8), pady=5)
+        a._part_ready_source_frame = ttk.Frame(wizard)
+        a._part_ready_source_frame.grid(row=13, column=1, columnspan=2, sticky="w", padx=(0, 12), pady=5)
+        a._part_ready_source_sensor = ttk.Radiobutton(
+            a._part_ready_source_frame, text="Sensor (Modbus)",
+            variable=a.preset_part_ready_source_var, value="sensor",
+        )
+        a._part_ready_source_sensor.pack(side="left", padx=(0, 8))
+        a._part_ready_source_camera = ttk.Radiobutton(
+            a._part_ready_source_frame, text="Camera ROI",
+            variable=a.preset_part_ready_source_var, value="camera_roi",
+        )
+        a._part_ready_source_camera.pack(side="left")
+        a._part_ready_source_widgets = [
+            a._part_ready_source_label, a._part_ready_source_frame,
+        ]
         # Mean-Std threshold fields (shown only when method=mean_std_threshold)
-        a._mean_std_fields_start = 13
-        a._entry(wizard, 13, 0, "MEAN_MAX", a.preset_mean_max_var, columnspan=2)
-        a._entry(wizard, 14, 0, "STD_MAX", a.preset_std_max_var, columnspan=2)
-        a._entry(wizard, 15, 0, "Min Confidence (0-1)", a.preset_min_match_ratio_var, columnspan=2)
-        a._mean_std_field_rows = [13, 14, 15]
+        a._mean_std_fields_start = 14  # shifted by 1 for source row
+        a._entry(wizard, 14, 0, "MEAN_MAX", a.preset_mean_max_var, columnspan=2)
+        a._entry(wizard, 15, 0, "STD_MAX", a.preset_std_max_var, columnspan=2)
+        a._entry(wizard, 16, 0, "Min Confidence (0-1)", a.preset_min_match_ratio_var, columnspan=2)
+        a._mean_std_field_rows = [14, 15, 16]
 
         # Reference patch buttons — row 19 (after mean_std fields + spacing)
         ref_btn_row = ttk.Frame(wizard)
@@ -273,7 +291,7 @@ class TemplatesTab:
 
         # Keep references to mean-std threshold fields (shown only when method=mean_std_threshold)
         a._mean_std_field_widgets = []
-        for _r in (13, 14, 15):
+        for _r in (14, 15, 16):
             try:
                 for w in wizard.grid_slaves(row=_r):
                     a._mean_std_field_widgets.append(w)
@@ -339,6 +357,14 @@ class TemplatesTab:
         if _is_component:
             a._comp_editor_frame.grid()
             a._add_comp_roi_btn.grid()
+            # Reset stale component ROIs if current template has no counter criteria.
+            # This prevents old ROIs from persisting when switching modes without
+            # loading a counter template.
+            _detail = getattr(a, '_template_detail_cache', None)
+            if not _detail or not _detail.get('criteria', {}).get('component_rois'):
+                a.preset_component_rois = []
+                if hasattr(a, 'preset_roi_picker'):
+                    a.preset_roi_picker.set_component_rois([])
         else:
             a._comp_editor_frame.grid_remove()
             a._add_comp_roi_btn.grid_remove()
@@ -385,6 +411,9 @@ class TemplatesTab:
                 w.grid() if _method == "gap_template_match" else w.grid_remove()
             else:
                 w.grid()
+        # Part-ready source selector — shown only in component_count mode
+        for w in getattr(a, "_part_ready_source_widgets", []):
+            w.grid() if _is_component else w.grid_remove()
         if _is_sticker:
             self._on_method_or_mode_changed(a)
 
@@ -794,36 +823,14 @@ class TemplatesTab:
         if roi_idx < len(self.admin.preset_component_rois) and cls_idx < len(self.admin.preset_component_rois[roi_idx]["classes"]):
             self.admin.preset_component_rois[roi_idx]["classes"][cls_idx]["class_name"] = var.get()
 
-    def _on_comp_count_changed(self, roi_idx: int, cls_idx: int, var: tk.StringVar) -> None:
-        if roi_idx < len(self.admin.preset_component_rois) and cls_idx < len(self.admin.preset_component_rois[roi_idx]["classes"]):
-            try:
-                val = int(var.get())
-                self.admin.preset_component_rois[roi_idx]["classes"][cls_idx]["count"] = val
-            except ValueError:
-                self.admin.preset_component_rois[roi_idx]["classes"][cls_idx]["count"] = 1
-
-    def _on_comp_min_changed(self, roi_idx: int, cls_idx: int, var: tk.StringVar) -> None:
-        if roi_idx < len(self.admin.preset_component_rois) and cls_idx < len(self.admin.preset_component_rois[roi_idx]["classes"]):
-            try:
-                val = int(var.get())
-                self.admin.preset_component_rois[roi_idx]["classes"][cls_idx]["min_count"] = val
-            except ValueError:
-                pass
-
-    def _on_comp_max_changed(self, roi_idx: int, cls_idx: int, var: tk.StringVar) -> None:
-        if roi_idx < len(self.admin.preset_component_rois) and cls_idx < len(self.admin.preset_component_rois[roi_idx]["classes"]):
-            raw = var.get().strip()
-            if raw == "":
-                self.admin.preset_component_rois[roi_idx]["classes"][cls_idx]["max_count"] = None
-            else:
-                try:
-                    self.admin.preset_component_rois[roi_idx]["classes"][cls_idx]["max_count"] = int(raw)
-                except ValueError:
-                    pass
-
     def _on_comp_strict_changed(self, roi_idx: int, var: tk.BooleanVar) -> None:
         if roi_idx < len(self.admin.preset_component_rois):
             self.admin.preset_component_rois[roi_idx]["strict_foreign_class"] = var.get()
+
+    def _on_comp_model_override_changed(self, roi_idx: int, var: tk.StringVar) -> None:
+        """Stub: model override not yet active — trace exists for future use."""
+        if roi_idx < len(self.admin.preset_component_rois):
+            self.admin.preset_component_rois[roi_idx]["model_override"] = var.get()
 
     def _on_add_comp_class(self, a, roi_idx: int) -> None:
         if roi_idx < len(a.preset_component_rois):

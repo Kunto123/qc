@@ -27,7 +27,7 @@ from backend.app.services.sticker_inference import StickerInferenceService
 from backend.app.services.template_runtime import TemplateRuntimeService
 from backend.app.services.text_tilt import estimate_white_text_tilt
 from shared.contracts.enums import DecisionCode, InspectionEventState, RejectReasonCode, SessionStatus
-from shared.contracts.templates import RoiGeometry
+from shared.contracts.templates import RoiGeometry, normalize_mode
 from backend.app.services.evaluators.registry import get_evaluator
 
 
@@ -708,12 +708,15 @@ class InspectionSessionService:
 
         part_ready_started = time.perf_counter()
         validator_mode = str(getattr(state.template.sticker, "validator_mode", "") or "").strip().lower()
-        is_component_counter = validator_mode == "component_count"
+        is_component_counter = normalize_mode(validator_mode) == "counter"
         is_sticker = validator_mode in ("sticker", "ml_detection")
-
+        _part_ready_source = "sensor"
         if is_component_counter:
-            # Component Counter mode: part readiness from Modbus sensor input only,
-            # ignore camera-based part ready ROI completely
+            _part_ready_source = str((state.template.criteria or {}).get("part_ready_source") or "sensor").strip().lower()
+        _use_sensor_stub = is_component_counter and _part_ready_source != "camera_roi"
+
+        if _use_sensor_stub:
+            # Component Counter mode with sensor input: ignore camera-based part ready ROI
             part_ready_frame = None
             part_ready_roi_meta = {}
             part_ready = {"part_ready": True, "status": "sensor_input", "match_ratio": 1.0}
@@ -724,14 +727,13 @@ class InspectionSessionService:
                 state.template.part_ready_roi,
                 state.part_ready_roi_override,
             )
-        # Skip part_ready evaluation when latch is active (sticker mode only)
-        if not is_component_counter:
+        if not _use_sensor_stub:
             if state.part_ready_latched:
                 part_ready = {"part_ready": True, "status": "latched", "match_ratio": 1.0}
             else:
                 part_ready = self._evaluate_part_ready(part_ready_frame, state)
             presence = self._detect_part_presence(part_ready_frame)
-        timings["part_ready_eval_ms"] = _elapsed_ms(part_ready_started)
+            timings["part_ready_eval_ms"] = _elapsed_ms(part_ready_started)
 
         roi_crop_started = time.perf_counter()
         sticker_frame, sticker_roi_meta = self._crop_stage_roi(
@@ -791,7 +793,11 @@ class InspectionSessionService:
                 "sticker_detection": {},
                 # Blackout = idle reset window, no inspection ran → neutral decision
                 # (None renders as "WAITING" on the client, not a spurious reject).
-                "validation": {"decision": None, "reject_reason_code": None},
+                "validation": {
+                    "decision": None,
+                    "reject_reason_code": None,
+                    "validation_details": {"mode": normalize_mode(validator_mode)},
+                },
                 "inspection_policy": {"action": "pending", "commit_allowed": False},
                 "count_committed": False,
                 "count_source": None,
@@ -2691,22 +2697,8 @@ class InspectionSessionService:
                     "reject_reason_code": _reason if not _is_accept else None,
                     "validation_details": _details,
                 }
-                # Add convenience fields for backward compat
+                # Counter mode: early return — evaluator handles stability internally
                 if _details.get("mode") == "counter":
-                    _all_ok = _details.get("all_rois_ok", False)
-                    if _all_ok and _is_accept:
-                        # Update stability counters (moved from legacy _validate_component_count)
-                        from datetime import UTC, datetime
-                        import time as _time
-                        _now = _time.time()
-                        if state.accept_cycle_started_at is None:
-                            state.accept_cycle_started_at = datetime.now(UTC)
-                        if state.policy_stable_started_at is None:
-                            state.policy_stable_started_at = datetime.now(UTC)
-                        state.policy_stable_frames += 1
-                        if state.inference_accept_first_ts == 0.0:
-                            state.inference_accept_first_ts = _now
-                        state.inference_accept_count += 1
                     return result
 
         position_gate_enabled = validator_mode not in ROI_CLASS_VALIDATOR_MODES
@@ -3390,141 +3382,4 @@ class InspectionSessionService:
             y2 = float(pos.get("y2", 0))
             cx = ((x1 + x2) / 2.0) / float(fw)
             cy = ((y1 + y2) / 2.0) / float(fh)
-            det["tile_index"] = self._point_in_which_roi(cx, cy, component_rois)
-
-    def _validate_component_count(
-        self,
-        *,
-        state: SessionState,
-        detections: list[dict[str, Any]],
-        detection_payload: dict[str, Any],
-        part_ready_payload: dict[str, Any],
-        username: str | None = None,
-        user_id: int | None = None,
-    ) -> dict[str, Any]:
-        """Validate component count mode — per-frame evaluation + N-frame consecutive acceptance.
-
-        Rules per ROI (evaluated on THIS frame only):
-        1. For each class: min_count <= detected <= max_count (max_count=None = unlimited)
-        2. (if strict_foreign_class) no foreign class detections in ROI
-        No longer requires total_ok (exact sum match) — min/max range is sufficient.
-
-        Stability: all ROIs must pass on N consecutive frames before ACCEPT.
-        """
-        from collections import Counter
-
-        component_rois = state.template.component_rois
-        if not component_rois:
-            return {
-                "decision": "REJECT",
-                "reject_reason_code": "NO_COMPONENT_ROIS",
-                "validation_details": {"mode": "component_count", "error": "No component ROIs defined"},
-            }
-
-        # Count detections per (ROI_index, class) — THIS FRAME only
-        roi_counts: list[Counter] = [Counter() for _ in component_rois]
-        for det in detections:
-            label = str(det.get("label") or det.get("class_name") or "").strip().lower()
-            tile_idx = det.get("tile_index", -1)
-            if 0 <= tile_idx < len(component_rois):
-                roi_counts[tile_idx][label] += 1
-
-        # Evaluate each ROI on this frame
-        all_ok = True
-        reject_reason = None
-        roi_results = []
-
-        for roi_idx, roi_rule in enumerate(component_rois):
-            roi_ok = True
-            class_results = {}
-            registered_classes = set()
-
-            for ct in roi_rule.classes:
-                cn = ct.class_name.strip().lower()
-                min_count = ct.min_count if ct.min_count is not None else ct.count
-                max_count = ct.max_count  # None = unlimited
-                registered_classes.add(cn)
-                detected = roi_counts[roi_idx].get(cn, 0)
-                ok = detected >= min_count and (max_count is None or detected <= max_count)
-                class_results[cn] = {
-                    "detected": detected,
-                    "min": min_count,
-                    "max": max_count if max_count is not None else None,  # None = unlimited
-                    "ok": ok,
-                }
-                if not ok:
-                    roi_ok = False
-
-            total_detected = sum(roi_counts[roi_idx].values())
-
-            foreign_classes = []
-            if roi_rule.strict_foreign_class:
-                for cls_name in roi_counts[roi_idx]:
-                    if cls_name not in registered_classes:
-                        foreign_classes.append(cls_name)
-                        roi_ok = False
-
-            if not roi_ok:
-                all_ok = False
-                if not reject_reason:
-                    if foreign_classes:
-                        reject_reason = "UNEXPECTED_COMPONENT"
-                    else:
-                        reject_reason = "COMPONENT_COUNT_MISMATCH"
-
-            roi_results.append({
-                "name": roi_rule.name,
-                "ok": roi_ok,
-                "classes": class_results,
-                "total_detected": total_detected,
-                "foreign_classes": foreign_classes,
-            })
-
-        # Update consecutive-ok counter
-        if all_ok:
-            state.consecutive_component_ok = getattr(state, "consecutive_component_ok", 0) + 1
-        else:
-            state.consecutive_component_ok = 0
-
-        # Decision: ACCEPT only after N consecutive ok frames
-        _needed = max(1, int(self._accept_stable_frames))
-        if all_ok and state.consecutive_component_ok >= _needed:
-            decision = "ACCEPT"
-        elif all_ok:
-            decision = "ACCEPT_CANDIDATE"  # stabilizing, not yet committed
-        else:
-            decision = "REJECT"
-
-        result = {
-            "decision": decision,
-            "reject_reason_code": reject_reason if not all_ok else None,
-            "validation_details": {
-                "component_rois": roi_results,
-                "mode": "component_count",
-                "consecutive_ok": state.consecutive_component_ok,
-                "consecutive_needed": _needed,
-            },
-        }
-
-        # Update shared stability counters (used by commit gate)
-        if all_ok:
-            import time as _time
-            _now = _time.time()
-            if state.accept_cycle_started_at is None:
-                state.accept_cycle_started_at = datetime.now(UTC)
-            if state.policy_stable_started_at is None:
-                state.policy_stable_started_at = datetime.now(UTC)
-            state.policy_stable_frames += 1
-            if state.inference_accept_first_ts == 0.0:
-                state.inference_accept_first_ts = _now
-            state.inference_accept_count += 1
-        else:
-            state.policy_stable_frames = 0
-            state.policy_stable_started_at = None
-            state.accept_cycle_started_at = None
-            state.inference_accept_count = 0
-            state.inference_accept_first_ts = 0.0
-            state.inference_last_counted_generation = -1
-
-        return result
 

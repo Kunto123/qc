@@ -176,6 +176,7 @@ class AdminScreen(ctk.CTkFrame):
         self._calib_part_mean: float = 0.0
         self._calib_part_std: float = 0.0
         self._calib_sticker_std: float = 0.0
+        self._template_detail_cache: dict | None = None
         self.preset_model_classes_var = tk.StringVar()
         self.preset_name_var = tk.StringVar()
         self.preset_description_var = tk.StringVar()
@@ -191,6 +192,7 @@ class AdminScreen(ctk.CTkFrame):
         self.preset_camera_index_var = tk.StringVar(value="0")
         self.preset_camera_rotation_var = tk.StringVar(value="0")
         self.preset_roi_choice_var = tk.StringVar(value="Sticker ROI")
+        self.preset_part_ready_source_var = tk.StringVar(value="sensor")
         self.part_ready_roi_x_var = tk.StringVar(value="0.2")
         self.part_ready_roi_y_var = tk.StringVar(value="0.2")
         self.part_ready_roi_w_var = tk.StringVar(value="0.25")
@@ -354,7 +356,7 @@ class AdminScreen(ctk.CTkFrame):
         return scroller.body
 
     def _build_presets_tab(self) -> None:
-        TemplatesTab(self, self.presets_tab)
+        self._templates_tab = TemplatesTab(self, self.presets_tab)
 
     def _build_operators_tab(self) -> None:
         OperatorsTab(self, self.operators_tab)
@@ -895,6 +897,7 @@ class AdminScreen(ctk.CTkFrame):
         "preset_camera_index_var": "0",
         "preset_camera_rotation_var": "0",
         "preset_roi_choice_var": "Part Ready ROI",
+        "preset_part_ready_source_var": "sensor",
         # complex types
         "preset_component_rois": lambda: [],
         "preset_defect_rois": lambda: [],
@@ -980,6 +983,7 @@ class AdminScreen(ctk.CTkFrame):
         self.current_template_id = None
         self.current_template_version_id = None
         self._editing_deployment_id = None
+        self._template_detail_cache = None
         self._refresh_preset_action_button()
         if hasattr(self, "preset_table"):
             for item_id in self.preset_table.selection():
@@ -1032,6 +1036,8 @@ class AdminScreen(ctk.CTkFrame):
     def _apply_preset_detail(self, detail: dict, *, deployment: dict | None = None) -> None:
         # Reset form first to purge any state from previous preset/mode
         self._reset_preset_form()
+        # Cache the template detail for mode-switch freshness checks
+        self._template_detail_cache = detail
         self.current_template_id = int(detail.get("id") or (deployment or {}).get("template_id") or 0) or None
         self.current_template_version_id = int(detail.get("version_id") or (deployment or {}).get("template_version_id") or 0) or None
         self.preset_name_var.set(str(detail.get("name") or (deployment or {}).get("template_name") or ""))
@@ -1106,8 +1112,21 @@ class AdminScreen(ctk.CTkFrame):
         # ── Load component ROIs from detail (criteria first, top-level fallback) ──
         _crit = detail.get("criteria") or {}
         self.preset_component_rois = list(_crit.get("component_rois") or detail.get("component_rois") or [])
+        # Load part_ready_source for counter mode (default "sensor" when absent)
+        if _vm == "counter":
+            self.preset_part_ready_source_var.set(str(_crit.get("part_ready_source") or "sensor"))
+        # Additional fallback: if counter mode and ROIs still empty, try to reconstruct
+        # from legacy template data. This guards against API responses that may omit criteria.
+        if _vm == "counter" and not self.preset_component_rois:
+            # Fallback 1: sticker.validator_mode == "component_count" indicates counter template
+            _sticker_vm = str(sticker.get("validator_mode") or "").strip().lower()
+            if _sticker_vm == "component_count" and detail.get("component_rois"):
+                self.preset_component_rois = list(detail["component_rois"])
+            # Fallback 2: check vision.classes for class list (minimal recovery)
+            elif _sticker_vm == "component_count" and not self.preset_component_rois:
+                # Template is counter mode but no component ROIs found — edge case
+                pass  # leave empty, operator can re-add
         self.preset_defect_rois = list(_crit.get("rois") or [])
-        self.preset_defect_default_model_var.set(str(_crit.get("default_model_path") or ""))
         if hasattr(self, "_defect_infer_mode_var"):
             self._defect_infer_mode_var.set(str(_crit.get("inference_mode", "whole_part")))
 
@@ -1166,8 +1185,11 @@ class AdminScreen(ctk.CTkFrame):
                 values = self.preset_roi_selector.cget("values")
                 for i, val in enumerate(values):
                     if val == choice:
-                        if i < len(self.preset_component_rois):
-                            return f"component:{i}"
+                        # Dropdown: [Part Ready ROI(0), Component:A(1), ...]
+                        # Component index = dropdown index - 1 (offset for Part Ready ROI)
+                        comp_idx = i - 1
+                        if 0 <= comp_idx < len(self.preset_component_rois):
+                            return f"component:{comp_idx}"
             except Exception:
                 pass
         if choice.startswith("Defect:"):
@@ -1175,8 +1197,10 @@ class AdminScreen(ctk.CTkFrame):
                 values = self.preset_roi_selector.cget("values")
                 for i, val in enumerate(values):
                     if val == choice:
-                        if i < len(self.preset_defect_rois):
-                            return f"defect:{i}"
+                        # Dropdown: [Part Ready ROI(0), Defect:A(1), ...]
+                        defect_idx = i - 1
+                        if 0 <= defect_idx < len(self.preset_defect_rois):
+                            return f"defect:{defect_idx}"
             except Exception:
                 pass
         return None
@@ -1330,6 +1354,10 @@ class AdminScreen(ctk.CTkFrame):
             if hasattr(self, "_live_cam_btn"):
                 self._live_cam_btn.configure(text="Start Live Camera")
 
+    def shutdown(self) -> None:
+        """Cleanup on screen teardown: stop live camera if running."""
+        self._stop_live_camera_if_running()
+
     def _toggle_live_camera(self) -> None:
         """Toggle live camera feed on the ROI picker canvas."""
         picker = getattr(self, "preset_roi_picker", None)
@@ -1413,22 +1441,36 @@ class AdminScreen(ctk.CTkFrame):
                         except Exception:
                             pass
             # Reload exact version detail to wizard form so values reflect the update
+            _reload_ok = True
+            _reload_error = ""
+            # Backup component ROIs before clearing (for roundtrip recovery)
+            _backup_comp_rois = list(self.preset_component_rois) if self.preset_component_rois else []
             try:
                 if version_id:
                     detail = self.api.get_template_version(version_id)
                 else:
                     detail = self.api.get_template(template_id)
                 self._apply_preset_detail(detail, deployment=None)
-                _reload_ok = True
-            except Exception:
+                # After reloading, if counter mode ROIs are still empty, restore from backup
+                if not self.preset_component_rois and _backup_comp_rois:
+                    if mode_from_template(detail) == "counter":
+                        self.preset_component_rois = _backup_comp_rois
+                        self.preset_roi_picker.set_component_rois([
+                            {"name": cr.get("name", "ROI"), **cr.get("roi", {})}
+                            for cr in _backup_comp_rois
+                        ])
+                        if hasattr(self, "_templates_tab") and self._templates_tab:
+                            self._templates_tab._refresh_comp_roi_editor(self)
+            except Exception as exc:
                 _reload_ok = False
+                _reload_error = str(exc)
             self.refresh_presets()
             if _reload_ok:
                 self._set_status(f"Template #{template_id} v{version_id} updated.")
                 messagebox.showinfo("Preset", f"Template #{template_id} updated successfully.")
             else:
-                self._set_status(f"Template #{template_id} saved, but detail reload failed.")
-                messagebox.showwarning("Preset", "Saved OK, but form reload failed. Values may appear stale until re-selected.")
+                self._set_status(f"Template #{template_id} saved, but detail reload failed: {_reload_error}")
+                messagebox.showwarning("Preset", f"Saved OK, but form reload failed: {_reload_error}")
         except Exception as exc:
             messagebox.showerror("Preset", str(exc))
     def save_and_deploy_preset(self) -> None:
@@ -1487,11 +1529,24 @@ class AdminScreen(ctk.CTkFrame):
         self.current_template_id = template_id
         self.current_template_version_id = version_id
         self._editing_deployment_id = int(deployment.get("id") or 0) or self._editing_deployment_id
+        # Backup component ROIs before clearing (for save-roundtrip recovery)
+        _backup_comp_rois = list(self.preset_component_rois) if self.preset_component_rois else []
+        _backup_defect_rois = list(self.preset_defect_rois) if self.preset_defect_rois else []
         # Re-apply saved data to wizard so UI reflects updated mode/criteria
         try:
             reloaded = self.api.get_template(template_id) if template_id else None
             if reloaded:
                 self._apply_preset_detail(reloaded, deployment=deployment)
+                # After reloading, if counter mode ROIs are still empty, restore from backup
+                _reloaded_mode = mode_from_template(reloaded)
+                if _reloaded_mode == "counter" and not self.preset_component_rois and _backup_comp_rois:
+                    self.preset_component_rois = _backup_comp_rois
+                    self.preset_roi_picker.set_component_rois([
+                        {"name": cr.get("name", "ROI"), **cr.get("roi", {})}
+                        for cr in _backup_comp_rois
+                    ])
+                    if hasattr(self, "_templates_tab") and self._templates_tab:
+                        self._templates_tab._refresh_comp_roi_editor(self)
                 self._set_status(f"Preset deployed — mode: {reloaded.get('mode', 'sticker')}")
             else:
                 self._set_status("Preset deployed.")
@@ -1669,6 +1724,7 @@ class AdminScreen(ctk.CTkFrame):
         elif mode == "component_count":
             _criteria = {
                 "component_rois": self.preset_component_rois,
+                "part_ready_source": self.preset_part_ready_source_var.get(),
             }
         elif mode == "defect":
             # Single model selector writes to criteria.default_model_path for defect mode

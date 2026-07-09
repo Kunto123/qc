@@ -530,11 +530,15 @@ class OperatorScreen(ctk.CTkFrame):
         template_detail = self.state.cache.get("selected_template_detail") if isinstance(self.state.cache, dict) else None
         _mode = mode_from_template(template_detail)  # canonical: sticker|counter|defect
         is_component_counter = (_mode == "counter")
+        # Determine part_ready_source for counter mode (sensor → hide Part Ready ROI, camera_roi → show it)
+        _pr_source = str((template_detail or {}).get("criteria", {}).get("part_ready_source") or "sensor").strip().lower() \
+            if is_component_counter else "sensor"
+        _hide_part_ready_roi = is_component_counter and _pr_source == "sensor"
 
-        # Part Ready ROI — only shown in sticker mode
+        # Part Ready ROI — hidden in counter mode with sensor source; visible for sticker/defect/camera_roi
         part_ready_roi = ttk.LabelFrame(body, text="Part Ready ROI", padding=10)
         part_ready_roi.grid(row=1, column=0, sticky="nsew", pady=(12, 0), padx=(0, 6))
-        if is_component_counter:
+        if _hide_part_ready_roi:
             part_ready_roi.grid_remove()
         for index in range(8):
             part_ready_roi.columnconfigure(index, weight=1)
@@ -1129,7 +1133,9 @@ class OperatorScreen(ctk.CTkFrame):
 
         # ── Mode-specific rendering ───────────────────────────────
         if mode == "counter":
-            self._render_counter_overlay(overlay, frame, validation_details)
+            self._render_counter_overlay(overlay, frame, validation_details,
+                                          detections, scale_x, scale_y, decision,
+                                          part_ready_roi, part_ready)
         elif mode == "defect":
             self._render_defect_overlay(overlay, frame, validation_details)
         else:
@@ -1220,16 +1226,56 @@ class OperatorScreen(ctk.CTkFrame):
         cv2.putText(overlay, f"state={event_state}", (12, 70),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
-    def _render_counter_overlay(self, overlay, frame, validation_details: dict) -> None:
+    def _render_counter_overlay(self, overlay, frame, validation_details: dict,
+                                 detections: list | None = None,
+                                 scale_x: float = 1.0, scale_y: float = 1.0,
+                                 decision: str | None = None,
+                                 part_ready_roi_meta: dict | None = None,
+                                 part_ready: dict | None = None) -> None:
         """Render component counter ROI results on the overlay.
 
-        Minimal display: ROI borders only (green=OK, red=NG), match ratio in top-left.
-        No text labels on ROIs per requirement #3.
+        Shows ROI borders (green=OK, red=NG), detection bounding boxes,
+        stabilizing indicator when applicable, and part-ready ROI box
+        when camera-based evaluation is active.
         """
         rois = validation_details.get("rois", [])
         fh, fw = frame.shape[:2]
 
-        # Draw ROI rectangles only — green if ok, red if not
+        # ── Part-ready ROI box (camera_roi source only) ───────────
+        if part_ready_roi_meta:
+            pr_box = self._resolve_roi_rect(part_ready_roi_meta, fw, fh)
+            if pr_box:
+                px, py, pw, ph = pr_box
+                _r = float(part_ready_roi_meta.get("rotation", 0.0) or 0.0)
+                if abs(_r) > 0.1:
+                    _c = _overlay_rotated_corners(px, py, pw, ph, _r)
+                    cv2.polylines(overlay, [np.array([_c[0], _c[1], _c[3], _c[2]], dtype="int32")],
+                                  True, (50, 180, 255), 2, cv2.LINE_AA)
+                else:
+                    cv2.rectangle(overlay, (px, py), (px + pw, py + ph), (50, 180, 255), 2)
+                # Match ratio / status text
+                _pr_val = (part_ready or {}).get("part_ready", False)
+                _pr_ratio = (part_ready or {}).get("match_ratio", (part_ready or {}).get("part_ready_confidence", "-"))
+                overlay = _draw_text_bg(overlay, (12, 30), f"part_ready={_pr_val} ratio={_pr_ratio}",
+                                         font_scale=0.45, color=(255, 255, 255))
+
+        # ── Detection bounding boxes ──────────────────────────────
+        if detections:
+            for det in detections:
+                pos = det.get("position") or {}
+                x1 = int(float(pos.get("x1", 0)) * scale_x)
+                y1 = int(float(pos.get("y1", 0)) * scale_y)
+                x2 = int(float(pos.get("x2", 0)) * scale_x)
+                y2 = int(float(pos.get("y2", 0)) * scale_y)
+                bc = (0, 255, 255)  # yellow bboxes for counter mode
+                cv2.rectangle(overlay, (x1, y1), (x2, y2), bc, 2)
+                lbl = str(det.get("label") or "")
+                conf = float(det.get("confidence") or 0.0)
+                overlay = _draw_text_bg(overlay, (x1, max(20, y1 - 8)),
+                                         f"{lbl} {conf:.2f}",
+                                         font_scale=0.4, color=(200, 200, 255))
+
+        # ── ROI rectangles ────────────────────────────────────────
         for roi in rois:
             roi_geom = roi.get("roi") or {}
             if not roi_geom:
@@ -1245,12 +1291,22 @@ class OperatorScreen(ctk.CTkFrame):
             _draw_overlay_roi_rect(overlay, rx, ry, rw, rh, rot, color)
             # NO label text on ROI — per requirement #3
 
-        # Top-left: Match Ratio only
-        total = len(rois)
-        ok_count = sum(1 for r in rois if r.get("ok", False))
-        ratio = (ok_count / total * 100) if total > 0 else 0.0
-        overlay = _draw_text_bg(overlay, (12, 30), f"Match Ratio: {ratio:.1f}%",
-                                  font_scale=0.7, color=(200, 200, 255))
+        # ── Status text (top-left) ────────────────────────────────
+        # Decision indicator
+        from shared.contracts.enums import DecisionCode
+        _decision_str = str(decision or "")
+        _is_accept = _decision_str == DecisionCode.ACCEPT.value
+
+        # Check if stabilizing (all ROIs OK but not yet ACCEPT)
+        all_rois_ok = validation_details.get("all_rois_ok", False)
+        _is_stabilizing = all_rois_ok and not _is_accept and _decision_str
+
+        if _is_stabilizing:
+            _consecutive = validation_details.get("consecutive_ok", 0)
+            _needed = validation_details.get("consecutive_needed", 2)
+            overlay = _draw_text_bg(overlay, (12, 30),
+                                     f"Stabilizing... ({_consecutive}/{_needed})",
+                                     font_scale=0.6, color=(255, 220, 80))
 
     def _render_defect_overlay(self, overlay, frame, validation_details: dict) -> None:
         """Render defect scan ROI results on the overlay."""
