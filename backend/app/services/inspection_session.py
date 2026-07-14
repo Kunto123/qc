@@ -252,6 +252,49 @@ class InspectionSessionService:
         # Maps event_id -> {decision, result_id, status}
         self._pending_actuations: dict[str, dict] = {}
 
+    def update_timing_settings(self, data: dict) -> None:
+        """Override timing/inspection settings at runtime (called after Machine Settings save).
+
+        Accepts a flat dict matching TimingConfig schema, or a nested 'timing' key.
+        Falls back to current value if key is missing (safe for partial updates).
+        """
+        timing = data.get("timing", data) if isinstance(data, dict) else {}
+
+        self._phase_next_part_delay_ms = max(0, int(timing.get(
+            "phase_next_part_delay_ms", self._phase_next_part_delay_ms)))
+        self._phase_sticker_install_delay_ms = max(0, int(timing.get(
+            "phase_sticker_install_delay_ms", self._phase_sticker_install_delay_ms)))
+        self._accept_stable_frames = max(1, int(timing.get(
+            "accept_stable_frames", self._accept_stable_frames)))
+        self._accept_stable_ms = max(0, int(timing.get(
+            "accept_stable_ms", self._accept_stable_ms)))
+        self._hard_reject_stable_frames = max(1, int(timing.get(
+            "hard_reject_stable_frames", self._hard_reject_stable_frames)))
+        self._hard_reject_stable_ms = max(0, int(timing.get(
+            "hard_reject_stable_ms", self._hard_reject_stable_ms)))
+        self._commit_grace_ms = max(0, int(timing.get(
+            "commit_grace_ms", self._commit_grace_ms)))
+        self._reject_timeout_ms = max(0, int(timing.get(
+            "reject_timeout_ms", self._reject_timeout_ms)))
+        self._part_ready_release_ms = max(0, int(timing.get(
+            "part_ready_release_ms", self._part_ready_release_ms)))
+        self._default_settle_ms = max(0, int(timing.get(
+            "part_ready_settle_ms_default", self._default_settle_ms)))
+        self._inference_cache_grace_ms = max(0, int(timing.get(
+            "inference_cache_grace_ms", self._inference_cache_grace_ms)))
+        self._accept_holdover_ms = max(0, int(timing.get(
+            "accept_holdover_ms", self._accept_holdover_ms)))
+        self._inference_cache_ttl_ms = max(100, int(timing.get(
+            "inference_cache_ttl_ms", self._inference_cache_ttl_ms)))
+        self._idle_timeout_s = max(0, int(timing.get(
+            "session_idle_timeout_s", self._idle_timeout_s)))
+        self._max_consecutive_rejects = max(0, int(timing.get(
+            "max_consecutive_rejects", self._max_consecutive_rejects)))
+        logger.info(
+            "[inspection-session] timing settings updated from machine-settings (%d fields)",
+            len(timing),
+        )
+
     def _on_plc_state_change(self, old_state: str, new_state: str) -> None:
         """Callback dari PLC worker saat state berubah.
         Reset clamp gate saat PLC kembali ke IDLE (manual release).
