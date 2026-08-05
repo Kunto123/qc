@@ -18,6 +18,7 @@ from backend.app.models.machine_settings import (
     MachineSettings,
     PlcConnectionConfig,
     StickerModeConfig,
+    TimingConfig,
 )
 from backend.app.repositories.base_json import JsonRepository
 
@@ -79,6 +80,23 @@ def _build_default_from_env(config: AppConfig) -> dict[str, Any]:
             "clamp_hold_ms": config.plc_clamp_hold_ms,
             "min_reclamp_interval_ms": config.plc_min_reclamp_interval_ms,
             "release_input_debounce_ms": config.plc_release_input_debounce_ms,
+        },
+        "timing": {
+            "phase_next_part_delay_ms": config.phase_next_part_delay_ms,
+            "phase_sticker_install_delay_ms": config.phase_sticker_install_delay_ms,
+            "accept_stable_frames": config.accept_stable_frames,
+            "accept_stable_ms": config.accept_stable_ms,
+            "hard_reject_stable_frames": config.hard_reject_stable_frames,
+            "hard_reject_stable_ms": config.hard_reject_stable_ms,
+            "commit_grace_ms": config.commit_grace_ms,
+            "reject_timeout_ms": config.reject_timeout_ms,
+            "part_ready_release_ms": config.part_ready_release_ms_default,
+            "part_ready_settle_ms_default": config.part_ready_settle_ms_default,
+            "inference_cache_grace_ms": config.inference_cache_grace_ms,
+            "accept_holdover_ms": config.accept_holdover_ms,
+            "inference_cache_ttl_ms": config.inference_cache_ttl_ms,
+            "session_idle_timeout_s": config.session_idle_timeout_s,
+            "max_consecutive_rejects": config.max_consecutive_rejects,
         },
     }
 

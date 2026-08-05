@@ -1,9 +1,9 @@
-"""Machine Settings tab — PLC wiring + transport config UI.
+"""Machine Settings tab — PLC I/O + timing + transport config UI.
 
 Admin-only tab for configuring:
   - Connection/transport (TCP/RTU, addresses, timeouts)
-  - I/O address map per mode (Sticker / Counter)
-  - Cycle timing
+  - I/O address map (single unified section — not split by mode)
+  - Timer / inspection policy settings (stable_ms, delays, etc.)
   - Diagnostics (live status, test coil, read inputs)
 """
 from __future__ import annotations
@@ -54,11 +54,11 @@ class MachineSettingsTab:
         # ── Connection section ──
         self._build_connection_section(body, 0)
 
-        # ── Sticker Mode section ──
-        self._build_sticker_section(body, 1)
+        # ── I/O Addresses section (unified — not split by mode) ──
+        self._build_io_section(body, 1)
 
-        # ── Counter Mode section (placeholder) ──
-        self._build_counter_section(body, 2)
+        # ── Timer / Inspection Policy section ──
+        self._build_timing_section(body, 2)
 
         # ── Diagnostics section ──
         self._build_diagnostics_section(body, 3)
@@ -110,70 +110,87 @@ class MachineSettingsTab:
         self._add_field(sec, r, "Timeout (ms)", "connection.timeout_ms", "1000"); r += 1
         self._add_field(sec, r, "Modbus Unit ID", "connection.modbus_unit_id", "255"); r += 1
 
-    # ── Sticker Mode section ─────────────────────────────────────────
+    # ── Unified I/O Addresses section ─────────────────────────────────
 
-    def _build_sticker_section(self, parent, row: int) -> None:
-        sec = self._section_frame(parent, row, "Sticker Mode — I/O Addresses")
+    def _build_io_section(self, parent, row: int) -> None:
+        sec = self._section_frame(parent, row, "I/O Addresses (All Modes)")
+
         r = 1
         ctk.CTkLabel(
             sec, text="Relay Coil Addresses", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
         ).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(4, 0)); r += 1
-        self._add_field(sec, r, "Clamp (CH3)", "sticker.relay_clamp_address", "3"); r += 1
-        self._add_field(sec, r, "OK Light+Buzzer (CH2)", "sticker.relay_ok_light_buzzer_address", "2"); r += 1
-        self._add_field(sec, r, "Enji Buzzer (CH1)", "sticker.relay_enji_buzzer_address", "1"); r += 1
-        self._add_field(sec, r, "Spare (CH4)", "sticker.relay_spare_address", "0"); r += 1
+        self._add_field(sec, r, "CH3 — Clamp", "sticker.relay_clamp_address", "3"); r += 1
+        self._add_field(sec, r, "CH2 — OK Light+Buzzer", "sticker.relay_ok_light_buzzer_address", "2"); r += 1
+        self._add_field(sec, r, "CH1 — Enji Buzzer", "sticker.relay_enji_buzzer_address", "1"); r += 1
+        self._add_field(sec, r, "CH4 — Spare", "sticker.relay_spare_address", "0"); r += 1
 
         ctk.CTkLabel(
             sec, text="Input Addresses", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
         ).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 0)); r += 1
-        self._add_field(sec, r, "Release (IN1)", "sticker.input_release_address", "0"); r += 1
-        self._add_field(sec, r, "Template Cycle (IN2)", "sticker.input_template_address", "1"); r += 1
-        self._add_field(sec, r, "Clamp Feedback (IN3)", "sticker.input_clamp_engaged_address", "2"); r += 1
+        self._add_field(sec, r, "IN0 — Sensor (Counter)", "counter.input_sensor_address", "0"); r += 1
+        self._add_field(sec, r, "IN1 — Release", "sticker.input_release_address", "0"); r += 1
+        self._add_field(sec, r, "IN2 — Template Cycle", "sticker.input_template_address", "1"); r += 1
+        self._add_field(sec, r, "IN3 — Clamp Feedback", "sticker.input_clamp_engaged_address", "2"); r += 1
 
         ctk.CTkLabel(
-            sec, text="Feedback & Timing", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
+            sec, text="Clamp Feedback", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
         ).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 0)); r += 1
         self._add_checkbox(sec, r, "Clamp Feedback Enabled", "sticker.clamp_feedback_enabled"); r += 1
         self._add_field(sec, r, "Feedback Timeout (ms)", "sticker.clamp_feedback_timeout_ms", "1500"); r += 1
         self._add_field(sec, r, "Feedback Fallback Delay (ms)", "sticker.clamp_feedback_fallback_delay_ms", "300"); r += 1
+
+        ctk.CTkLabel(
+            sec, text="PLC Timing", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
+        ).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 0)); r += 1
         self._add_field(sec, r, "Accept Pulse (ms)", "sticker.accept_pulse_ms", "1000"); r += 1
         self._add_field(sec, r, "Clamp Hold (ms)", "sticker.clamp_hold_ms", "2000"); r += 1
         self._add_field(sec, r, "Min Reclamp Interval (ms)", "sticker.min_reclamp_interval_ms", "3000"); r += 1
         self._add_field(sec, r, "Release Debounce (ms)", "sticker.release_input_debounce_ms", "200"); r += 1
 
-    # ── Counter Mode section ─────────────────────────────────────────
+    # ── Timer / Inspection Policy section ──────────────────────────────
 
-    def _build_counter_section(self, parent, row: int) -> None:
-        sec = self._section_frame(parent, row, "Counter Mode — I/O Addresses")
+    def _build_timing_section(self, parent, row: int) -> None:
+        sec = self._section_frame(parent, row, "Timer / Inspection Policy")
+
         r = 1
         ctk.CTkLabel(
-            sec,
-            text="Relay Coil Addresses (same as Sticker Mode)",
-            font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
+            sec, text="Operator Phase Pacing", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
         ).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(4, 0)); r += 1
-        self._add_field(sec, r, "Clamp (CH3)", "counter.relay_clamp_address", "3"); r += 1
-        self._add_field(sec, r, "OK Light+Buzzer (CH2)", "counter.relay_ok_light_buzzer_address", "2"); r += 1
-        self._add_field(sec, r, "Enji Buzzer (CH1)", "counter.relay_enji_buzzer_address", "1"); r += 1
-        self._add_field(sec, r, "Spare (CH4)", "counter.relay_spare_address", "0"); r += 1
+        self._add_field(sec, r, "Sticker Install Delay (ms)", "timing.phase_sticker_install_delay_ms", "0"); r += 1
+        self._add_field(sec, r, "Next Part Delay (ms)", "timing.phase_next_part_delay_ms", "2000"); r += 1
 
         ctk.CTkLabel(
-            sec, text="Input Addresses", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
+            sec, text="Stability Thresholds", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
         ).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 0)); r += 1
-        self._add_field(sec, r, "Sensor (IN0)", "counter.input_sensor_address", "0"); r += 1
-        self._add_field(sec, r, "Release (IN1)", "counter.input_release_address", "1"); r += 1
-        self._add_field(sec, r, "Template Cycle (IN2)", "counter.input_template_address", "2"); r += 1
-        self._add_field(sec, r, "Clamp Feedback (IN3)", "counter.input_clamp_engaged_address", "2"); r += 1
+        self._add_field(sec, r, "Accept — Stable Frames", "timing.accept_stable_frames", "1"); r += 1
+        self._add_field(sec, r, "Accept — Stable (ms)", "timing.accept_stable_ms", "200"); r += 1
+        self._add_field(sec, r, "Hard Reject — Stable Frames", "timing.hard_reject_stable_frames", "3"); r += 1
+        self._add_field(sec, r, "Hard Reject — Stable (ms)", "timing.hard_reject_stable_ms", "500"); r += 1
 
         ctk.CTkLabel(
-            sec, text="Feedback & Timing", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
+            sec, text="Commit Guard", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
         ).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 0)); r += 1
-        self._add_checkbox(sec, r, "Clamp Feedback Enabled", "counter.clamp_feedback_enabled"); r += 1
-        self._add_field(sec, r, "Feedback Timeout (ms)", "counter.clamp_feedback_timeout_ms", "1500"); r += 1
-        self._add_field(sec, r, "Feedback Fallback Delay (ms)", "counter.clamp_feedback_fallback_delay_ms", "300"); r += 1
-        self._add_field(sec, r, "Accept Pulse (ms)", "counter.accept_pulse_ms", "1000"); r += 1
-        self._add_field(sec, r, "Clamp Hold (ms)", "counter.clamp_hold_ms", "2000"); r += 1
-        self._add_field(sec, r, "Min Reclamp Interval (ms)", "counter.min_reclamp_interval_ms", "3000"); r += 1
-        self._add_field(sec, r, "Release Debounce (ms)", "counter.release_input_debounce_ms", "200"); r += 1
+        self._add_field(sec, r, "Commit Grace (ms)", "timing.commit_grace_ms", "1500"); r += 1
+        self._add_field(sec, r, "Reject Timeout (ms)", "timing.reject_timeout_ms", "15000"); r += 1
+
+        ctk.CTkLabel(
+            sec, text="Part Ready", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
+        ).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 0)); r += 1
+        self._add_field(sec, r, "Release Debounce (ms)", "timing.part_ready_release_ms", "300"); r += 1
+        self._add_field(sec, r, "Settle Default (ms)", "timing.part_ready_settle_ms_default", "0"); r += 1
+
+        ctk.CTkLabel(
+            sec, text="Cache & Holdover", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
+        ).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 0)); r += 1
+        self._add_field(sec, r, "Inference Cache Grace (ms)", "timing.inference_cache_grace_ms", "300"); r += 1
+        self._add_field(sec, r, "Accept Holdover (ms)", "timing.accept_holdover_ms", "2000"); r += 1
+        self._add_field(sec, r, "Inference Cache TTL (ms)", "timing.inference_cache_ttl_ms", "10000"); r += 1
+
+        ctk.CTkLabel(
+            sec, text="Safety & Session", font=("Segoe UI", 9, "bold"), text_color=TEXT_SECONDARY,
+        ).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 0)); r += 1
+        self._add_field(sec, r, "Session Idle Timeout (s)", "timing.session_idle_timeout_s", "300"); r += 1
+        self._add_field(sec, r, "Max Consecutive Rejects", "timing.max_consecutive_rejects", "0"); r += 1
 
     # ── Diagnostics section ──────────────────────────────────────────
 
@@ -296,7 +313,13 @@ class MachineSettingsTab:
                     var.set(str(value) if value is not None else "")
 
     def _collect_fields(self) -> dict:
-        """Collect field values into nested dict matching API schema."""
+        """Collect field values into nested dict matching API schema.
+
+        Since the UI shows a single I/O section but the backend model
+        stores separate sticker / counter sections, we duplicate the
+        shared I/O values into both sections so both flow strategies
+        (StickerFlow, CounterFlow) receive the same addresses.
+        """
         result: dict = {}
         for key, var in self._field_vars.items():
             parts = key.split(".")
@@ -304,7 +327,6 @@ class MachineSettingsTab:
             for part in parts[:-1]:
                 d = d.setdefault(part, {})
             val = var.get()
-            # Try to parse as int/float/bool
             if isinstance(var, tk.BooleanVar):
                 d[parts[-1]] = bool(val)
             else:
@@ -315,6 +337,25 @@ class MachineSettingsTab:
                         d[parts[-1]] = float(val)
                     except (ValueError, TypeError):
                         d[parts[-1]] = str(val)
+
+        # Mirror shared I/O values from sticker → counter so CounterFlow
+        # also sees the same coil addresses and timing.
+        _io_fields = (
+            "relay_clamp_address", "relay_ok_light_buzzer_address",
+            "relay_enji_buzzer_address", "relay_spare_address",
+            "input_release_address", "input_template_address",
+            "input_clamp_engaged_address",
+            "clamp_feedback_enabled", "clamp_feedback_timeout_ms",
+            "clamp_feedback_fallback_delay_ms",
+            "accept_pulse_ms", "clamp_hold_ms",
+            "min_reclamp_interval_ms", "release_input_debounce_ms",
+        )
+        sticker_section = result.get("sticker", {})
+        counter_section = result.setdefault("counter", {})
+        for _f in _io_fields:
+            if _f in sticker_section:
+                counter_section[_f] = sticker_section[_f]
+
         return result
 
     def _save_settings(self) -> None:

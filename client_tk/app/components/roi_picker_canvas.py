@@ -350,6 +350,8 @@ class RoiPickerCanvas(ctk.CTkFrame):
     # ------------------------------------------------------------------
 
     def redraw(self) -> None:
+        if not self.winfo_exists():
+            return
         cw = self._canvas.winfo_width()
         ch = self._canvas.winfo_height()
         if cw < 8:

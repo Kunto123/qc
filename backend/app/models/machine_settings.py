@@ -76,6 +76,36 @@ class CounterModeConfig:
 
 
 @dataclass(slots=True)
+class TimingConfig:
+    """Inspection timer / operator-phase / policy settings.
+
+    These used to be env-only (AppConfig).  Now stored in machine_settings.json
+    so operators can tune them without restarting the server.
+    """
+    # Operator phase pacing (non-blocking gates)
+    phase_next_part_delay_ms: int = 2000
+    phase_sticker_install_delay_ms: int = 0
+    # Stability thresholds before commit
+    accept_stable_frames: int = 1
+    accept_stable_ms: int = 200
+    hard_reject_stable_frames: int = 3
+    hard_reject_stable_ms: int = 500
+    # Commit guard
+    commit_grace_ms: int = 1500
+    reject_timeout_ms: int = 15000
+    # Part ready
+    part_ready_release_ms: int = 300
+    part_ready_settle_ms_default: int = 0
+    # Cache / holdover
+    inference_cache_grace_ms: int = 300
+    accept_holdover_ms: int = 2000
+    inference_cache_ttl_ms: int = 10000
+    # Safety / session
+    session_idle_timeout_s: int = 300
+    max_consecutive_rejects: int = 0
+
+
+@dataclass(slots=True)
 class MachineSettings:
     """Top-level machine settings — one record per machine."""
     version: int = 1
@@ -84,6 +114,7 @@ class MachineSettings:
     connection: PlcConnectionConfig = field(default_factory=PlcConnectionConfig)
     sticker: StickerModeConfig = field(default_factory=StickerModeConfig)
     counter: CounterModeConfig = field(default_factory=CounterModeConfig)
+    timing: TimingConfig = field(default_factory=TimingConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -93,6 +124,7 @@ class MachineSettings:
             "connection": asdict(self.connection),
             "sticker": asdict(self.sticker),
             "counter": asdict(self.counter),
+            "timing": asdict(self.timing),
         }
 
     @classmethod
@@ -109,6 +141,10 @@ class MachineSettings:
             k: v for k, v in (data.get("counter") or {}).items()
             if k in CounterModeConfig.__slots__
         })
+        timing = TimingConfig(**{
+            k: v for k, v in (data.get("timing") or {}).items()
+            if k in TimingConfig.__slots__
+        })
         return cls(
             version=int(data.get("version", 1)),
             seeded_from_env=bool(data.get("seeded_from_env", False)),
@@ -116,4 +152,5 @@ class MachineSettings:
             connection=conn,
             sticker=sticker,
             counter=counter,
+            timing=timing,
         )
