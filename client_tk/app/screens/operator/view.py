@@ -211,14 +211,26 @@ class OperatorScreen(ctk.CTkFrame):
             ctk.CTkButton(self.action_bar, text="Stop", command=self._stop_production, fg_color="#7f1d1d", hover_color="#991b1b", text_color="#fef2f2"),
         ]
 
+        self.active_preset_box = ctk.CTkFrame(
+            self.top_bar, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER
+        )
+        ctk.CTkLabel(
+            self.active_preset_box,
+            text="ACTIVE PRESET",
+            font=("Segoe UI", 9, "bold"),
+            text_color=TEXT_SECONDARY,
+            anchor="center",
+        ).pack(fill="x", padx=16, pady=(8, 0))
         self.active_preset_label = ctk.CTkLabel(
-            self.top_bar,
+            self.active_preset_box,
             textvariable=self.active_preset_var,
             font=("Segoe UI", 22, "bold"),
-            text_color=TEXT_PRIMARY,
+            text_color="#60a5fa",
             anchor="center",
             justify="center",
+            wraplength=420,
         )
+        self.active_preset_label.pack(fill="x", padx=16, pady=(0, 8))
 
         self.template_box = ctk.CTkFrame(self.top_bar, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
         self.template_box.grid_columnconfigure(0, weight=1)
@@ -473,7 +485,7 @@ class OperatorScreen(ctk.CTkFrame):
 
         if compact:
             self.action_bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-            self.active_preset_label.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+            self.active_preset_box.grid(row=1, column=0, sticky="ew", pady=(0, 8))
             self.template_box.grid(row=2, column=0, sticky="ew")
             self.template_box.columnconfigure(0, weight=1)
             self.template_box.columnconfigure(1, weight=0)
@@ -483,7 +495,7 @@ class OperatorScreen(ctk.CTkFrame):
                 button.grid(row=row, column=column, sticky="ew", padx=3, pady=3)
         else:
             self.action_bar.grid(row=0, column=0, sticky="w")
-            self.active_preset_label.grid(row=0, column=1, sticky="ew", padx=12)
+            self.active_preset_box.grid(row=0, column=1, sticky="ew", padx=12)
             self.template_box.grid(row=0, column=2, sticky="e")
             for index, button in enumerate(self.action_buttons):
                 button.grid(row=0, column=index, sticky="w", padx=(0 if index == 0 else 6, 0))
