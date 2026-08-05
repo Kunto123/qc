@@ -179,6 +179,7 @@ class OperatorScreen(ctk.CTkFrame):
 
         self.operator_context = tk.StringVar(value=f"Operator: {self.state.user.get('username') if self.state.user else '-'}")
         self.template_context = tk.StringVar(value="Template: -")
+        self.active_preset_var = tk.StringVar(value="-")
         self.info_var = tk.StringVar(value="Idle. Pilih template atau deployment, lalu start camera.")
 
         self.columnconfigure(0, weight=1)
@@ -209,6 +210,15 @@ class OperatorScreen(ctk.CTkFrame):
             ctk.CTkButton(self.action_bar, text="Start", command=self._start_production, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=TEXT_ON_ACCENT),
             ctk.CTkButton(self.action_bar, text="Stop", command=self._stop_production, fg_color="#7f1d1d", hover_color="#991b1b", text_color="#fef2f2"),
         ]
+
+        self.active_preset_label = ctk.CTkLabel(
+            self.top_bar,
+            textvariable=self.active_preset_var,
+            font=("Segoe UI", 22, "bold"),
+            text_color=TEXT_PRIMARY,
+            anchor="center",
+            justify="center",
+        )
 
         self.template_box = ctk.CTkFrame(self.top_bar, fg_color=PANEL_BG, corner_radius=14, border_width=1, border_color=BORDER)
         self.template_box.grid_columnconfigure(0, weight=1)
@@ -457,9 +467,14 @@ class OperatorScreen(ctk.CTkFrame):
         self.action_bar.rowconfigure(0, weight=1)
         self.action_bar.rowconfigure(1, weight=1)
 
+        self.top_bar.columnconfigure(0, weight=1 if compact else 0)
+        self.top_bar.columnconfigure(1, weight=1)
+        self.top_bar.columnconfigure(2, weight=0)
+
         if compact:
             self.action_bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-            self.template_box.grid(row=1, column=0, sticky="ew")
+            self.active_preset_label.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+            self.template_box.grid(row=2, column=0, sticky="ew")
             self.template_box.columnconfigure(0, weight=1)
             self.template_box.columnconfigure(1, weight=0)
             for index, button in enumerate(self.action_buttons):
@@ -468,7 +483,8 @@ class OperatorScreen(ctk.CTkFrame):
                 button.grid(row=row, column=column, sticky="ew", padx=3, pady=3)
         else:
             self.action_bar.grid(row=0, column=0, sticky="w")
-            self.template_box.grid(row=0, column=1, sticky="e")
+            self.active_preset_label.grid(row=0, column=1, sticky="ew", padx=12)
+            self.template_box.grid(row=0, column=2, sticky="e")
             for index, button in enumerate(self.action_buttons):
                 button.grid(row=0, column=index, sticky="w", padx=(0 if index == 0 else 6, 0))
 
@@ -1734,6 +1750,7 @@ class OperatorScreen(ctk.CTkFrame):
         )
         template_version = self.template_version_value.get().strip() or (self.state.active_session or {}).get("template_version_id") or "-"
         self.template_context.set(f"Template: {template_name} v{template_version}")
+        self.active_preset_var.set(template_name)
         self._sync_template_selector()
 
     def _update_status_badges(self, payload: dict | None = None) -> None:

@@ -4,8 +4,6 @@ import base64
 from collections import OrderedDict
 import copy
 import datetime
-import secrets
-import string
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
@@ -72,11 +70,6 @@ def _float_or_default(value: object, default: float) -> float:
         return float(str(value).strip())
     except (TypeError, ValueError):
         return default
-
-
-def _random_password(length: int = 24) -> str:
-    alphabet = string.ascii_letters + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(max(16, int(length))))
 
 
 class CompactStatCard(ctk.CTkFrame):
@@ -204,6 +197,7 @@ class AdminScreen(ctk.CTkFrame):
         self.sticker_roi_h_var = tk.StringVar(value="0.6")
 
         self.operator_username_var = tk.StringVar()
+        self.operator_password_var = tk.StringVar()
         self.operator_role_var = tk.StringVar(value="operator")
         self.operator_edit_id: int | None = None
         self.operator_edit_username_var = tk.StringVar()
@@ -676,8 +670,9 @@ class AdminScreen(ctk.CTkFrame):
         self.operator_edit_username_var.set(user.get("username", ""))
         self.operator_edit_role_var.set(str(user.get("role") or "operator").strip().lower())
         self.operator_form_title.configure(text=f"Edit User #{user_id}")
-        self.operator_form_hint.configure(text="Change the role or delete this user.")
+        self.operator_form_hint.configure(text="Change the role, optionally reset password, or delete this user.")
         self.operator_username_var.set(user.get("username", ""))
+        self.operator_password_var.set("")
         self.operator_role_var.set(str(user.get("role") or "operator").strip().lower())
         self.operator_save_btn.configure(text="Save Changes")
         self.operator_cancel_btn.configure(state="normal")
@@ -687,6 +682,7 @@ class AdminScreen(ctk.CTkFrame):
         """Reset the form back to create mode."""
         self.operator_edit_id = None
         self.operator_username_var.set("")
+        self.operator_password_var.set("")
         self.operator_role_var.set("operator")
         self.operator_form_title.configure(text="Add User")
         self.operator_form_hint.configure(text="Create a new user, then bind RFID below.")
@@ -748,31 +744,41 @@ class AdminScreen(ctk.CTkFrame):
         self.refresh_operators()
 
     def _on_save_user(self) -> None:
-        """Create new user or update existing user's role."""
+        """Create new user or update existing user's role/password."""
         username = self.operator_username_var.get().strip()
         if not username:
             messagebox.showerror("Users", "Username is required.")
             return
+        password = self.operator_password_var.get().strip()
+        if password and len(password) < 6:
+            messagebox.showerror("Users", "Password must be at least 6 characters.")
+            return
 
         if self.operator_edit_id is not None:
-            # Edit mode — update role
+            # Edit mode — update role, and optionally reset password
             user_id = self.operator_edit_id
             new_role = self.operator_role_var.get().strip()
             try:
                 self.api.change_user_role(user_id, new_role)
+                if password:
+                    self.api.reset_user_password(user_id, password)
             except Exception as exc:
                 messagebox.showerror("Users", str(exc))
                 return
             self._on_cancel_edit()
             self.refresh_operators()
-            self._set_status(f"User #{user_id} role changed to {new_role}.")
+            suffix = " and password reset" if password else ""
+            self._set_status(f"User #{user_id} role changed to {new_role}{suffix}.")
         else:
-            # Create mode — no RFID here, user will bind below
+            # Create mode — password required, no RFID here, user will bind below
+            if not password:
+                messagebox.showerror("Users", "Password is required.")
+                return
             role = self.operator_role_var.get().strip()
             try:
                 created = self.api.create_user({
                     "username": username,
-                    "password": _random_password(),
+                    "password": password,
                     "role": role,
                 })
                 user_id = int(created.get("id") or 0)
@@ -782,6 +788,7 @@ class AdminScreen(ctk.CTkFrame):
                 messagebox.showerror("Users", str(exc))
                 return
             self.operator_username_var.set("")
+            self.operator_password_var.set("")
             self.operator_role_var.set("operator")
             self.refresh_operators()
             # Auto-select the newly created user in the table and focus RFID entry
