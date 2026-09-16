@@ -13,7 +13,7 @@ from typing import Any
 
 from flask import Blueprint, g, jsonify, request
 
-from backend.app.core.container import machine_settings_repo, plc_worker
+from backend.app.core.container import inspection_session_service, machine_settings_repo, plc_worker
 from backend.app.core.http import require_roles
 from backend.app.models.machine_settings import MachineSettings
 from shared.contracts.enums import UserRole
@@ -53,8 +53,21 @@ def update_machine_settings():
         try:
             plc_worker.set_validator_mode("sticker", new_settings)
             logger.info("[machine-settings] PLC worker strategy refreshed")
+            # Also update PLC worker guards from new settings
+            plc_worker.configure_guards(
+                min_reclamp_interval_ms=new_settings.sticker.min_reclamp_interval_ms,
+                release_input_debounce_ms=new_settings.sticker.release_input_debounce_ms,
+            )
         except Exception as exc:
             logger.warning("[machine-settings] failed to refresh PLC worker strategy: %s", exc)
+
+    # Propagate timing settings to inspection session service (runtime update)
+    if inspection_session_service is not None:
+        try:
+            inspection_session_service.update_timing_settings(payload)
+            logger.info("[machine-settings] timing settings pushed to inspection session service")
+        except Exception as exc:
+            logger.warning("[machine-settings] failed to push timing settings: %s", exc)
 
     return jsonify(new_settings.to_dict())
 

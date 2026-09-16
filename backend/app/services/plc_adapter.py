@@ -370,9 +370,14 @@ class FXComputerLinkPlcAdapter(PlcAdapter):
             except Exception as exc:
                 consecutive_fail += 1
                 logger.warning(
-                    "[plc-fx] read_bit %s failed (%d/%d): %s",
+                    "[plc-fx] read_bit %s failed (%d/%d): %r",
                     fx_label, consecutive_fail, max_bit_failures, exc,
                 )
+                # If the very first read fails and we reset, don't bother
+                # reading the rest — likely a device-level failure.
+                if consecutive_fail == 1 and i == address:
+                    # Immediately stop trying more bits — the transport is dead
+                    consecutive_fail = max_bit_failures
                 if consecutive_fail >= max_bit_failures:
                     # Item 1: reset connection state so worker's connect() actually reopens
                     self._connected = False

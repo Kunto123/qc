@@ -131,6 +131,13 @@ class TemplatesRepository(JsonRepository):
         items: list[dict[str, Any]] = []
         for template in self.list_templates():
             version = self.get_version(template["current_version_id"])
+            # Extract mode from version template data for display
+            _mode = "sticker"
+            _validator_mode = "ml_detection"
+            if version:
+                _vt = version.get("template") or {}
+                _mode = str(_vt.get("mode") or "sticker")
+                _validator_mode = str(_vt.get("sticker", {}).get("validator_mode") or "ml_detection")
             items.append(
                 {
                     "id": template["id"],
@@ -142,6 +149,8 @@ class TemplatesRepository(JsonRepository):
                     "updated_at": template.get("updated_at"),
                     "version_id": template.get("current_version_id"),
                     "version_number": version.get("version_number") if version else None,
+                    "mode": _mode,
+                    "sticker": {"validator_mode": _validator_mode},
                 }
             )
         return items

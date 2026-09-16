@@ -106,8 +106,8 @@ class LoginFrame(ctk.CTkFrame):
         ctk.CTkLabel(card, text="RFID Card", text_color=TEXT_PRIMARY).grid(row=6, column=0, sticky="w", padx=24, pady=8)
 
         self.base_url_var = tk.StringVar(value=DEFAULT_SERVER_URL)
-        self.username_var = tk.StringVar(value="operator")
-        self.password_var = tk.StringVar(value="operator123")
+        self.username_var = tk.StringVar()
+        self.password_var = tk.StringVar()
         self.rfid_uid_var = tk.StringVar()
 
         self.base_url_entry = ctk.CTkEntry(card, textvariable=self.base_url_var, width=420, fg_color="#0f1c2b", border_color="#26445f", text_color=TEXT_PRIMARY)

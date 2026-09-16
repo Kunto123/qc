@@ -115,87 +115,12 @@ class StickerInferenceFilterTest(unittest.TestCase):
         self.assertTrue(result["match_expected"])
         self.assertEqual(result["canonical_text"], "MODEL NAME - ADV160A")
 
-    def test_anchor_ocr_payload_from_passthrough_detection(self) -> None:
-        image = np.zeros((100, 100, 3), dtype=np.uint8)
-        vision = VisionConfig(
-            ocr_engine="passthrough",
-            text_anchor_class="text_anchor",
-            center_dot_class="center_dot",
-        )
-        sticker = StickerRule(
-            part_name="P1",
-            expected_class="K0W-HB0",
-            expected_dot_x=0.5,
-            expected_dot_y=0.5,
-        )
-        payload = {
-            "backend": "patched",
-            "detections": [
-                {
-                    "label": "text_anchor",
-                    "confidence": 0.92,
-                    "ocr_text": "K0W HB0",
-                    "ocr_confidence": 0.88,
-                    "position": {"x1": 10.0, "y1": 20.0, "x2": 50.0, "y2": 40.0},
-                },
-                {
-                    "label": "center_dot",
-                    "confidence": 0.95,
-                    "position": {"x1": 48.0, "y1": 48.0, "x2": 52.0, "y2": 52.0},
-                },
-            ],
-        }
-
-        result = self.service._augment_with_anchor_ocr(
-            payload,
-            image,
-            vision,
-            expected_class="K0W-HB0",
-            sticker_rule=sticker,
-        )
-
-        self.assertEqual(result["anchor"]["status"], "ok")
-        self.assertEqual(result["ocr"]["status"], "ok")
-        self.assertTrue(result["ocr"]["match_expected"])
-        self.assertEqual(result["geometry"]["anchor_offset"], {"x": 0.0, "y": 0.0, "source": "center_dot"})
-        self.assertIn("ocr_ms", result["timings"])
-
-    def test_sticker_only_payload_uses_bbox_center_no_dot_and_unique_code(self) -> None:
-        image = np.zeros((100, 100, 3), dtype=np.uint8)
-        vision = VisionConfig(ocr_engine="passthrough")
-        sticker = StickerRule(
-            part_name="P1",
-            expected_class="ADV",
-            validator_mode="sticker_only",
-            use_ocr=True,
-            ocr_expected_code="ADV160A",
-        )
-        payload = {
-            "backend": "patched",
-            "detections": [
-                {
-                    "label": "ADV",
-                    "confidence": 0.92,
-                    "ocr_text": "MODEL NAME - ADV160A",
-                    "ocr_confidence": 0.88,
-                    "position": {"x1": 20.0, "y1": 30.0, "x2": 80.0, "y2": 70.0},
-                },
-            ],
-        }
-
-        result = self.service._augment_with_ocr_only(
-            payload,
-            image,
-            vision,
-            expected_class="ADV",
-            sticker_rule=sticker,
-        )
-
-        self.assertEqual(result["anchor"]["status"], "ok")
-        self.assertIsNone(result["anchor"]["center_dot"])
-        self.assertEqual(result["geometry"]["anchor_offset"], {"x": 0.0, "y": 0.0, "source": "bbox_center"})
-        self.assertEqual(result["unique_code"], "ADV160A")
-        self.assertTrue(result["ocr"]["match_expected"])
+    # NOTE (FASE 0): OCR-based sticker validation was removed by design. The two
+    # tests that exercised _augment_with_anchor_ocr / _augment_with_ocr_only (using
+    # the removed ocr_engine / use_ocr / ocr_expected_code / expected_dot_x/y fields)
+    # were retired. The OCR text-normalization utility tests above
+    # (_normalize_ocr_text / _parse_unique_code / flip-fallback) are kept because
+    # they test helpers that still exist. See TESTING.md + HANDOFF.md R5.
 
 
 if __name__ == "__main__":

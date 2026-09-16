@@ -98,7 +98,19 @@ class OperatorsTab:
         )
         a.operator_form_hint.grid(row=1, column=0, columnspan=2, sticky="w", padx=12, pady=(2, 10))
         a._entry(form, 2, 0, "Username", a.operator_username_var, columns=2)
-        ttk.Label(form, text="Role").grid(row=3, column=0, sticky="w", padx=(12, 8), pady=5)
+        ttk.Label(form, text="Password").grid(row=3, column=0, sticky="w", padx=(12, 8), pady=5)
+        a.operator_password_entry = ttk.Entry(form, textvariable=a.operator_password_var, show="*")
+        a.operator_password_entry.grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=5)
+        a.operator_password_hint = ctk.CTkLabel(
+            form,
+            text="Required for new users (min 6 chars). Leave blank when editing to keep current password.",
+            text_color=TEXT_SECONDARY,
+            font=("Segoe UI", 9),
+            wraplength=420,
+            justify="left",
+        )
+        a.operator_password_hint.grid(row=4, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 6))
+        ttk.Label(form, text="Role").grid(row=5, column=0, sticky="w", padx=(12, 8), pady=5)
         role_combo = ttk.Combobox(
             form,
             textvariable=a.operator_role_var,
@@ -106,9 +118,9 @@ class OperatorsTab:
             state="readonly",
             width=18,
         )
-        role_combo.grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=5)
+        role_combo.grid(row=5, column=1, sticky="ew", padx=(0, 12), pady=5)
         btn_row = ctk.CTkFrame(form, fg_color="transparent")
-        btn_row.grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 10))
+        btn_row.grid(row=6, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 10))
         a.operator_save_btn = ctk.CTkButton(
             btn_row,
             text="Create User",
@@ -141,7 +153,7 @@ class OperatorsTab:
             height=32,
             corner_radius=6,
         )
-        a.operator_delete_btn.grid(row=5, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 10))
+        a.operator_delete_btn.grid(row=7, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 10))
 
     def _build_bind_section(self, a, parent) -> None:
         bind_frame = ctk.CTkFrame(parent, fg_color=PANEL_BG, corner_radius=8, border_width=1, border_color=BORDER)

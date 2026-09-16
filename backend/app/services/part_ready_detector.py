@@ -190,16 +190,18 @@ def evaluate_mean_std_threshold(frame, config) -> dict[str, Any]:
         # Low mean + high std = black part with white sticker (high contrast)
         part_ready = True
         condition = "sticker"
-        # Ratio: normalized confidence (0-1), higher std above threshold = higher confidence
+        # Confidence: 0.5 at std=std_max boundary, 1.0 at ~2x threshold.
+        # This ensures the sticker operating point has confidence >= 0.5,
+        # which is the default min_match_ratio threshold.
         match_ratio = min(1.0, std_val / (std_max * 2.0))
     else:
         # Low mean + low std = uniform black part
         part_ready = True
         condition = "part_normal"
-        # Ratio: confidence based on how far below thresholds (closer to 0 = more confident)
-        mean_ratio = max(0.0, 1.0 - (mean_val / mean_max))
-        std_ratio = max(0.0, 1.0 - (std_val / std_max))
-        match_ratio = (mean_ratio + std_ratio) / 2.0
+        # Confidence: how far below both thresholds (0 at boundary, 1 at perfect)
+        mean_conf = 1.0 - min(1.0, mean_val / mean_max)
+        std_conf = 1.0 - min(1.0, std_val / std_max)
+        match_ratio = (mean_conf + std_conf) / 2.0
 
     # min_match_ratio: minimum confidence (0-1) required to consider part ready
     # Default 0.5 means at least 50% confidence needed

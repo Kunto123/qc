@@ -40,20 +40,13 @@ def _build_strategy(
     num_channels: int = 4,
     dry_run: bool = False,
 ) -> PlcFlowStrategy:
-    """Factory: select strategy based on validator_mode.
-
-    Item 4: CounterFlow is a stub — fail-loud when used with live PLC.
-    Only allowed in dry-run mode.
-    """
+    """Factory: select strategy based on validator_mode."""
     mode = (validator_mode or "sticker").strip().lower()
     if mode == "component_count":
-        if not dry_run:
-            raise RuntimeError(
-                "component_count mode requires a PLC flow strategy (CounterFlow), "
-                "which is currently a stub. Either enable dry_run or implement "
-                "CounterFlow in services/counter_flow.py."
-            )
         return CounterFlow(adapter, settings.counter, num_channels)
+    if mode == "defect":
+        from backend.app.services.defect_flow import DefectFlow
+        return DefectFlow(adapter, settings.sticker, num_channels)
     # Default: sticker mode
     return StickerFlow(adapter, settings.sticker, num_channels)
 
@@ -129,6 +122,11 @@ class PlcWorker:
         self._last_poll_ok_at: float = 0.0
         self._last_write_ok_at: float = 0.0
 
+        # Reconnect backoff — prevents tight reconnect loop when device is dead
+        self._reconnect_failures: int = 0
+        self._reconnect_backoff_until: float = 0.0
+        self._max_reconnect_backoff_s: float = 30.0  # cap at 30s
+
         # Callbacks
         self._template_cycle_callback = None
         self._on_state_change_callback = None
@@ -159,13 +157,6 @@ class PlcWorker:
             # Legacy fallback — build from constructor args
             from backend.app.models.machine_settings import StickerModeConfig, CounterModeConfig
             if mode == "component_count":
-                # Item 4: CounterFlow is a stub — fail-loud on live PLC (allow only dry-run).
-                if not self._dry_run:
-                    raise RuntimeError(
-                        "component_count mode requires a PLC flow strategy (CounterFlow), "
-                        "which is currently a stub. Either enable dry_run or implement "
-                        "CounterFlow in services/counter_flow.py."
-                    )
                 cfg = CounterModeConfig(
                     relay_clamp_address=self._relay_clamp,
                     relay_ok_light_buzzer_address=self._relay_ok_light_buzzer,
@@ -187,7 +178,11 @@ class PlcWorker:
                     clamp_feedback_enabled=self._clamp_feedback_enabled,
                     accept_pulse_ms=self._accept_pulse_ms,
                 )
-                self._strategy = StickerFlow(self._adapter, cfg, self._num_channels)
+                if mode == "defect":
+                    from backend.app.services.defect_flow import DefectFlow
+                    self._strategy = DefectFlow(self._adapter, cfg, self._num_channels)
+                else:
+                    self._strategy = StickerFlow(self._adapter, cfg, self._num_channels)
 
     # ── Public API (unchanged signatures) ───────────────────────────
 
@@ -567,10 +562,23 @@ class PlcWorker:
             self._cmd_event.clear()
 
     def _poll_inputs(self) -> None:
+        # Reconnect backoff: skip polling if we're in backoff window
+        if self._reconnect_backoff_until > time.time():
+            return
         try:
             inputs = self._adapter.read_inputs(address=0, count=_INPUT_READ_COUNT)
         except Exception as exc:
-            logger.warning("[plc-worker] read_inputs error: %s — attempting reconnect", exc)
+            self._reconnect_failures += 1
+            # Exponential backoff: 2^failures seconds, capped at _max_reconnect_backoff_s
+            _delay = min(self._max_reconnect_backoff_s, 2 ** self._reconnect_failures)
+            # Minimum 2s floor to avoid rapid retries on sustained failures
+            _delay = max(2.0, _delay)
+            self._reconnect_backoff_until = time.time() + _delay
+            logger.warning(
+                "[plc-worker] read_inputs error (%d consecutive): %s — "
+                "reconnect backoff %.0fs",
+                self._reconnect_failures, exc, _delay,
+            )
             try:
                 # Force full disconnect first so the adapter actually reopens
                 # the serial port (connect() early-returns if _connected=True).
@@ -583,6 +591,9 @@ class PlcWorker:
             except Exception as reconnect_exc:
                 logger.error("[plc-worker] reconnect failed: %s", reconnect_exc)
             return
+        # Successful poll — reset backoff counter
+        self._reconnect_failures = 0
+        self._reconnect_backoff_until = 0.0
         if not inputs or len(inputs) < 2:
             return
 
