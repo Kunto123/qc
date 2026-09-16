@@ -1078,8 +1078,8 @@ class InspectionSessionService:
         inference_ms = 0.0
         stage_timings: dict[str, Any] = {}
 
-        # ── Async background inference (frame skip + TTL cache) ──
-        # Submit inference every 3rd frame when not busy.
+        # ── Async background inference (TTL cache) ──
+        # Submit inference whenever the previous submission isn't still running.
         # Use cached result if fresh (<500ms), otherwise compose without bbox.
         if _effective_pr_ready:
             state.inference_frame_counter += 1
@@ -1097,10 +1097,7 @@ class InspectionSessionService:
                 state.inference_result_ts = 0.0
                 state.inference_thread_busy = False
                 state.inference_submit_at = 0.0
-            _should_submit = (
-                state.inference_frame_counter % 1 == 0
-                and not state.inference_thread_busy
-            )
+            _should_submit = not state.inference_thread_busy
             if _should_submit:
                 state.inference_thread_busy = True
                 state.inference_submit_at = monotonic()

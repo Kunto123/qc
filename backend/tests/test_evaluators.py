@@ -206,11 +206,9 @@ class DefectEvaluatorTest(unittest.TestCase):
 
     def test_degenerate_geometry_stays_json_safe(self) -> None:
         # A degenerate ROI (zero fractional size, off-frame origin) must not
-        # crash and must produce a JSON-safe Decision. NOTE: _parse_geometry
-        # clamps w/h to >=1px (max(1,...)), so the literal w<=0 "empty crop"
-        # branch in DefectEvaluator is effectively unreachable via geometry —
-        # recorded as a code-smell in HANDOFF.md. This test locks in JSON safety
-        # of whatever branch is actually taken.
+        # crash and must produce a JSON-safe Decision. _parse_geometry clamps
+        # w/h to >=1px (max(1,...)), so this always scores a 1x1 crop rather
+        # than hitting an "empty crop" branch (removed — it was unreachable).
         crit = {
             "rois": [{"name": "R", "geometry": {"x": 1.0, "y": 1.0, "w": 0.0, "h": 0.0}, "threshold": 0.5}],
             "inference_mode": "per_roi_crop",

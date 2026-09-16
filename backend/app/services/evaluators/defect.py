@@ -170,18 +170,8 @@ class DefectEvaluator(ModeEvaluator):
         for i, roi in enumerate(rois):
             name = roi.get("name", f"ROI {i+1}")
             geom = roi.get("geometry", {})
+            # _parse_geometry clamps w/h to >=1px, so w<=0/h<=0 can't happen here.
             x, y, w, h = _parse_geometry(geom, fw, fh)
-
-            if w <= 0 or h <= 0:
-                roi_results.append({
-                    "name": name, "ok": False,
-                    "score": None, "threshold": roi.get("threshold", 0.5),
-                    "error": "empty crop", "roi": geom,
-                })
-                all_ok = False
-                if not reject_reason:
-                    reject_reason = "ANOMALY_DETECTED"
-                continue
 
             # Determine if this ROI uses per_roi_crop (override_model or whole_part failed)
             use_per_roi = (

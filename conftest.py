@@ -40,7 +40,7 @@ def _seed_default_sticker_model_env() -> None:
     """
     if os.environ.get("QC_SUITE_DEFAULT_STICKER_MODEL_PATH", "").strip():
         return
-    for candidate in ("yolov5su.pt", "yolo11n.pt", "yolo11n.pt"):
+    for candidate in ("yolov5su.pt", "yolo11n.pt"):
         weight = PROJECT_ROOT / candidate
         if weight.exists():
             os.environ["QC_SUITE_DEFAULT_STICKER_MODEL_PATH"] = str(weight)

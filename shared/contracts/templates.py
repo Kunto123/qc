@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-# FIX_VERSION_MARKER: 2026-06-24-v3 — this line confirms the fix is loaded. If you see this in error, new code is running.
 from typing import Any
 
 
@@ -339,10 +338,7 @@ def _parse_component_rois(payload: dict[str, Any]) -> list[ComponentRoiRule]:
 
 
 def template_from_dict(payload: dict[str, Any]) -> InspectionTemplate:
-    """Parse template dict. Accepts both legacy flat format and new criteria format.
-
-    Version: 2026-06-24-fix-v4-THIS-IS-THE-NEW-CODE
-    """
+    """Parse template dict. Accepts both legacy flat format and new criteria format."""
     part_ready_roi_payload = _pick_roi_payload(payload, "part_ready_roi", "roi", "sticker_roi")
     sticker_roi_payload = _pick_roi_payload(payload, "sticker_roi", "roi", "part_ready_roi")
     # Strip unknown keys that RoiGeometry doesn't accept (e.g. 'height' from old DB data)
